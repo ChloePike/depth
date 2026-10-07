@@ -36,6 +36,8 @@ pub struct Account {
     pub wallets_loading: std::collections::HashSet<Exchange>,
     /// active TP/SL (whole-position and partial) across venues, pushed by the private streams
     pub tpsl: Vec<trade::tpsl::TpSl>,
+    /// client-side execution jobs (TWAP), newest last
+    pub algos: Vec<AlgoJob>,
     /// order / trade / closed-PnL history per venue with fetch time; loaded on demand
     pub history: HashMap<Exchange, (trade::History, i64)>,
     pub history_loading: std::collections::HashSet<Exchange>,
@@ -64,6 +66,53 @@ impl Account {
 pub struct Ticker { pub base: String, pub last: f64, pub chg_pct: f64, pub quote_vol: f64,
     /// 24h high / low from the first venue listing it; base volume summed across venues
     pub high: f64, pub low: f64, pub base_vol: f64 }
+
+/// A client-side execution job (TWAP) as shown in the Algos tab.
+#[derive(Clone, Debug)]
+pub struct AlgoJob {
+    pub id: u64, pub ex: Exchange, pub symbol: String, pub buy: bool, pub close: bool,
+    pub total: f64, pub sent: f64, pub slices: usize, pub done: usize,
+    pub started_ms: i64, pub end_ms: i64, pub status: String, pub cancelled: bool,
+}
+
+fn set_status(account: &Arc<Mutex<Account>>, id: u64, s: &str) {
+    if let Some(j) = account.lock().unwrap().algos.iter_mut().find(|j| j.id == id) { if j.status != s { j.status = s.into(); } }
+}
+
+/// Place one order with the account's keys, cached rules and position mode; logs the outcome in
+/// the order log and tracks the round trip. Returns the venue's order id.
+async fn place_logged(account: &Arc<Mutex<Account>>, ex: Exchange, req: &OrderReq, ref_px: f64) -> Option<String> {
+    let k = account.lock().unwrap().keys.get(&ex).cloned()?;
+    let key = (ex, req.symbol.clone());
+    let cached = account.lock().unwrap().rules.get(&key).copied();
+    let rules = match cached { Some(r) => Ok(r), None => trade::rules(ex, &req.symbol).await };
+    let cached_mode = account.lock().unwrap().modes.get(&key).copied().flatten();
+    let mode = match cached_mode { Some(m) => Ok(m), None => trade::mode(ex, &k, &req.symbol).await };
+    let t0 = std::time::Instant::now();
+    let res = match (rules, mode) {
+        (Ok(r), Ok(m)) => {
+            {
+                let mut a = account.lock().unwrap();
+                a.rules.insert(key.clone(), r);
+                a.modes.insert(key, Some(m));
+            }
+            trade::place(ex, &k, req, &r, ref_px, m).await
+        }
+        (Err(e), _) | (_, Err(e)) => Err(e),
+    };
+    let rtt = t0.elapsed().as_secs_f64() * 1e3;
+    let mut a = account.lock().unwrap();
+    let what = format!("{ex:?} {} {} {} {} {}", req.symbol, if req.close { "close" } else { "open" }, if req.pos == terminal_one::Side::Buy { "long" } else { "short" }, req.qty, req.kind.label());
+    match res {
+        Ok(id) => {
+            let r = a.order_rtt.entry(ex).or_insert(rtt);
+            *r += (rtt - *r) * 0.3;
+            a.note(format!("OK {what} id {id} ({rtt:.0} ms)"), true);
+            Some(id)
+        }
+        Err(e) => { a.note(format!("FAIL {what}: {e:#}"), false); None }
+    }
+}
 
 /// Funding of one venue's perp: rate per settlement, settlement interval (hours), next settlement (ms).
 #[derive(Clone, Copy, Debug, Default)]
@@ -404,41 +453,87 @@ impl Engine {
     pub fn submit(&self, ex: Exchange, req: OrderReq, ref_px: f64, ctx: &eframe::egui::Context) {
         let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
         rt.spawn(async move {
-            let Some(k) = account.lock().unwrap().keys.get(&ex).cloned() else { return };
-            let key = (ex, req.symbol.clone());
-            let cached = account.lock().unwrap().rules.get(&key).copied();
-            let rules = match cached { Some(r) => Ok(r), None => trade::rules(ex, &req.symbol).await };
-            let cached_mode = account.lock().unwrap().modes.get(&key).copied().flatten();
-            let mode = match cached_mode { Some(m) => Ok(m), None => trade::mode(ex, &k, &req.symbol).await };
-            let t0 = std::time::Instant::now();
-            let res = match (rules, mode) {
-                (Ok(r), Ok(m)) => {
-                    {
-                        let mut a = account.lock().unwrap();
-                        a.rules.insert(key.clone(), r);
-                        a.modes.insert(key, Some(m));
-                    }
-                    trade::place(ex, &k, &req, &r, ref_px, m).await
-                }
-                (Err(e), _) | (_, Err(e)) => Err(e),
-            };
-            let rtt = t0.elapsed().as_secs_f64() * 1e3;
-            {
-                let mut a = account.lock().unwrap();
-                let what = format!("{ex:?} {} {} {} {} {}", req.symbol, if req.close { "close" } else { "open" }, if req.pos == terminal_one::Side::Buy { "long" } else { "short" }, req.qty,
-                    match req.kind { trade::Kind::Market => "MKT".to_string(), trade::Kind::Limit { price, .. } => format!("@ {price}"),
-                        trade::Kind::Bbo { queue, level } => format!("BBO {} {level}", if queue { "queue" } else { "opponent" }) });
-                match res {
-                    Ok(id) => {
-                        let r = a.order_rtt.entry(ex).or_insert(rtt);
-                        *r += (rtt - *r) * 0.3;
-                        a.note(format!("OK {what} id {id} ({rtt:.0} ms)"), true);
-                    }
-                    Err(e) => a.note(format!("FAIL {what}: {e:#}"), false),
-                }
+            place_logged(&account, ex, &req, ref_px).await;
+            ctx.request_repaint();
+        });
+    }
+
+    /// Scaled (ladder) order: `n` limit orders from `from` to `to`, sizes tilted by `skew`.
+    pub fn submit_scaled(&self, ex: Exchange, base: OrderReq, from: f64, to: f64, n: usize, skew: f64, post_only: bool, ctx: &eframe::egui::Context) -> Result<usize, String> {
+        let rules = self.account.lock().unwrap().rules.get(&(ex, base.symbol.clone())).copied().ok_or("venue rules not loaded yet: try again in a second")?;
+        let legs = terminal_one::algo::scaled(base.qty, from, to, n, skew, rules.tick, rules.step);
+        if legs.is_empty() { return Err("nothing to place: check size, prices and count".into()); }
+        let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return Err("not connected".into()) };
+        let count = legs.len();
+        let tif = if post_only { trade::Tif::PostOnly } else { trade::Tif::Gtc };
+        rt.spawn(async move {
+            // one after another: venues rate-limit bursts of new orders per second
+            for (px, q) in legs {
+                let req = OrderReq { kind: trade::Kind::Limit { price: px, tif }, qty: q, client_id: None, ..base.clone() };
+                place_logged(&account, ex, &req, px).await;
+                tokio::time::sleep(Duration::from_millis(150)).await;
             }
             ctx.request_repaint();
         });
+        Ok(count)
+    }
+
+    /// TWAP: `total` in `slices` IOC children spread evenly over `minutes`, each priced off the
+    /// venue's own best price with at most `max_slip_bps` slippage and never beyond `limit`. A
+    /// slice whose price is out of reach, or whose venue book is stale, waits and retries. Runs on
+    /// the account runtime (survives pair switches); stops on cancel or when the app quits.
+    /// ponytail: children are fire-and-forget IOC; the unfilled part of a child is not re-queued
+    /// (fills come back through the order pushes), and jobs do not survive a restart.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_twap(&self, ex: Exchange, base: OrderReq, minutes: f64, slices: usize, max_slip_bps: f64, limit: Option<f64>, ctx: &eframe::egui::Context) -> Result<u64, String> {
+        if !(minutes > 0.0) || slices == 0 { return Err("duration and slices must be positive".into()); }
+        let rules = self.account.lock().unwrap().rules.get(&(ex, base.symbol.clone())).copied().ok_or("venue rules not loaded yet: try again in a second")?;
+        let sizes = terminal_one::algo::twap_slices(base.qty, slices, rules.step);
+        if sizes.is_empty() || sizes.iter().any(|q| *q < rules.min_qty) { return Err(format!("each slice must be at least {} (try fewer slices)", rules.min_qty)); }
+        let (Some(rt), account, agg, ctx) = (self.acct_rt.as_ref(), self.account.clone(), self.agg.clone(), ctx.clone()) else { return Err("not connected".into()) };
+        let id = terminal_one::now_ms() as u64;
+        let gap = Duration::from_secs_f64(minutes * 60.0 / sizes.len() as f64);
+        let buy = base.side() == terminal_one::Side::Buy;
+        account.lock().unwrap().algos.push(AlgoJob {
+            id, ex, symbol: base.symbol.clone(), buy, close: base.close, total: base.qty, sent: 0.0, slices: sizes.len(), done: 0,
+            started_ms: terminal_one::now_ms(), end_ms: terminal_one::now_ms() + (minutes * 60_000.0) as i64, status: "running".into(), cancelled: false,
+        });
+        rt.spawn(async move {
+            let mut i = 0;
+            while i < sizes.len() {
+                if account.lock().unwrap().algos.iter().any(|j| j.id == id && j.cancelled) { break; }
+                // the venue's own book; stale (pair switched away, venue down) means wait
+                let bbo = {
+                    let a = agg.lock().unwrap();
+                    a.venues.get(&(ex, terminal_one::Market::Perp)).filter(|v| terminal_one::now_ms() - v.ts < 5_000)
+                        .and_then(|v| match (v.book.best_bid(), v.book.best_ask()) { (Some(b), Some(k)) => Some((b.0, k.0)), _ => v.bbo.map(|[b, _, k, _]| (b, k)) })
+                };
+                let px = bbo.and_then(|(b, k)| terminal_one::algo::twap_price(buy, b, k, max_slip_bps, limit));
+                let Some(px) = px else {
+                    set_status(&account, id, if bbo.is_none() { "waiting: no fresh book for this pair (keep it open)" } else { "waiting: price beyond your limit" });
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                };
+                set_status(&account, id, "running");
+                let req = OrderReq { kind: trade::Kind::Limit { price: px, tif: trade::Tif::Ioc }, qty: sizes[i], client_id: None, ..base.clone() };
+                place_logged(&account, ex, &req, px).await;
+                {
+                    let mut a = account.lock().unwrap();
+                    if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) { j.done = i + 1; j.sent += sizes[i]; }
+                }
+                ctx.request_repaint();
+                i += 1;
+                if i < sizes.len() { tokio::time::sleep(gap).await; }
+            }
+            let cancelled = account.lock().unwrap().algos.iter().any(|j| j.id == id && j.cancelled);
+            set_status(&account, id, if cancelled { "cancelled" } else { "done" });
+            ctx.request_repaint();
+        });
+        Ok(id)
+    }
+
+    pub fn cancel_algo(&self, id: u64) {
+        if let Some(j) = self.account.lock().unwrap().algos.iter_mut().find(|j| j.id == id) { j.cancelled = true; j.status = "cancelling".into(); }
     }
 
     /// Look up the account's position mode for (venue, symbol) once.

@@ -143,7 +143,7 @@ pub fn fmt_step(v: f64, step: f64, floor: bool) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tif { Gtc, Ioc, PostOnly }
+pub enum Tif { Gtc, Ioc, PostOnly, Fok }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind {
@@ -152,6 +152,41 @@ pub enum Kind {
     /// BBO limit: the venue prices it from its own book when the order arrives. `queue` = the
     /// order's own side (join the bid when buying), else the opposite side; `level` = book level.
     Bbo { queue: bool, level: u8 },
+    /// Conditional order: waits on the venue until `trigger` is reached (by mark price, or last
+    /// trade when `by_mark` is false), then sends a market order, or a limit at `limit`. Whether it
+    /// acts as a stop or a take-profit follows from the trigger's side of the current price.
+    Stop { trigger: f64, limit: Option<f64>, by_mark: bool },
+    /// Trailing stop: market order once price retraces `callback_pct` percent from its best level
+    /// since `activation` (or since placement).
+    Trailing { callback_pct: f64, activation: Option<f64> },
+}
+
+impl Kind {
+    /// Short machine-readable form for logs and the native UI: "market", "limit 123.4", "ioc 1",
+    /// "fok 1", "post 1", "bbo queue 5", "stop 110 mark", "stop 110 limit 111 last", "trail 1.2% from 95".
+    pub fn label(&self) -> String {
+        match *self {
+            Kind::Market => "market".into(),
+            Kind::Limit { price, tif } => format!("{} {price}", match tif { Tif::Gtc => "limit", Tif::Ioc => "ioc", Tif::PostOnly => "post", Tif::Fok => "fok" }),
+            Kind::Bbo { queue, level } => format!("bbo {} {level}", if queue { "queue" } else { "opponent" }),
+            Kind::Stop { trigger, limit, by_mark } => format!("stop {trigger}{} {}", limit.map(|l| format!(" limit {l}")).unwrap_or_default(), if by_mark { "mark" } else { "last" }),
+            Kind::Trailing { callback_pct, activation } => format!("trail {callback_pct}%{}", activation.map(|a| format!(" from {a}")).unwrap_or_default()),
+        }
+    }
+}
+
+/// Order types a venue accepts natively (the UI offers only these; TWAP and scaled orders are
+/// built from plain limits and work everywhere).
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize)]
+pub struct Caps { pub fok: bool, pub stop: bool, pub trailing: bool, pub post_only: bool }
+
+pub fn caps(ex: Exchange) -> Caps {
+    match ex {
+        Exchange::Bybit | Exchange::Binance => Caps { fok: true, stop: true, trailing: true, post_only: true },
+        Exchange::Okx | Exchange::Bitget | Exchange::Gate => Caps { fok: true, stop: false, trailing: false, post_only: true },
+        Exchange::Kraken | Exchange::Hyperliquid | Exchange::Lighter => Caps { fok: false, stop: false, trailing: false, post_only: true },
+        _ => Caps::default(),
+    }
 }
 
 /// BBO levels each venue accepts (Binance priceMatch QUEUE/OPPONENT[_5|_10|_20], Bybit bboLevel 1-5).
@@ -346,7 +381,12 @@ pub fn checked(req: &OrderReq, r: &Rules, ref_px: f64) -> Result<(String, Option
     let qty = fmt_step(req.qty, r.step, true);
     let q: f64 = qty.parse()?;
     if q < r.min_qty || q <= 0.0 { bail!("size {q} below minimum {}", r.min_qty); }
-    let px = match req.kind { Kind::Limit { price, .. } => Some(fmt_step(price, r.tick, false)), Kind::Market | Kind::Bbo { .. } => None };
+    let px = match req.kind {
+        Kind::Limit { price, .. } | Kind::Stop { limit: Some(price), .. } => Some(fmt_step(price, r.tick, false)),
+        Kind::Market | Kind::Bbo { .. } | Kind::Stop { limit: None, .. } | Kind::Trailing { .. } => None,
+    };
+    if let Kind::Stop { trigger, .. } = req.kind { if !(trigger > 0.0 && trigger.is_finite()) { bail!("invalid trigger price {trigger}"); } }
+    if let Kind::Trailing { callback_pct, .. } = req.kind { if !(0.1..=10.0).contains(&callback_pct) { bail!("trailing callback must be 0.1% to 10%, got {callback_pct}%"); } }
     let notional = q * px.as_deref().and_then(|p| p.parse().ok()).unwrap_or(ref_px);
     if !req.close && r.min_notional > 0.0 && notional < r.min_notional { bail!("notional {notional:.2} below minimum {}", r.min_notional); }
     Ok((qty, px))
@@ -354,7 +394,7 @@ pub fn checked(req: &OrderReq, r: &Rules, ref_px: f64) -> Result<(String, Option
 
 /// Bybit v5 order body. Hedge: positionIdx 1 = long, 2 = short (reduceOnly allowed);
 /// one-way: positionIdx 0.
-pub fn bybit_body(req: &OrderReq, mode: Mode, qty: &str, px: Option<&str>) -> Value {
+pub fn bybit_body(req: &OrderReq, mode: Mode, qty: &str, px: Option<&str>, ref_px: f64, tick: f64) -> Value {
     let idx = match (mode, req.pos) { (Mode::OneWay, _) => 0, (Mode::Hedge, Side::Buy) => 1, (Mode::Hedge, Side::Sell) => 2 };
     let mut b = json!({"category": "linear", "symbol": req.symbol, "side": side_str(Exchange::Bybit, req.side()), "qty": qty,
                        "positionIdx": idx, "reduceOnly": req.close});
@@ -364,8 +404,18 @@ pub fn bybit_body(req: &OrderReq, mode: Mode, qty: &str, px: Option<&str>) -> Va
         Kind::Limit { tif, .. } => {
             b["orderType"] = "Limit".into();
             b["price"] = px.unwrap_or_default().into();
-            b["timeInForce"] = match tif { Tif::Gtc => "GTC", Tif::Ioc => "IOC", Tif::PostOnly => "PostOnly" }.into();
+            b["timeInForce"] = match tif { Tif::Gtc => "GTC", Tif::Ioc => "IOC", Tif::PostOnly => "PostOnly", Tif::Fok => "FOK" }.into();
         }
+        // conditional: triggerDirection 1 = fires when price rises to the trigger, 2 = falls to it
+        Kind::Stop { trigger, limit, by_mark } => {
+            b["orderType"] = if limit.is_some() { "Limit" } else { "Market" }.into();
+            if limit.is_some() { b["price"] = px.unwrap_or_default().into(); b["timeInForce"] = "GTC".into(); }
+            b["triggerPrice"] = fmt_step(trigger, tick, false).into();
+            b["triggerDirection"] = if trigger > ref_px { 1 } else { 2 }.into();
+            b["triggerBy"] = if by_mark { "MarkPrice" } else { "LastPrice" }.into();
+        }
+        // a trailing stop is a position setting on Bybit (see place); never sent as an order
+        Kind::Trailing { .. } => { b["orderType"] = "Market".into(); }
         // no price: Bybit takes it from its book (bboSideType / bboLevel)
         Kind::Bbo { queue, level } => {
             b["orderType"] = "Limit".into();
@@ -387,8 +437,10 @@ pub fn binance_params(req: &OrderReq, mode: Mode, qty: &str, px: Option<&str>) -
         Kind::Limit { tif, .. } => {
             p.push(("type", "LIMIT".into()));
             p.push(("price", px.unwrap_or_default().into()));
-            p.push(("timeInForce", match tif { Tif::Gtc => "GTC", Tif::Ioc => "IOC", Tif::PostOnly => "GTX" }.into()));
+            p.push(("timeInForce", match tif { Tif::Gtc => "GTC", Tif::Ioc => "IOC", Tif::PostOnly => "GTX", Tif::Fok => "FOK" }.into()));
         }
+        // conditional and trailing orders go to the algo service (binance_algo_params)
+        Kind::Stop { .. } | Kind::Trailing { .. } => p.push(("type", "MARKET".into())),
         // no price: Binance takes it from its book (priceMatch; cannot be sent with a price)
         Kind::Bbo { queue, level } => {
             p.push(("type", "LIMIT".into()));
@@ -402,6 +454,48 @@ pub fn binance_params(req: &OrderReq, mode: Mode, qty: &str, px: Option<&str>) -
         Mode::OneWay => if req.close { p.push(("reduceOnly", "true".into())); },
     }
     p
+}
+
+/// Binance algo-order params for conditional and trailing orders (`POST /fapi/v1/algoOrder`).
+/// STOP / TAKE_PROFIT follows from the trigger's side of the current price and the order side:
+/// a buy triggered above the price is a stop, below it a take-profit (the reverse for a sell).
+pub fn binance_algo_params(req: &OrderReq, mode: Mode, qty: &str, px: Option<&str>, ref_px: f64, tick: f64) -> Result<Vec<(&'static str, String)>> {
+    let buy = req.side() == Side::Buy;
+    let mut p = vec![("algoType", "CONDITIONAL".to_string()), ("symbol", req.symbol.clone()), ("side", side_str(Exchange::Binance, req.side()).into()), ("quantity", qty.into())];
+    match req.kind {
+        Kind::Stop { trigger, limit, by_mark } => {
+            let stop = (trigger > ref_px) == buy;
+            let t = match (stop, limit.is_some()) { (true, false) => "STOP_MARKET", (false, false) => "TAKE_PROFIT_MARKET", (true, true) => "STOP", (false, true) => "TAKE_PROFIT" };
+            p.push(("type", t.into()));
+            p.push(("triggerPrice", fmt_step(trigger, tick, false)));
+            p.push(("workingType", if by_mark { "MARK_PRICE" } else { "CONTRACT_PRICE" }.into()));
+            if limit.is_some() { p.push(("price", px.unwrap_or_default().into())); p.push(("timeInForce", "GTC".into())); }
+        }
+        Kind::Trailing { callback_pct, activation } => {
+            p.push(("type", "TRAILING_STOP_MARKET".into()));
+            p.push(("callbackRate", format!("{callback_pct:.1}")));
+            if let Some(a) = activation { p.push(("activatePrice", fmt_step(a, tick, false))); }
+        }
+        _ => bail!("not a conditional order"),
+    }
+    match mode {
+        Mode::Hedge => p.push(("positionSide", if req.pos == Side::Buy { "LONG" } else { "SHORT" }.into())),
+        Mode::OneWay => if req.close { p.push(("reduceOnly", "true".into())); },
+    }
+    if let Some(id) = &req.client_id { p.push(("clientAlgoId", id.clone())); }
+    Ok(p)
+}
+
+/// Bybit trailing stop: a position setting (`/v5/position/trading-stop`), so only for closing.
+/// The distance is the callback percent of the current price, in price units.
+pub fn bybit_trailing_body(req: &OrderReq, mode: Mode, ref_px: f64, tick: f64) -> Result<Value> {
+    let Kind::Trailing { callback_pct, activation } = req.kind else { bail!("not a trailing order") };
+    if !req.close { bail!("bybit: a trailing stop protects an open position: use it from Close"); }
+    let idx = match (mode, req.pos) { (Mode::OneWay, _) => 0, (Mode::Hedge, Side::Buy) => 1, (Mode::Hedge, Side::Sell) => 2 };
+    let mut b = json!({"category": "linear", "symbol": req.symbol, "positionIdx": idx, "tpslMode": "Full",
+                       "trailingStop": fmt_step(ref_px * callback_pct / 100.0, tick, false)});
+    if let Some(a) = activation { b["activePrice"] = fmt_step(a, tick, false).into(); }
+    Ok(b)
 }
 
 /// Position mode of the account for `symbol` (read only; never changed from here).
@@ -451,8 +545,21 @@ pub async fn leverage(ex: Exchange, k: &Keys, symbol: &str) -> Result<f64> {
 pub async fn place(ex: Exchange, k: &Keys, req: &OrderReq, r: &Rules, ref_px: f64, mode: Mode) -> Result<String> {
     let (qty, px) = checked(req, r, ref_px)?;
     if let Kind::Bbo { level, .. } = req.kind { if !bbo_levels(ex).contains(&level) { bail!("{ex:?} has no BBO level {level}"); } }
+    let c = caps(ex);
+    match req.kind {
+        Kind::Limit { tif: Tif::Fok, .. } if !c.fok => bail!("{ex:?} has no fill-or-kill orders"),
+        Kind::Stop { .. } if !c.stop => bail!("{ex:?}: conditional orders are not supported here yet"),
+        Kind::Trailing { .. } if !c.trailing => bail!("{ex:?}: trailing stops are not supported here yet"),
+        _ => {}
+    }
     match ex {
-        Exchange::Bybit => Ok(bybit(k, false, "/v5/order/create", bybit_body(req, mode, &qty, px.as_deref())).await?["orderId"].as_str().unwrap_or_default().to_string()),
+        Exchange::Bybit if matches!(req.kind, Kind::Trailing { .. }) => {
+            bybit(k, false, "/v5/position/trading-stop", bybit_trailing_body(req, mode, ref_px, r.tick)?).await?;
+            Ok("trailing".into())
+        }
+        Exchange::Bybit => Ok(bybit(k, false, "/v5/order/create", bybit_body(req, mode, &qty, px.as_deref(), ref_px, r.tick)).await?["orderId"].as_str().unwrap_or_default().to_string()),
+        Exchange::Binance if matches!(req.kind, Kind::Stop { .. } | Kind::Trailing { .. }) =>
+            tpsl::binance_place(k, &binance_algo_params(req, mode, &qty, px.as_deref(), ref_px, r.tick)?).await,
         Exchange::Binance => Ok(binance(k, reqwest::Method::POST, "/fapi/v1/order", &binance_params(req, mode, &qty, px.as_deref())).await?["orderId"].to_string()),
         Exchange::Okx => okx::place(k, req, r, ref_px, mode).await,
         Exchange::Bitget => bitget::place(k, req, r, ref_px, mode).await,
@@ -1192,11 +1299,44 @@ mod tests {
         assert_eq!(get(&b, "priceMatch").as_deref(), Some("QUEUE"));
         assert_eq!(get(&b, "price"), None, "priceMatch cannot be sent with a price");
         assert_eq!(get(&binance_params(&r(false, 5), Mode::Hedge, "1", None), "priceMatch").as_deref(), Some("OPPONENT_5"));
-        let y = bybit_body(&r(false, 3), Mode::OneWay, "1", None);
+        let y = bybit_body(&r(false, 3), Mode::OneWay, "1", None, 84_000.0, 0.1);
         assert_eq!((y["bboSideType"].as_str(), y["bboLevel"].as_str(), y.get("price")), (Some("Counterparty"), Some("3"), None));
         // BBO orders have no own price: the minimum-notional check falls back to the reference price
         let rules = Rules { tick: 0.1, step: 0.001, min_qty: 0.001, min_notional: 5.0 };
         assert!(checked(&OrderReq { qty: 0.001, ..r(true, 1) }, &rules, 84_000.0).is_ok());
+    }
+
+    #[test]
+    fn conditional_trailing_and_fok_params() {
+        let get = |v: &[(&str, String)], k: &str| v.iter().find(|(a, _)| *a == k).map(|(_, b)| b.clone());
+        let o = |pos: Side, close: bool, kind: Kind| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind, qty: 1.0, client_id: None };
+        // a buy that triggers above the price is a stop, below it a take-profit; the reverse for a sell
+        let stop = |t: f64, l: Option<f64>| Kind::Stop { trigger: t, limit: l, by_mark: true };
+        let ty = |r: &OrderReq| get(&binance_algo_params(r, Mode::OneWay, "1", None, 100.0, 0.1).unwrap(), "type").unwrap();
+        assert_eq!(ty(&o(Side::Buy, false, stop(110.0, None))), "STOP_MARKET");
+        assert_eq!(ty(&o(Side::Buy, false, stop(90.0, None))), "TAKE_PROFIT_MARKET");
+        assert_eq!(ty(&o(Side::Buy, true, stop(110.0, None))), "TAKE_PROFIT_MARKET", "closing a long sells: above = take-profit");
+        assert_eq!(ty(&o(Side::Buy, true, stop(90.0, Some(89.0)))), "STOP");
+        let a = binance_algo_params(&o(Side::Buy, false, stop(110.04, Some(111.0))), Mode::Hedge, "1", Some("111.0"), 100.0, 0.1).unwrap();
+        assert_eq!((get(&a, "triggerPrice").as_deref(), get(&a, "price").as_deref(), get(&a, "workingType").as_deref(), get(&a, "positionSide").as_deref()),
+                   (Some("110.0"), Some("111.0"), Some("MARK_PRICE"), Some("LONG")));
+        let tr = binance_algo_params(&o(Side::Sell, true, Kind::Trailing { callback_pct: 1.25, activation: Some(95.0) }), Mode::OneWay, "1", None, 100.0, 0.1).unwrap();
+        assert_eq!((get(&tr, "type").as_deref(), get(&tr, "callbackRate").as_deref(), get(&tr, "reduceOnly").as_deref()), (Some("TRAILING_STOP_MARKET"), Some("1.2"), Some("true")));
+        // Bybit: direction from the trigger's side, trigger by mark or last
+        let b = bybit_body(&o(Side::Sell, false, Kind::Stop { trigger: 95.0, limit: None, by_mark: false }), Mode::OneWay, "1", None, 100.0, 0.1);
+        assert_eq!((b["orderType"].as_str(), b["triggerDirection"].as_i64(), b["triggerBy"].as_str(), b["triggerPrice"].as_str()), (Some("Market"), Some(2), Some("LastPrice"), Some("95.0")));
+        // Bybit trailing: closing only, distance in price
+        let t = bybit_trailing_body(&o(Side::Buy, true, Kind::Trailing { callback_pct: 1.0, activation: None }), Mode::Hedge, 100.0, 0.1).unwrap();
+        assert_eq!((t["trailingStop"].as_str(), t["positionIdx"].as_i64()), (Some("1.0"), Some(1)));
+        assert!(bybit_trailing_body(&o(Side::Buy, false, Kind::Trailing { callback_pct: 1.0, activation: None }), Mode::Hedge, 100.0, 0.1).is_err());
+        // FOK maps on both
+        let f = o(Side::Buy, false, Kind::Limit { price: 100.0, tif: Tif::Fok });
+        assert_eq!(get(&binance_params(&f, Mode::OneWay, "1", Some("100")), "timeInForce").as_deref(), Some("FOK"));
+        assert_eq!(bybit_body(&f, Mode::OneWay, "1", Some("100"), 100.0, 0.1)["timeInForce"].as_str(), Some("FOK"));
+        // validation
+        let rules = Rules { tick: 0.1, step: 0.001, min_qty: 0.001, min_notional: 5.0 };
+        assert!(checked(&o(Side::Buy, false, Kind::Trailing { callback_pct: 12.0, activation: None }), &rules, 100.0).is_err());
+        assert!(checked(&o(Side::Buy, false, stop(0.0, None)), &rules, 100.0).is_err());
     }
 
     #[test]
@@ -1205,9 +1345,9 @@ mod tests {
         // (pos, close) -> order side
         for (pos, close, side) in [(Side::Buy, false, "Buy"), (Side::Buy, true, "Sell"), (Side::Sell, false, "Sell"), (Side::Sell, true, "Buy")] {
             let r = o(pos, close);
-            let h = bybit_body(&r, Mode::Hedge, "1", None);
+            let h = bybit_body(&r, Mode::Hedge, "1", None, 84_000.0, 0.1);
             assert_eq!((h["side"].as_str(), h["positionIdx"].as_i64(), h["reduceOnly"].as_bool()), (Some(side), Some(if pos == Side::Buy { 1 } else { 2 }), Some(close)));
-            let w = bybit_body(&r, Mode::OneWay, "1", None);
+            let w = bybit_body(&r, Mode::OneWay, "1", None, 84_000.0, 0.1);
             assert_eq!((w["side"].as_str(), w["positionIdx"].as_i64(), w["reduceOnly"].as_bool()), (Some(side), Some(0), Some(close)));
             let get = |v: &[(&str, String)], k: &str| v.iter().find(|(a, _)| *a == k).map(|(_, b)| b.clone());
             let bh = binance_params(&r, Mode::Hedge, "1", None);

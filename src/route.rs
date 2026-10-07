@@ -71,6 +71,9 @@ fn quote(kind: Kind, sgn: f64, lv: &[(f64, f64)], own: &[(f64, f64)], q: f64) ->
         }
         Kind::Limit { price, .. } => (price, false, false),
         Kind::Bbo { queue, level } => { let l = level.max(1) as usize - 1; (if queue { own[l].0 } else { lv[l].0 }, !queue, true) }
+        // conditional orders rest on the venue until triggered: estimated at the trigger, no fill now
+        Kind::Stop { trigger, limit, .. } => (limit.unwrap_or(trigger), limit.is_none(), false),
+        Kind::Trailing { .. } => (lv[0].0, true, false),
     }
 }
 

@@ -395,6 +395,7 @@ impl TradeView {
                 Kind::Market => t("tr.market").to_string(),
                 Kind::Limit { price, tif } => format!("{} {}", fmt_px(price), if tif == Tif::PostOnly { t("tr.post") } else { "" }),
                 Kind::Bbo { queue, level } => format!("BBO · {} · {level}", t(if queue { "tr.bbo_queue" } else { "tr.bbo_opp" })),
+                k => k.label(),
             };
             egui::Grid::new("cf").num_columns(2).show(ui, |ui| {
                 ui.label(RichText::new(t("tr.price")).color(MU)); ui.label(RichText::new(px).font(mono(12.0))); ui.end_row();

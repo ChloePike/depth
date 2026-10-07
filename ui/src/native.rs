@@ -79,7 +79,7 @@ impl App {
             "uni_mmr": bal.as_ref().and_then(|b| b.uni_mmr), "mm_rate": bal.as_ref().and_then(|b| b.mm_rate),
             "bid": bbo.map(|b| b.0), "ask": bbo.map(|b| b.1),
             "tick": rules.map(|r| r.tick), "step": rules.map(|r| r.step), "min_qty": rules.map(|r| r.min_qty), "min_notional": rules.map(|r| r.min_notional),
-            "bbo_levels": trade::bbo_levels(ex), "push_ms": push_ms, "rtt_ms": acc.order_rtt.get(&ex),
+            "bbo_levels": trade::bbo_levels(ex), "caps": trade::caps(ex), "push_ms": push_ms, "rtt_ms": acc.order_rtt.get(&ex),
             "fee": {"taker": fee_t, "maker": fee_m},
             "smart": self.route.smart, "error": acc.errors.get(&ex),
         });
@@ -129,6 +129,10 @@ impl App {
             "ex": ex_name(*e), "equity": b.equity, "available": b.available, "uni_mmr": b.uni_mmr, "mm_rate": b.mm_rate, "maint_margin": b.maint_margin, "adj_equity": b.adj_equity,
         })).collect();
         balances.sort_by(|a, b| a["ex"].as_str().cmp(&b["ex"].as_str()));
+        let algos: Vec<Value> = acc.algos.iter().rev().map(|j| json!({
+            "id": j.id, "ex": ex_name(j.ex), "symbol": j.symbol, "buy": j.buy, "close": j.close, "total": j.total, "sent": j.sent,
+            "slices": j.slices, "done": j.done, "started_ms": j.started_ms, "end_ms": j.end_ms, "status": j.status, "cancelled": j.cancelled,
+        })).collect();
         let log: Vec<Value> = acc.log.iter().rev().take(200).map(|(ts, m, ok)| json!({"ts": ts, "msg": m, "ok": ok})).collect();
         let tests = self.eng.key_tests.lock().unwrap().clone();
         let keys: Vec<Value> = trade::KEY_VENUES.iter().map(|&e| {
@@ -176,7 +180,7 @@ impl App {
             "positions": positions, "orders": orders, "tpsl": tpsl,
             "history": {"orders": hist.0, "fills": hist.1, "closed": hist.2, "updated_ms": (hist.3 != i64::MAX).then_some(hist.3),
                         "loading": !self.eng.account.lock().unwrap().history_loading.is_empty()},
-            "wallets": wallets, "balances": balances, "transferring": transferring, "binance_pm": pm, "log": log, "keys": keys,
+            "wallets": wallets, "balances": balances, "algos": algos, "transferring": transferring, "binance_pm": pm, "log": log, "keys": keys,
             "prefs": serde_json::to_value(&self.prefs).unwrap_or(Value::Null),
             "route": serde_json::to_value(&self.route).unwrap_or(Value::Null),
             "chart": chart, "book": book, "signals": signals, "quant": quant,
@@ -286,6 +290,22 @@ impl App {
                 rows.sort_by(|x, y| y["vol_usd"].as_f64().unwrap_or(0.0).total_cmp(&x["vol_usd"].as_f64().unwrap_or(0.0)));
                 return Ok(json!({"rows": rows, "minutes": mins}));
             }
+            "place_scaled" => {
+                let req = self.order_req(&json!({"pos": v["pos"], "close": v["close"], "qty": v["qty"], "kind": "market"}))?;
+                let (from, to) = (f("from").ok_or("from price")?, f("to").ok_or("to price")?);
+                let n = v["count"].as_u64().unwrap_or(5).clamp(2, 50) as usize;
+                let ex = self.trade.ex;
+                let count = self.eng.submit_scaled(ex, req, from, to, n, f("skew").unwrap_or(0.0), v["post_only"].as_bool().unwrap_or(false), ctx)?;
+                return Ok(json!({"orders": count}));
+            }
+            "start_twap" => {
+                let req = self.order_req(&json!({"pos": v["pos"], "close": v["close"], "qty": v["qty"], "kind": "market"}))?;
+                let ex = self.trade.ex;
+                let id = self.eng.start_twap(ex, req, f("minutes").ok_or("duration")?, v["slices"].as_u64().unwrap_or(10) as usize,
+                    f("max_slip_bps").unwrap_or(10.0), f("limit").filter(|l| *l > 0.0), ctx)?;
+                return Ok(json!({"id": id}));
+            }
+            "cancel_algo" => self.eng.cancel_algo(v["id"].as_u64().ok_or("id")?),
             "book_fill" => { if let (Some(e), Some(px)) = (parse_ex(&v["ex"]), v["px"].as_f64()) { self.trade.fill = Some((e, px)); } }
             "load_history" => self.eng.load_history(ctx),
             "load_wallets" => self.eng.load_wallets(exv()?, ctx),
@@ -318,11 +338,22 @@ impl App {
         let pos = if v["pos"] == "short" { Side::Sell } else { Side::Buy };
         let qty = v["qty"].as_f64().filter(|q| *q > 0.0).ok_or("size must be positive")?;
         let price = v["price"].as_f64().unwrap_or(0.0);
+        // limit time in force: gtc (default), ioc, fok, post (post-only / ALO)
+        let tif = match v["tif"].as_str().unwrap_or("gtc") { "ioc" => Tif::Ioc, "fok" => Tif::Fok, "post" => Tif::PostOnly, _ => Tif::Gtc };
         let kind = match v["kind"].as_str().unwrap_or("limit") {
             "market" => Kind::Market,
             "post" => Kind::Limit { price, tif: Tif::PostOnly },
             "bbo" => Kind::Bbo { queue: v["bbo_queue"].as_bool().unwrap_or(false), level: v["bbo_level"].as_u64().unwrap_or(1) as u8 },
-            _ => Kind::Limit { price, tif: Tif::Gtc },
+            "stop" => Kind::Stop {
+                trigger: v["trigger"].as_f64().filter(|t| *t > 0.0).ok_or("trigger price must be positive")?,
+                limit: v["price"].as_f64().filter(|p| *p > 0.0),
+                by_mark: v["trigger_by"].as_str() != Some("last"),
+            },
+            "trailing" => Kind::Trailing {
+                callback_pct: v["callback_pct"].as_f64().filter(|c| (0.1..=10.0).contains(c)).ok_or("callback must be 0.1% to 10%")?,
+                activation: v["activation"].as_f64().filter(|a| *a > 0.0),
+            },
+            _ => Kind::Limit { price, tif },
         };
         if matches!(kind, Kind::Limit { .. }) && !(price > 0.0) { return Err("price must be positive".into()); }
         Ok(OrderReq { symbol: trade::symbol(&self.eng.base), pos, close: v["close"].as_bool().unwrap_or(false), kind, qty, client_id: None })
@@ -352,6 +383,8 @@ impl App {
         snap.positions = acc.positions.iter().filter(|p| &p.symbol == sym).cloned().collect();
         drop(acc);
         let mut policy = self.route.clone();
+        // conditional and trailing orders wait on one venue: never split or routed elsewhere
+        if matches!(req.kind, Kind::Stop { .. } | Kind::Trailing { .. }) { policy.smart = false; }
         if !policy.smart { policy.fixed = self.trade.ex; }
         for e in trade::TRADABLE { let (t, m) = super::settings::fee(e); policy.fees.insert(e, (t, m)); }
         // venue clocks may run a little behind ours; staleness is judged on exchange timestamps
@@ -363,8 +396,7 @@ fn plan_json(p: &route::RoutePlan) -> Value {
     json!({
         "legs": p.legs.iter().map(|l| json!({
             "ex": ex_name(l.ex), "pos": side_name(l.req.pos), "close": l.req.close, "qty": l.req.qty,
-            "kind": match l.req.kind { Kind::Market => "market".to_string(), Kind::Limit { price, tif } => format!("{} {price}", if tif == Tif::PostOnly { "post" } else if tif == Tif::Ioc { "ioc" } else { "limit" }),
-                Kind::Bbo { queue, level } => format!("bbo {} {level}", if queue { "queue" } else { "opponent" }) },
+            "kind": l.req.kind.label(),
             "ref_px": l.ref_px, "est_px": l.est_px, "est_fee": l.est_fee, "slip_bps": l.slip_bps, "avail_after": l.avail_after, "client_id": l.req.client_id,
         })).collect::<Vec<_>>(),
         "excluded": p.excluded.iter().map(|(e, r)| json!({"ex": ex_name(*e), "reason": r})).collect::<Vec<_>>(),

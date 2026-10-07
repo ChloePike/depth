@@ -141,8 +141,9 @@ pub fn order_body(req: &OrderReq, contracts: i64, px: Option<&str>) -> Result<Va
     let (price, tif) = match req.kind {
         // Gate: price "0" with tif ioc is a market order
         Kind::Market => ("0".to_string(), "ioc"),
-        Kind::Limit { tif, .. } => (px.unwrap_or_default().to_string(), match tif { Tif::Gtc => "gtc", Tif::Ioc => "ioc", Tif::PostOnly => "poc" }),
+        Kind::Limit { tif, .. } => (px.unwrap_or_default().to_string(), match tif { Tif::Gtc => "gtc", Tif::Ioc => "ioc", Tif::PostOnly => "poc", Tif::Fok => "fok" }),
         Kind::Bbo { .. } => bail!("gate: BBO orders are not supported by the futures order API"),
+        Kind::Stop { .. } | Kind::Trailing { .. } => bail!("gate: conditional orders are not supported here yet"),
     };
     Ok(json!({"contract": native(&req.symbol), "size": size, "price": price, "tif": tif, "reduce_only": req.close}))
 }

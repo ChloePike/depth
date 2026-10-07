@@ -194,12 +194,13 @@ pub async fn leverage(k: &Keys, symbol: &str) -> Result<f64> {
 fn order_wire(req: &OrderReq, a: &Asset, mid: f64) -> Result<OrderWire> {
     let buy = req.side() == Side::Buy;
     let (px, tif) = match req.kind {
-        Kind::Limit { price, tif } => (price, match tif { Tif::Gtc => "Gtc", Tif::Ioc => "Ioc", Tif::PostOnly => "Alo" }),
+        Kind::Limit { price, tif } => (price, match tif { Tif::Gtc => "Gtc", Tif::Ioc => "Ioc", Tif::PostOnly => "Alo", Tif::Fok => bail!("hyperliquid has no fill-or-kill orders") }),
         Kind::Market => {
             if !(mid > 0.0) { bail!("hyperliquid: no price for a market order"); }
             (mid * if buy { 1.0 + SLIPPAGE } else { 1.0 - SLIPPAGE }, "Ioc")
         }
         Kind::Bbo { .. } => bail!("hyperliquid has no BBO orders"),
+        Kind::Stop { .. } | Kind::Trailing { .. } => bail!("hyperliquid: conditional orders are not supported here yet"),
     };
     let s = sz_str(req.qty, a.sz_dec);
     if s.parse::<f64>().unwrap_or(0.0) <= 0.0 { bail!("size below the {} lot", 10f64.powi(-(a.sz_dec as i32))); }

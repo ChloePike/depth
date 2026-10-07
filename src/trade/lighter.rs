@@ -200,6 +200,8 @@ fn order_params(kind: Kind, now: i64) -> (u8, u8, i64) {
         Kind::Limit { tif: Tif::Ioc, .. } => (0, 0, 0),
         Kind::Limit { tif: Tif::Gtc, .. } | Kind::Bbo { .. } => (0, 1, gtt),
         Kind::Limit { tif: Tif::PostOnly, .. } => (0, 2, gtt),
+        // Fok, Stop and Trailing are refused by trade::place (caps) before reaching here
+        Kind::Limit { tif: Tif::Fok, .. } | Kind::Stop { .. } | Kind::Trailing { .. } => (0, 0, 0),
     }
 }
 

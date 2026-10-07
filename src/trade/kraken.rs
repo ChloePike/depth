@@ -97,6 +97,8 @@ pub fn order_params(req: &OrderReq, qty: &str, px: Option<&str>) -> Result<Vec<(
         Kind::Limit { tif: Tif::Ioc, .. } => "ioc",
         Kind::Limit { tif: Tif::PostOnly, .. } => "post",
         Kind::Bbo { .. } => bail!("kraken: BBO orders not supported"),
+        Kind::Limit { tif: Tif::Fok, .. } => bail!("kraken: no fill-or-kill orders"),
+        Kind::Stop { .. } | Kind::Trailing { .. } => bail!("kraken: conditional orders are not supported here yet"),
     };
     let mut p = vec![("orderType", ty.to_string()), ("symbol", native(&req.symbol)), ("side", if req.side() == Side::Buy { "buy" } else { "sell" }.into()), ("size", qty.into())];
     if let Some(px) = px { p.push(("limitPrice", px.into())); }

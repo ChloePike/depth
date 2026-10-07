@@ -99,10 +99,11 @@ pub fn order_body(req: &OrderReq, mode: Mode, qty: &str, px: Option<&str>, margi
         Kind::Limit { tif, .. } => {
             b["orderType"] = "limit".into();
             b["price"] = px.ok_or_else(|| anyhow!("limit order without price"))?.into();
-            b["force"] = match tif { Tif::Gtc => "gtc", Tif::Ioc => "ioc", Tif::PostOnly => "post_only" }.into();
+            b["force"] = match tif { Tif::Gtc => "gtc", Tif::Ioc => "ioc", Tif::PostOnly => "post_only", Tif::Fok => "fok" }.into();
         }
         // place-order documents no book-priced (BBO / queue / opponent) order type
         Kind::Bbo { .. } => bail!("bitget has no BBO order type"),
+        Kind::Stop { .. } | Kind::Trailing { .. } => bail!("bitget: conditional orders are not supported here yet"),
     }
     Ok(b)
 }

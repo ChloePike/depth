@@ -21,6 +21,7 @@ final class AppState {
     var history = HistoryState()
     var wallets: [VenueWallets] = []
     var balances: [BalanceRow] = []
+    var algos: [AlgoJobRow] = []
     var transferring = false
     var binance_pm = false
     var log: [LogRow] = []
@@ -48,6 +49,7 @@ final class AppState {
         if history != n.history { history = n.history }
         if wallets != n.wallets { wallets = n.wallets }
         if balances != n.balances { balances = n.balances }
+        if algos != n.algos { algos = n.algos }
         if transferring != n.transferring { transferring = n.transferring }
         if binance_pm != n.binance_pm { binance_pm = n.binance_pm }
         if log != n.log { log = n.log }
@@ -79,6 +81,7 @@ struct Snapshot: Decodable {
     var wallets: [VenueWallets] = []
     /// margin account per keyed venue (equity, available, risk)
     var balances: [BalanceRow] = []
+    var algos: [AlgoJobRow] = []
     var transferring = false
     var binance_pm = false
     var log: [LogRow] = []
@@ -99,10 +102,10 @@ struct Snapshot: Decodable {
         base = v(.base, base); mode = v(.mode, mode); lang_zh = v(.lang_zh, lang_zh); header = v(.header, header)
         venues = v(.venues, venues); stats = v(.stats, stats); trade = v(.trade, trade); positions = v(.positions, positions)
         orders = v(.orders, orders); tpsl = v(.tpsl, tpsl); history = v(.history, history); wallets = v(.wallets, wallets)
-        balances = v(.balances, balances); transferring = v(.transferring, transferring); binance_pm = v(.binance_pm, binance_pm); log = v(.log, log); keys = v(.keys, keys); prefs = v(.prefs, prefs)
+        balances = v(.balances, balances); algos = v(.algos, algos); transferring = v(.transferring, transferring); binance_pm = v(.binance_pm, binance_pm); log = v(.log, log); keys = v(.keys, keys); prefs = v(.prefs, prefs)
         route = v(.route, route); tradable = v(.tradable, tradable); book_click = v(.book_click, book_click); chart = v(.chart, chart); book = v(.book, book); signals = v(.signals, signals); quant = v(.quant, quant)
     }
-    enum K: String, CodingKey { case base, mode, lang_zh, header, venues, stats, trade, positions, orders, tpsl, history, wallets, balances, transferring, binance_pm, log, keys, prefs, route, tradable, book_click, chart, book, signals, quant }
+    enum K: String, CodingKey { case base, mode, lang_zh, header, venues, stats, trade, positions, orders, tpsl, history, wallets, balances, algos, transferring, binance_pm, log, keys, prefs, route, tradable, book_click, chart, book, signals, quant }
 }
 
 struct Header: Decodable, Equatable {
@@ -120,7 +123,7 @@ struct TradeCtx: Decodable, Equatable {
     var venue = "Bybit"; var symbol = ""; var has_key = false; var verified = true
     var mode: String?; var lev: Double?; var available: Double?; var equity: Double?; var uni_mmr: Double?; var mm_rate: Double?
     var bid: Double?; var ask: Double?; var tick: Double?; var step: Double?; var min_qty: Double?; var min_notional: Double?
-    var bbo_levels: [Int] = []; var push_ms: Double?; var rtt_ms: Double?; var fee = Fee(); var smart = false; var error: String?
+    var bbo_levels: [Int] = []; var caps = OrderCaps(); var push_ms: Double?; var rtt_ms: Double?; var fee = Fee(); var smart = false; var error: String?
 }
 struct Fee: Decodable, Equatable { var taker = 0.00055; var maker = 0.0002 }
 
@@ -247,4 +250,13 @@ struct QuantState: Decodable, Equatable {
     struct Vol: Decodable, Equatable { var sigma_1h: Double; var sigma_24h: Double; var percentile: Double; var range_1h: [Double]; var range_24h: [Double] }
     struct Carry: Decodable, Equatable, Identifiable { var ex: String; var funding_apr: Double?; var basis_bps: Double?; var id: String { ex } }
     var vol: Vol?; var pressure: Double = 0; var book_bid_usd: Double = 0; var book_ask_usd: Double = 0; var carry: [Carry] = []
+}
+
+/// Order types the trade venue accepts natively (trade::caps).
+struct OrderCaps: Decodable, Equatable { var fok = false; var stop = false; var trailing = false; var post_only = true }
+
+/// A client-side TWAP job.
+struct AlgoJobRow: Decodable, Equatable, Identifiable {
+    var id: Int64; var ex: String; var symbol: String; var buy: Bool; var close: Bool; var total: Double; var sent: Double
+    var slices: Int; var done: Int; var started_ms: Int64; var end_ms: Int64; var status: String; var cancelled: Bool
 }

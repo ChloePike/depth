@@ -8,7 +8,8 @@ struct OrderPanel: View {
     @FocusState private var focus: OrderFieldID?
 
     @State private var close = false
-    @State private var kind = OrderKind.limit
+    /// T1_ORDER_KIND preselects a type (screenshots)
+    @State private var kind = OrderKind(rawValue: ProcessInfo.processInfo.environment["T1_ORDER_KIND"] ?? "") ?? .limit
     @State private var price = ""
     @State private var qty = ""
     @State private var pct = 0.0
@@ -24,16 +25,44 @@ struct OrderPanel: View {
     @State private var inlineError: String?
     @State private var ticket: OrderTicket?
     @State private var tpslFor: PositionRow?
+    /// limit time in force: gtc, ioc, fok, post (post-only / ALO)
+    @State private var tif = "gtc"
+    // conditional
+    @State private var trigger = ""
+    @State private var triggerLast = false
+    @State private var stopLimit = false
+    // trailing
+    @State private var callback = "1.0"
+    @State private var activation = ""
+    // scaled
+    @State private var scaledFrom = ""
+    @State private var scaledTo = ""
+    @State private var scaledCount = 5
+    @State private var scaledSkew = 0.0
+    @State private var scaledPost = true
+    // twap
+    @State private var twapMinutes = "15"
+    @State private var twapSlices = "10"
+    @State private var twapSlip = "10"
+    @State private var twapLimit = ""
+    @State private var algoConfirm: AlgoTicket?
     private let pending = OrderPendingTpSl.shared
 
     private var s: AppState { store.state }
     private var t: TradeCtx { s.trade }
     private var useBbo: Bool { kind == .limit && bboOn && !t.bbo_levels.isEmpty }
-    private var typedPrice: Bool { kind != .market && !useBbo }
+    /// a typed limit price is sent: limit (not BBO) and stop-limit
+    private var typedPrice: Bool { (kind == .limit && !useBbo) || (kind == .stop && stopLimit) }
     private var kindArg: String { useBbo ? "bbo" : kind.rawValue }
     private var mid: Double? { if let b = t.bid, let a = t.ask { return (b + a) / 2 }; return t.bid ?? t.ask }
     /// reference price for size and cost: the typed limit, else the venue's own mid
-    private var refPx: Double { (typedPrice ? OrderNum.parse(price) : nil) ?? mid ?? 0 }
+    private var refPx: Double {
+        switch kind {
+        case .stop: return (stopLimit ? OrderNum.parse(price) : nil) ?? OrderNum.parse(trigger) ?? mid ?? 0
+        case .scaled: if let a = OrderNum.parse(scaledFrom), let b = OrderNum.parse(scaledTo) { return (a + b) / 2 }; return mid ?? 0
+        default: return (typedPrice ? OrderNum.parse(price) : nil) ?? mid ?? 0
+        }
+    }
     private var lev: Double { max(t.lev ?? 1, 1) }
     private var qtyV: Double { OrderNum.parse(qty) ?? 0 }
     private var positions: [PositionRow] { s.positions.filter { $0.symbol == t.symbol && (s.route.smart || $0.ex == t.venue) } }
@@ -53,7 +82,9 @@ struct OrderPanel: View {
             Divider()
             order
             Divider()
-            if !close { tpslSection }
+            if !close && (kind == .limit || kind == .market) { tpslSection }
+            let jobs = s.algos.filter { !$0.cancelled && $0.status != "done" || terminal_recent($0) }
+            if !jobs.isEmpty { AlgoJobsView(jobs: jobs) }
             buttons
             summary
             if let e = inlineError { OrderNote(text: e, color: .red, icon: "xmark.octagon.fill") }
@@ -83,6 +114,12 @@ struct OrderPanel: View {
         .onChange(of: s.positions.map { "\($0.id)|\($0.qty)" }) { pending.check(s.positions, orders: s.orders) }
         .sheet(item: $ticket) { OrderConfirm(ticket: $0) }
         .sheet(item: $tpslFor) { OrderTpSlSheet(p: $0) }
+        .confirmationDialog(algoConfirm?.title ?? "", isPresented: Binding(get: { algoConfirm != nil }, set: { if !$0 { algoConfirm = nil } }), titleVisibility: .visible, presenting: algoConfirm) { a in
+            Button(L("Cancel"), role: .cancel) {}
+            Button(L("Confirm")) {
+                if store.call(a.op, a.args)?["ok"] as? Bool != true { inlineError = store.lastError ?? L("Failed") }
+            }
+        } message: { a in Text(a.message + (t.verified ? "" : "\n" + L("This venue is untested: start with the minimum size."))) }
     }
 
     // MARK: routing / account
@@ -182,7 +219,7 @@ struct OrderPanel: View {
                 Spacer()
             }
             .font(.callout)
-            priceField
+            kindFields
             OrderField(label: L("Size"), text: $qty, unit: s.base, id: .qty, focus: $focus, onSubmit: enter)
                 .onChange(of: qty) { if focus == .qty { pct = maxQty > 0 ? min(qtyV / maxQty, 1) : 0 } }
             HStack(spacing: 10) {
@@ -232,18 +269,112 @@ struct OrderPanel: View {
 
     /// Limit / Market / Post Only as text tabs with an accent underline.
     private var typeTabs: some View {
-        HStack(spacing: 18) {
-            ForEach([(OrderKind.limit, L("Limit")), (OrderKind.market, L("Market")), (OrderKind.post, L("Post Only"))], id: \.0) { k, name in
-                Button { kind = k } label: {
-                    VStack(spacing: 5) {
-                        Text(name).font(.body.weight(kind == k ? .semibold : .regular)).foregroundStyle(kind == k ? .primary : .secondary)
-                        Capsule().fill(kind == k ? Color.accentColor : .clear).frame(width: 18, height: 3)
-                    }
+        let c = t.caps
+        let main: [(OrderKind, String)] = [(.limit, L("Limit")), (.market, L("Market"))] + (c.stop ? [(.stop, L("Conditional"))] : [])
+        let more: [(OrderKind, String)] = (c.trailing ? [(.trailing, L("Trailing Stop"))] : []) + [(.scaled, L("Scaled")), (.twap, L("TWAP"))]
+        let inMore = more.contains { $0.0 == kind }
+        return HStack(spacing: 14) {
+            ForEach(main, id: \.0) { k, name in tab(name, kind == k) { kind = k } }
+            Menu {
+                ForEach(more, id: \.0) { k, name in Button(name) { kind = k } }
+            } label: {
+                VStack(spacing: 5) {
+                    Text((inMore ? (more.first { $0.0 == kind }?.1 ?? "") : L("More")) + " ▾")
+                        .font(.body.weight(inMore ? .semibold : .regular)).foregroundStyle(inMore ? .primary : .secondary)
+                        .lineLimit(1).fixedSize()
+                    Capsule().fill(inMore ? Color.accentColor : .clear).frame(width: 18, height: 3)
                 }
-                .buttonStyle(.plain)
             }
+            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
             Spacer()
         }
+        .onChange(of: t.venue) { if (kind == .stop && !c.stop) || (kind == .trailing && !c.trailing) { kind = .limit } }
+    }
+
+    private func tab(_ name: String, _ on: Bool, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 5) {
+                Text(name).font(.body.weight(on ? .semibold : .regular)).foregroundStyle(on ? .primary : .secondary)
+                    .lineLimit(1).fixedSize()
+                Capsule().fill(on ? Color.accentColor : .clear).frame(width: 18, height: 3)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The kind-specific inputs between "Avbl" and the size.
+    @ViewBuilder private var kindFields: some View {
+        switch kind {
+        case .limit:
+            priceField
+            HStack(spacing: 6) {
+                Text(L("Time in force")).foregroundStyle(.secondary)
+                Spacer()
+                Picker(L("Time in force"), selection: $tif) {
+                    Text(L("GTC · good till cancelled")).tag("gtc")
+                    Text(L("IOC · fill what's there, cancel the rest")).tag("ioc")
+                    if t.caps.fok { Text(L("FOK · fill completely or cancel")).tag("fok") }
+                    Text(L("Post only (ALO) · maker or cancel")).tag("post")
+                }
+                .pickerStyle(.menu).labelsHidden().fixedSize().disabled(useBbo)
+                .help(useBbo ? L("BBO orders are good till cancelled") : L("How long the order may rest on the book"))
+            }
+            .font(.callout)
+        case .market:
+            priceField
+        case .stop:
+            OrderField(label: L("Trigger price"), text: $trigger, unit: "USDT", id: .price, focus: $focus, onSubmit: enter) {
+                Picker(L("Trigger by"), selection: $triggerLast) { Text(L("Mark")).tag(false); Text(L("Last")).tag(true) }
+                    .pickerStyle(.menu).labelsHidden().fixedSize().buttonStyle(.borderless)
+                    .help(L("Which price must reach the trigger: mark (harder to spike) or last trade"))
+            }
+            Toggle(L("Limit order when triggered"), isOn: $stopLimit)
+            if stopLimit {
+                OrderField(label: L("Limit price"), text: $price, unit: "USDT", id: .tp, focus: $focus, onSubmit: enter)
+            }
+            OrderNote(text: L("Fires once the trigger is reached: above the price it acts as a buy stop / sell take-profit, below it as a sell stop / buy take-profit."), color: .secondary)
+        case .trailing:
+            OrderField(label: L("Callback rate"), text: $callback, unit: "%", id: .price, focus: $focus, onSubmit: enter) {
+                Menu { ForEach(["0.5", "1.0", "2.0", "5.0"], id: \.self) { v in Button("\(v)%") { callback = v } } } label: { Image(systemName: "chevron.down") }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            }
+            OrderField(label: L("Activation price (optional)"), text: $activation, unit: "USDT", id: .tp, focus: $focus, onSubmit: enter)
+            OrderNote(text: t.venue == "Bybit"
+                ? L("Bybit trails an open position: use it from Close. It closes the whole position at market once price retraces by the callback from its best level.")
+                : L("A market order once price retraces by the callback from its best level since activation."), color: .secondary)
+        case .scaled:
+            HStack(spacing: 8) {
+                OrderField(label: L("From price"), text: $scaledFrom, unit: "", id: .price, focus: $focus, onSubmit: enter)
+                OrderField(label: L("To price"), text: $scaledTo, unit: "", id: .tp, focus: $focus, onSubmit: enter)
+            }
+            Stepper(value: $scaledCount, in: 2...50) {
+                HStack { Text(L("Orders")).foregroundStyle(.secondary); Spacer(); Text("\(scaledCount)").monospacedDigit() }
+            }
+            .font(.callout)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack { Text(L("Size distribution")).foregroundStyle(.secondary); Spacer(); Text(scaledSkew < -0.05 ? L("Larger first") : scaledSkew > 0.05 ? L("Larger last") : L("Equal")) }
+                Slider(value: $scaledSkew, in: -1...1, step: 0.25).labelsHidden()
+            }
+            .font(.callout)
+            Toggle(L("Post only (maker or cancel)"), isOn: $scaledPost)
+        case .twap:
+            HStack(spacing: 8) {
+                OrderField(label: L("Duration (min)"), text: $twapMinutes, unit: "", id: .price, focus: $focus, onSubmit: enter)
+                OrderField(label: L("Slices"), text: $twapSlices, unit: "", id: .tp, focus: $focus, onSubmit: enter)
+            }
+            HStack(spacing: 8) {
+                OrderField(label: L("Max slippage (bp)"), text: $twapSlip, unit: "", id: .sl, focus: $focus, onSubmit: enter)
+                OrderField(label: L("Price limit (optional)"), text: $twapLimit, unit: "", id: .level(0), focus: $focus, onSubmit: enter)
+            }
+            OrderNote(text: String(format: L("One IOC order every %@ at the venue's best price ± your slippage; slices wait while the price is beyond your limit. Keep this pair open while it runs."),
+                                   twapGap), color: .secondary)
+        }
+    }
+
+    private var twapGap: String {
+        guard let m = OrderNum.parse(twapMinutes), let n = Double(twapSlices), m > 0, n > 0 else { return "–" }
+        let sec = m * 60 / n
+        return sec >= 60 ? String(format: "%.1f min", sec / 60) : String(format: "%.0f s", sec)
     }
 
     /// Price input; BBO lives inside the field (Binance-style): on, the field becomes the level menu.
@@ -348,7 +479,7 @@ struct OrderPanel: View {
 
     @ViewBuilder private var summary: some View {
         let notional = qtyV * refPx
-        let taker = kind == .market || (useBbo && !bboQueue)
+        let taker = kind == .market || kind == .twap || kind == .trailing || (kind == .stop && !stopLimit) || (useBbo && !bboQueue) || (kind == .limit && (tif == "ioc" || tif == "fok"))
         let rate = taker ? t.fee.taker : t.fee.maker
         HStack(spacing: 4) {
             Image(systemName: "percent")
@@ -394,7 +525,32 @@ struct OrderPanel: View {
         inlineError = nil
         lastPos = pos
         guard qtyV > 0 else { inlineError = L("Enter a size"); focus = .qty; return }
-        var args: [String: Any] = ["pos": pos, "close": close, "kind": kindArg, "qty": qtyV]
+        var args: [String: Any] = ["pos": pos, "close": close, "kind": kindArg, "qty": qtyV, "tif": tif]
+        switch kind {
+        case .scaled:
+            guard let a = OrderNum.parse(scaledFrom), let b = OrderNum.parse(scaledTo), a > 0, b > 0 else { inlineError = L("Enter both prices"); return }
+            args["from"] = a; args["to"] = b; args["count"] = scaledCount; args["skew"] = scaledSkew; args["post_only"] = scaledPost
+            algoConfirm = AlgoTicket(op: "place_scaled", args: args, title: L("Place scaled orders?"),
+                message: String(format: L("%d %@ limit orders from %@ to %@, %@ %@ in total on %@."), scaledCount, pos == "long" ? (close ? L("buy") : L("long")) : (close ? L("sell") : L("short")),
+                                Fmt.px(a), Fmt.px(b), Fmt.qty(qtyV), s.base, t.venue))
+            return
+        case .twap:
+            guard let m = OrderNum.parse(twapMinutes), m > 0, let n = Int(twapSlices), n > 0 else { inlineError = L("Enter a duration and a number of slices"); return }
+            args["minutes"] = m; args["slices"] = n; args["max_slip_bps"] = OrderNum.parse(twapSlip) ?? 10
+            if let l = OrderNum.parse(twapLimit), l > 0 { args["limit"] = l }
+            algoConfirm = AlgoTicket(op: "start_twap", args: args, title: L("Start TWAP?"),
+                message: String(format: L("%@ %@ %@ on %@ in %d slices over %@ min, at most %@ bp slippage per slice%@."), pos == "long" ? (close ? L("Buy") : L("Long")) : (close ? L("Sell") : L("Short")),
+                                Fmt.qty(qtyV), s.base, t.venue, n, Fmt.num(m, 0), twapSlip, (args["limit"] as? Double).map { ", " + L("limit") + " " + Fmt.px($0) } ?? ""))
+            return
+        case .stop:
+            guard let tr = OrderNum.parse(trigger), tr > 0 else { inlineError = L("Enter a trigger price"); return }
+            args["trigger"] = tr; args["trigger_by"] = triggerLast ? "last" : "mark"
+        case .trailing:
+            guard let cb = OrderNum.parse(callback), cb >= 0.1, cb <= 10 else { inlineError = L("Callback must be 0.1% to 10%"); return }
+            args["callback_pct"] = cb
+            if let a = OrderNum.parse(activation), a > 0 { args["activation"] = a }
+        default: break
+        }
         if typedPrice {
             guard let p = OrderNum.parse(price), p > 0 else { inlineError = L("Enter a price"); focus = .price; return }
             args["price"] = p
@@ -436,7 +592,9 @@ struct OrderPanel: View {
     }
 }
 
-enum OrderKind: String { case limit, market, post }
+/// Order types of the panel. limit / market / stop / trailing are venue orders; scaled and twap
+/// are client-side algorithms built from limit orders (work on every venue).
+enum OrderKind: String { case limit, market, stop, trailing, scaled, twap }
 struct BboChoice: Hashable { var queue: Bool; var level: Int }
 enum OrderFieldID: Hashable { case price, qty, tp, sl, level(Int), wholeTp, wholeSl }
 
@@ -630,5 +788,34 @@ struct OrderNote: View {
             .font(.caption)
             .foregroundStyle(color)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A scaled or TWAP request waiting for confirmation.
+struct AlgoTicket: Identifiable { let id = UUID(); let op: String; let args: [String: Any]; let title: String; let message: String }
+
+/// Finished jobs stay listed for a minute.
+func terminal_recent(_ j: AlgoJobRow) -> Bool { Double(Date.now.timeIntervalSince1970 * 1000) - Double(j.end_ms) < 60_000 }
+
+/// Running TWAP jobs: progress, status and cancel.
+struct AlgoJobsView: View {
+    let jobs: [AlgoJobRow]
+    var body: some View {
+        PanelSection(L("Running algorithms")) {
+            ForEach(jobs) { j in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("TWAP \(j.buy ? L("buy") : L("sell")) \(Fmt.qty(j.total))").font(.callout.weight(.semibold))
+                        Text("\(j.ex) · \(j.symbol)").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        if !j.cancelled && j.status != "done" {
+                            Button(L("Cancel")) { Store.shared.call("cancel_algo", ["id": j.id]) }.buttonStyle(.borderless).foregroundStyle(.red)
+                        }
+                    }
+                    ProgressView(value: Double(j.done), total: Double(max(j.slices, 1)))
+                    Text("\(j.done)/\(j.slices) · \(Fmt.qty(j.sent)) \(L("sent")) · \(L(j.status))").font(.caption).foregroundStyle(j.status.hasPrefix("waiting") ? Color.orange : Color.secondary)
+                }
+            }
+        }
     }
 }

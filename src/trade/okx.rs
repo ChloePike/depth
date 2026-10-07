@@ -129,10 +129,11 @@ fn order_body(req: &OrderReq, mode: Mode, sz: &str, px: Option<&str>) -> Result<
     match req.kind {
         Kind::Market => b["ordType"] = "market".into(),
         Kind::Limit { tif, .. } => {
-            b["ordType"] = match tif { Tif::Gtc => "limit", Tif::Ioc => "ioc", Tif::PostOnly => "post_only" }.into();
+            b["ordType"] = match tif { Tif::Gtc => "limit", Tif::Ioc => "ioc", Tif::PostOnly => "post_only", Tif::Fok => "fok" }.into();
             b["px"] = px.ok_or_else(|| anyhow!("limit order without price"))?.into();
         }
         Kind::Bbo { .. } => bail!("okx has no BBO order type"),
+        Kind::Stop { .. } | Kind::Trailing { .. } => bail!("okx: conditional orders are not supported here yet"),
     }
     match mode {
         Mode::Hedge => b["posSide"] = if req.pos == Side::Buy { "long" } else { "short" }.into(),

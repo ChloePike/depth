@@ -169,7 +169,7 @@ async fn binance_open(k: &Keys, symbol: Option<&str>) -> Result<Vec<TpSl>> {
 }
 
 /// Order-count 1 per 10s / 1m, IP weight 0 (USD-M); IP weight 1 (PM). Returns the algoId.
-async fn binance_place(k: &Keys, p: &[(&str, String)]) -> Result<String> {
+pub(crate) async fn binance_place(k: &Keys, p: &[(&str, String)]) -> Result<String> {
     Ok(binance_algo(k, Method::POST, "/fapi/v1/algoOrder", p).await?["algoId"].to_string())
 }
 
