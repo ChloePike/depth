@@ -7,6 +7,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# creating a release and attaching the zip needs write access (the default token is read-only)
+permissions:
+  contents: write
+
 jobs:
   macos:
     # macOS 26 SDK and Swift 6 are needed by app/Package.swift
