@@ -2,7 +2,7 @@
 name = "t1-ui"
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/ChloePike/depth"
 
 # The terminal's egui interface (chart, book, panels), shared by the eframe app (src/main.rs)

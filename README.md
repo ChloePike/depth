@@ -1,7 +1,7 @@
 # Depth
 
 [![build](https://github.com/ChloePike/depth/actions/workflows/build.yml/badge.svg)](https://github.com/ChloePike/depth/actions/workflows/build.yml)
-[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+[![license](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 
 A local, multi-exchange crypto trading terminal for macOS. Ten venues streamed side by side,
 aggregated into one book, one tape and one chart, with order entry on the venues you hold keys for.
@@ -83,5 +83,6 @@ Trading on leverage can lose more than the margin you put up. Test every venue w
 
 ## License
 
-Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT) at your option.
+Licensed under the [GNU General Public License v3.0](LICENSE) or (at your option) any later version.
+Derivative works must be released under the same license.
 Exchange logos in `assets/icons` are trademarks of their owners and are used only to identify the venues.
