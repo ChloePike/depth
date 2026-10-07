@@ -1,0 +1,46 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    # macOS 26 SDK and Swift 6 are needed by app/Package.swift
+    runs-on: macos-26
+    env:
+      CARGO_TARGET_DIR: target/main
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/main"
+
+      - name: Test
+        # unit tests only: they need no network (exchanges block some runner regions)
+        run: cargo test --release --workspace
+
+      - name: Bundle Depth.app
+        run: APP=dist/Depth.app scripts/bundle.sh
+
+      - name: Zip
+        run: ditto -c -k --keepParent dist/Depth.app dist/Depth-macos-arm64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Depth-macos-arm64
+          path: dist/Depth-macos-arm64.zip
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Depth-macos-arm64.zip
+          body: |
+            Depth for macOS (Apple silicon), ad-hoc signed: on first launch, right-click the app and choose Open.

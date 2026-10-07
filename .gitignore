@@ -1,0 +1,10 @@
+/target
+# SwiftPM build output (incl. per-agent scratch builds)
+/app/.build*
+# screenshots and a real state dump: they show the user's positions and balances
+/.shots/
+/app/state-sample.json
+.DS_Store
+# local assistant notes and build output
+/CLAUDE.md
+/dist/
