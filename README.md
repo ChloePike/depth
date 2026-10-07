@@ -1,5 +1,8 @@
 # Depth
 
+[![build](https://github.com/ChloePike/depth/actions/workflows/build.yml/badge.svg)](https://github.com/ChloePike/depth/actions/workflows/build.yml)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+
 A local, multi-exchange crypto trading terminal for macOS. Ten venues streamed side by side,
 aggregated into one book, one tape and one chart, with order entry on the venues you hold keys for.
 Everything runs on your machine: no relay, no server, no account.
@@ -39,6 +42,11 @@ Private data arrives over WebSocket pushes, never REST polling.
 - Use read-only keys first; never enable withdrawal permission.
 - Every order goes through a confirmation sheet (configurable); destructive actions ask twice.
 
+## Download
+
+Prebuilt macOS (Apple silicon) builds are attached to each [release](https://github.com/ChloePike/depth/releases).
+They are ad-hoc signed, not notarized: on first launch, right-click Depth.app and choose Open.
+
 ## Build
 
 Requirements: macOS 26, Rust (stable, edition 2024), Swift 6 (Command Line Tools or Xcode).
@@ -72,3 +80,8 @@ scripts/    bundling, icon, live regression
 
 This is a personal tool, not financial advice. Signals and models are descriptive and unvalidated.
 Trading on leverage can lose more than the margin you put up. Test every venue with the minimum size.
+
+## License
+
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT) at your option.
+Exchange logos in `assets/icons` are trademarks of their owners and are used only to identify the venues.

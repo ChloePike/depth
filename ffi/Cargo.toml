@@ -2,6 +2,8 @@
 name = "t1-ffi"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ChloePike/depth"
 
 # C ABI for the SwiftUI host (app/): renders the egui terminal into an NSView through wgpu
 # (Metal) and forwards input. Header: ffi/t1.h.
