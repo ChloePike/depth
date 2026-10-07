@@ -9,6 +9,8 @@ A local, multi-exchange crypto trading terminal for macOS. Ten venues streamed s
 aggregated into one book, one tape and one chart, with order entry on the venues you hold keys for.
 Everything runs on your machine: no relay, no server, no account.
 
+![Depth: BTC perpetual across ten venues](docs/screenshot.png)
+
 ## What it does
 
 **Market data, ten venues at once**: Binance, Bybit, Bitget, OKX, MEXC, Coinbase, Kraken, Gate,
