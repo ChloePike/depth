@@ -222,6 +222,35 @@ pub async fn place(k: &Keys, req: &OrderReq, _r: &Rules, ref_px: f64, _mode: Mod
     Ok(oid.to_string())
 }
 
+/// Native TWAP (`twapOrder`): the venue slices `qty` over `minutes` (1-1440), every 30 s, with
+/// at most 3% slippage per slice; `randomize` jitters the timing. Field order matters: the action
+/// is msgpack-hashed for the signature.
+#[derive(Serialize)]
+struct TwapWire { a: u32, b: bool, s: String, r: bool, m: u32, t: bool }
+#[derive(Serialize)]
+struct TwapAction { #[serde(rename = "type")] ty: &'static str, twap: TwapWire }
+#[derive(Serialize)]
+struct TwapCancelAction { #[serde(rename = "type")] ty: &'static str, a: u32, t: u64 }
+
+pub async fn place_twap(k: &Keys, req: &OrderReq, minutes: u32, randomize: bool) -> Result<String> {
+    if !(1..=1440).contains(&minutes) { bail!("hyperliquid: TWAP duration must be 1 to 1440 minutes"); }
+    let a = asset(&req.symbol).await?;
+    let s = sz_str(req.qty, a.sz_dec);
+    if s.parse::<f64>().unwrap_or(0.0) <= 0.0 { bail!("size below the {} lot", 10f64.powi(-(a.sz_dec as i32))); }
+    let action = TwapAction { ty: "twapOrder", twap: TwapWire { a: a.index, b: req.side() == Side::Buy, s, r: req.close, m: minutes, t: randomize } };
+    let d = exchange(k, &action).await?;
+    if let Some(e) = d["status"]["error"].as_str() { bail!("hyperliquid: {e}"); }
+    let id = d["status"]["running"]["twapId"].as_u64().ok_or_else(|| anyhow!("hyperliquid: unexpected TWAP status {}", d["status"]))?;
+    Ok(id.to_string())
+}
+
+pub async fn cancel_twap(k: &Keys, symbol: &str, id: &str) -> Result<()> {
+    let a = asset(symbol).await?;
+    let t: u64 = id.parse().map_err(|_| anyhow!("hyperliquid: bad TWAP id {id}"))?;
+    let d = exchange(k, &TwapCancelAction { ty: "twapCancel", a: a.index, t }).await?;
+    if d["status"] == "success" { Ok(()) } else { bail!("hyperliquid: {}", d["status"]["error"].as_str().map(String::from).unwrap_or_else(|| d["status"].to_string())) }
+}
+
 pub async fn cancel(k: &Keys, symbol: &str, id: &str) -> Result<()> {
     let a = asset(symbol).await?;
     let o: u64 = id.parse().map_err(|_| anyhow!("hyperliquid: bad order id {id}"))?;

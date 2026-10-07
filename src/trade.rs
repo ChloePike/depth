@@ -498,6 +498,63 @@ pub fn bybit_trailing_body(req: &OrderReq, mode: Mode, ref_px: f64, tick: f64) -
     Ok(b)
 }
 
+/// Venues that run TWAP themselves (the job keeps going with the app closed): allowed duration
+/// in minutes. Others use the client-side TWAP.
+pub fn native_twap(ex: Exchange) -> Option<(u32, u32)> {
+    match ex {
+        // POST /sapi/v1/algo/futures/newOrderTwap: 300-86400 s, notional at least 1,000 USDT
+        Exchange::Binance => Some((5, 1440)),
+        // twapOrder: 1-1440 min
+        Exchange::Hyperliquid => Some((1, 1440)),
+        _ => None,
+    }
+}
+
+/// Binance futures TWAP params. Hedge: positionSide, never reduceOnly; one-way close: reduceOnly.
+pub fn binance_twap_params(req: &OrderReq, mode: Mode, qty: &str, minutes: u32, limit: Option<&str>, client_id: &str) -> Vec<(&'static str, String)> {
+    let mut p = vec![("symbol", req.symbol.clone()), ("side", side_str(Exchange::Binance, req.side()).into()), ("quantity", qty.into()),
+                     ("duration", (minutes as u64 * 60).to_string()), ("clientAlgoId", client_id.into())];
+    match mode {
+        Mode::Hedge => p.push(("positionSide", if req.pos == Side::Buy { "LONG" } else { "SHORT" }.into())),
+        Mode::OneWay => if req.close { p.push(("reduceOnly", "true".into())); },
+    }
+    if let Some(l) = limit { p.push(("limitPrice", l.into())); }
+    p
+}
+
+/// Start a venue-run TWAP; returns the id to cancel it with. Binance: notional at least 1,000
+/// USDT, weight 3000 (UID), so it is placed once and never polled.
+pub async fn place_twap(ex: Exchange, k: &Keys, req: &OrderReq, r: &Rules, ref_px: f64, mode: Mode, minutes: u32, limit: Option<f64>, randomize: bool) -> Result<String> {
+    let Some((lo, hi)) = native_twap(ex) else { bail!("{ex:?} has no native TWAP") };
+    if !(lo..=hi).contains(&minutes) { bail!("{ex:?}: TWAP duration must be {lo} to {hi} minutes"); }
+    match ex {
+        Exchange::Binance => {
+            let qty = fmt_step(req.qty, r.step, true);
+            let notional = qty.parse::<f64>().unwrap_or(0.0) * limit.unwrap_or(ref_px);
+            if notional < 1_000.0 { bail!("binance: a TWAP needs at least 1,000 USDT notional (this is {notional:.0})"); }
+            let id = format!("t1twap{}", crate::now_ms());
+            let lim = limit.map(|l| fmt_step(l, r.tick, false));
+            let v = binance_at(k, sapi_url(), reqwest::Method::POST, "/sapi/v1/algo/futures/newOrderTwap", &binance_twap_params(req, mode, &qty, minutes, lim.as_deref(), &id)).await?;
+            if v["success"] != true { bail!("binance TWAP: {}", v["msg"].as_str().unwrap_or("rejected")); }
+            Ok(v["clientAlgoId"].as_str().unwrap_or(&id).to_string())
+        }
+        Exchange::Hyperliquid => hyperliquid::place_twap(k, req, minutes, randomize).await,
+        _ => unreachable!(),
+    }
+}
+
+pub async fn cancel_twap(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {
+    match ex {
+        Exchange::Binance => {
+            let v = binance_at(k, sapi_url(), reqwest::Method::DELETE, "/sapi/v1/algo/futures/order", &[("clientAlgoId", id.into())]).await?;
+            if v["success"] == false { bail!("binance TWAP cancel: {}", v["msg"].as_str().unwrap_or("rejected")); }
+            Ok(())
+        }
+        Exchange::Hyperliquid => hyperliquid::cancel_twap(k, symbol, id).await,
+        _ => bail!("{ex:?} has no native TWAP"),
+    }
+}
+
 /// Position mode of the account for `symbol` (read only; never changed from here).
 pub async fn mode(ex: Exchange, k: &Keys, symbol: &str) -> Result<Mode> {
     match ex {
@@ -1304,6 +1361,19 @@ mod tests {
         // BBO orders have no own price: the minimum-notional check falls back to the reference price
         let rules = Rules { tick: 0.1, step: 0.001, min_qty: 0.001, min_notional: 5.0 };
         assert!(checked(&OrderReq { qty: 0.001, ..r(true, 1) }, &rules, 84_000.0).is_ok());
+    }
+
+    #[test]
+    fn binance_twap_params_by_mode() {
+        let get = |v: &[(&str, String)], k: &str| v.iter().find(|(a, _)| *a == k).map(|(_, b)| b.clone());
+        let o = |pos: Side, close: bool| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind: Kind::Market, qty: 1.0, client_id: None };
+        let h = binance_twap_params(&o(Side::Buy, true), Mode::Hedge, "0.5", 15, Some("90000"), "t1twap1");
+        assert_eq!((get(&h, "side").as_deref(), get(&h, "positionSide").as_deref(), get(&h, "reduceOnly"), get(&h, "duration").as_deref(), get(&h, "limitPrice").as_deref()),
+                   (Some("SELL"), Some("LONG"), None, Some("900"), Some("90000")));
+        let w = binance_twap_params(&o(Side::Sell, true), Mode::OneWay, "0.5", 5, None, "t1twap2");
+        assert_eq!((get(&w, "side").as_deref(), get(&w, "reduceOnly").as_deref(), get(&w, "positionSide")), (Some("BUY"), Some("true"), None));
+        assert_eq!(native_twap(Exchange::Bybit), None);
+        assert_eq!(native_twap(Exchange::Binance), Some((5, 1440)));
     }
 
     #[test]

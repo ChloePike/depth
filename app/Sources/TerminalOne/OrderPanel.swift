@@ -45,6 +45,9 @@ struct OrderPanel: View {
     @State private var twapSlices = "10"
     @State private var twapSlip = "10"
     @State private var twapLimit = ""
+    /// run on the venue when it has a native TWAP (default): keeps going with the app closed
+    @State private var twapNative = true
+    @State private var twapRandom = false
     @State private var algoConfirm: AlgoTicket?
     private let pending = OrderPendingTpSl.shared
 
@@ -83,7 +86,12 @@ struct OrderPanel: View {
             order
             Divider()
             if !close && (kind == .limit || kind == .market) { tpslSection }
-            let jobs = s.algos.filter { !$0.cancelled && $0.status != "done" || terminal_recent($0) }
+            // running jobs, plus finished ones for a minute; venue-run jobs drop off 10 min after their end time
+            let nowMs = Date.now.timeIntervalSince1970 * 1000
+            let jobs = s.algos.filter { j in
+                let over = j.native == true && nowMs > Double(j.end_ms) + 600_000
+                return (!j.cancelled && j.status != "done" && !over) || terminal_recent(j)
+            }
             if !jobs.isEmpty { AlgoJobsView(jobs: jobs) }
             buttons
             summary
@@ -358,16 +366,32 @@ struct OrderPanel: View {
             .font(.callout)
             Toggle(L("Post only (maker or cancel)"), isOn: $scaledPost)
         case .twap:
-            HStack(spacing: 8) {
+            let nat = t.native_twap != nil && twapNative
+            if let r = t.native_twap, r.count == 2 {
+                Toggle(String(format: L("Run on %@ (keeps running when Depth is closed)"), t.venue), isOn: $twapNative)
+                    .help(String(format: L("%@ slices the order itself; duration %d to %d minutes."), t.venue, r[0], r[1]))
+            }
+            if nat {
                 OrderField(label: L("Duration (min)"), text: $twapMinutes, unit: "", id: .price, focus: $focus, onSubmit: enter)
-                OrderField(label: L("Slices"), text: $twapSlices, unit: "", id: .tp, focus: $focus, onSubmit: enter)
+                if t.venue == "Binance" {
+                    OrderField(label: L("Price limit (optional)"), text: $twapLimit, unit: "USDT", id: .level(0), focus: $focus, onSubmit: enter)
+                    OrderNote(text: L("Binance runs the TWAP: at least 1,000 USDT notional, 5 minutes to 24 hours. Cancel it here or in the Binance app."), color: .secondary)
+                } else {
+                    Toggle(L("Randomize slice timing"), isOn: $twapRandom)
+                    OrderNote(text: L("Hyperliquid runs the TWAP: a slice every 30 seconds, at most 3% slippage each. Cancel it here or on Hyperliquid."), color: .secondary)
+                }
+            } else {
+                HStack(spacing: 8) {
+                    OrderField(label: L("Duration (min)"), text: $twapMinutes, unit: "", id: .price, focus: $focus, onSubmit: enter)
+                    OrderField(label: L("Slices"), text: $twapSlices, unit: "", id: .tp, focus: $focus, onSubmit: enter)
+                }
+                HStack(spacing: 8) {
+                    OrderField(label: L("Max slippage (bp)"), text: $twapSlip, unit: "", id: .sl, focus: $focus, onSubmit: enter)
+                    OrderField(label: L("Price limit (optional)"), text: $twapLimit, unit: "", id: .level(0), focus: $focus, onSubmit: enter)
+                }
+                OrderNote(text: String(format: L("One IOC order every %@ at the venue's best price ± your slippage; slices wait while the price is beyond your limit. Keep this pair open while it runs."),
+                                       twapGap), color: .secondary)
             }
-            HStack(spacing: 8) {
-                OrderField(label: L("Max slippage (bp)"), text: $twapSlip, unit: "", id: .sl, focus: $focus, onSubmit: enter)
-                OrderField(label: L("Price limit (optional)"), text: $twapLimit, unit: "", id: .level(0), focus: $focus, onSubmit: enter)
-            }
-            OrderNote(text: String(format: L("One IOC order every %@ at the venue's best price ± your slippage; slices wait while the price is beyond your limit. Keep this pair open while it runs."),
-                                   twapGap), color: .secondary)
         }
     }
 
@@ -538,9 +562,17 @@ struct OrderPanel: View {
             guard let m = OrderNum.parse(twapMinutes), m > 0, let n = Int(twapSlices), n > 0 else { inlineError = L("Enter a duration and a number of slices"); return }
             args["minutes"] = m; args["slices"] = n; args["max_slip_bps"] = OrderNum.parse(twapSlip) ?? 10
             if let l = OrderNum.parse(twapLimit), l > 0 { args["limit"] = l }
+            let nat = t.native_twap != nil && twapNative
+            args["native"] = nat; args["randomize"] = twapRandom
+            if nat, let r = t.native_twap, r.count == 2, m < Double(r[0]) || m > Double(r[1]) {
+                inlineError = String(format: L("%@ TWAP duration must be %d to %d minutes"), t.venue, r[0], r[1]); return
+            }
             algoConfirm = AlgoTicket(op: "start_twap", args: args, title: L("Start TWAP?"),
-                message: String(format: L("%@ %@ %@ on %@ in %d slices over %@ min, at most %@ bp slippage per slice%@."), pos == "long" ? (close ? L("Buy") : L("Long")) : (close ? L("Sell") : L("Short")),
-                                Fmt.qty(qtyV), s.base, t.venue, n, Fmt.num(m, 0), twapSlip, (args["limit"] as? Double).map { ", " + L("limit") + " " + Fmt.px($0) } ?? ""))
+                message: nat
+                    ? String(format: L("%@ %@ %@ over %@ min, run by %@%@."), pos == "long" ? (close ? L("Buy") : L("Long")) : (close ? L("Sell") : L("Short")),
+                             Fmt.qty(qtyV), s.base, Fmt.num(m, 0), t.venue, (args["limit"] as? Double).map { ", " + L("limit") + " " + Fmt.px($0) } ?? "")
+                    : String(format: L("%@ %@ %@ on %@ in %d slices over %@ min, at most %@ bp slippage per slice%@."), pos == "long" ? (close ? L("Buy") : L("Long")) : (close ? L("Sell") : L("Short")),
+                             Fmt.qty(qtyV), s.base, t.venue, n, Fmt.num(m, 0), twapSlip, (args["limit"] as? Double).map { ", " + L("limit") + " " + Fmt.px($0) } ?? ""))
             return
         case .stop:
             guard let tr = OrderNum.parse(trigger), tr > 0 else { inlineError = L("Enter a trigger price"); return }
@@ -812,8 +844,15 @@ struct AlgoJobsView: View {
                             Button(L("Cancel")) { Store.shared.call("cancel_algo", ["id": j.id]) }.buttonStyle(.borderless).foregroundStyle(.red)
                         }
                     }
-                    ProgressView(value: Double(j.done), total: Double(max(j.slices, 1)))
-                    Text("\(j.done)/\(j.slices) · \(Fmt.qty(j.sent)) \(L("sent")) · \(L(j.status))").font(.caption).foregroundStyle(j.status.hasPrefix("waiting") ? Color.orange : Color.secondary)
+                    if j.native == true {
+                        let now = Date.now.timeIntervalSince1970 * 1000
+                        let frac = min(max((now - Double(j.started_ms)) / Double(max(j.end_ms - j.started_ms, 1)), 0), 1)
+                        ProgressView(value: frac)
+                        Text("\(L(j.status)) · \(frac >= 1 ? L("time elapsed: check fills in Trade History") : String(format: L("%.0f%% of the time"), frac * 100))").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        ProgressView(value: Double(j.done), total: Double(max(j.slices, 1)))
+                        Text("\(j.done)/\(j.slices) · \(Fmt.qty(j.sent)) \(L("sent")) · \(L(j.status))").font(.caption).foregroundStyle(j.status.hasPrefix("waiting") || j.status.hasPrefix("failed") ? Color.orange : Color.secondary)
+                    }
                 }
             }
         }

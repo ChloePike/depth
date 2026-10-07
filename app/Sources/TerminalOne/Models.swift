@@ -123,7 +123,7 @@ struct TradeCtx: Decodable, Equatable {
     var venue = "Bybit"; var symbol = ""; var has_key = false; var verified = true
     var mode: String?; var lev: Double?; var available: Double?; var equity: Double?; var uni_mmr: Double?; var mm_rate: Double?
     var bid: Double?; var ask: Double?; var tick: Double?; var step: Double?; var min_qty: Double?; var min_notional: Double?
-    var bbo_levels: [Int] = []; var caps = OrderCaps(); var push_ms: Double?; var rtt_ms: Double?; var fee = Fee(); var smart = false; var error: String?
+    var bbo_levels: [Int] = []; var caps = OrderCaps(); var native_twap: [Int]?; var push_ms: Double?; var rtt_ms: Double?; var fee = Fee(); var smart = false; var error: String?
 }
 struct Fee: Decodable, Equatable { var taker = 0.00055; var maker = 0.0002 }
 
@@ -259,4 +259,5 @@ struct OrderCaps: Decodable, Equatable { var fok = false; var stop = false; var 
 struct AlgoJobRow: Decodable, Equatable, Identifiable {
     var id: Int64; var ex: String; var symbol: String; var buy: Bool; var close: Bool; var total: Double; var sent: Double
     var slices: Int; var done: Int; var started_ms: Int64; var end_ms: Int64; var status: String; var cancelled: Bool
+    var native: Bool? = false
 }

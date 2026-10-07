@@ -79,7 +79,7 @@ impl App {
             "uni_mmr": bal.as_ref().and_then(|b| b.uni_mmr), "mm_rate": bal.as_ref().and_then(|b| b.mm_rate),
             "bid": bbo.map(|b| b.0), "ask": bbo.map(|b| b.1),
             "tick": rules.map(|r| r.tick), "step": rules.map(|r| r.step), "min_qty": rules.map(|r| r.min_qty), "min_notional": rules.map(|r| r.min_notional),
-            "bbo_levels": trade::bbo_levels(ex), "caps": trade::caps(ex), "push_ms": push_ms, "rtt_ms": acc.order_rtt.get(&ex),
+            "bbo_levels": trade::bbo_levels(ex), "caps": trade::caps(ex), "native_twap": trade::native_twap(ex), "push_ms": push_ms, "rtt_ms": acc.order_rtt.get(&ex),
             "fee": {"taker": fee_t, "maker": fee_m},
             "smart": self.route.smart, "error": acc.errors.get(&ex),
         });
@@ -132,6 +132,7 @@ impl App {
         let algos: Vec<Value> = acc.algos.iter().rev().map(|j| json!({
             "id": j.id, "ex": ex_name(j.ex), "symbol": j.symbol, "buy": j.buy, "close": j.close, "total": j.total, "sent": j.sent,
             "slices": j.slices, "done": j.done, "started_ms": j.started_ms, "end_ms": j.end_ms, "status": j.status, "cancelled": j.cancelled,
+            "native": j.venue_id.is_some(),
         })).collect();
         let log: Vec<Value> = acc.log.iter().rev().take(200).map(|(ts, m, ok)| json!({"ts": ts, "msg": m, "ok": ok})).collect();
         let tests = self.eng.key_tests.lock().unwrap().clone();
@@ -301,8 +302,13 @@ impl App {
             "start_twap" => {
                 let req = self.order_req(&json!({"pos": v["pos"], "close": v["close"], "qty": v["qty"], "kind": "market"}))?;
                 let ex = self.trade.ex;
-                let id = self.eng.start_twap(ex, req, f("minutes").ok_or("duration")?, v["slices"].as_u64().unwrap_or(10) as usize,
-                    f("max_slip_bps").unwrap_or(10.0), f("limit").filter(|l| *l > 0.0), ctx)?;
+                let minutes = f("minutes").ok_or("duration")?;
+                let id = if v["native"].as_bool() == Some(true) && trade::native_twap(ex).is_some() {
+                    let ref_px = self.eng.agg.lock().unwrap().venues.get(&(ex, Market::Perp)).and_then(|v| v.mid()).unwrap_or(0.0);
+                    self.eng.start_native_twap(ex, req, minutes.round() as u32, f("limit").filter(|l| *l > 0.0), v["randomize"].as_bool().unwrap_or(false), ref_px, ctx)?
+                } else {
+                    self.eng.start_twap(ex, req, minutes, v["slices"].as_u64().unwrap_or(10) as usize, f("max_slip_bps").unwrap_or(10.0), f("limit").filter(|l| *l > 0.0), ctx)?
+                };
                 return Ok(json!({"id": id}));
             }
             "cancel_algo" => self.eng.cancel_algo(v["id"].as_u64().ok_or("id")?),

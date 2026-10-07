@@ -196,3 +196,6 @@ done = 已完成
 cancelled = 已取消
 cancelling = 正在取消
 Confirm = 确认
+Run on %@ (keeps running when Depth is closed) = 交给 %@ 执行（关掉 Depth 也会继续）
+Randomize slice timing = 随机化下单间隔
+time elapsed: check fills in Trade History = 时间已到：在成交历史里查看成交

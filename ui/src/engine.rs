@@ -73,6 +73,8 @@ pub struct AlgoJob {
     pub id: u64, pub ex: Exchange, pub symbol: String, pub buy: bool, pub close: bool,
     pub total: f64, pub sent: f64, pub slices: usize, pub done: usize,
     pub started_ms: i64, pub end_ms: i64, pub status: String, pub cancelled: bool,
+    /// run by the venue (Binance / Hyperliquid TWAP): its id there, to cancel it
+    pub venue_id: Option<String>,
 }
 
 fn set_status(account: &Arc<Mutex<Account>>, id: u64, s: &str) {
@@ -496,7 +498,7 @@ impl Engine {
         let buy = base.side() == terminal_one::Side::Buy;
         account.lock().unwrap().algos.push(AlgoJob {
             id, ex, symbol: base.symbol.clone(), buy, close: base.close, total: base.qty, sent: 0.0, slices: sizes.len(), done: 0,
-            started_ms: terminal_one::now_ms(), end_ms: terminal_one::now_ms() + (minutes * 60_000.0) as i64, status: "running".into(), cancelled: false,
+            started_ms: terminal_one::now_ms(), end_ms: terminal_one::now_ms() + (minutes * 60_000.0) as i64, status: "running".into(), cancelled: false, venue_id: None,
         });
         rt.spawn(async move {
             let mut i = 0;
@@ -532,8 +534,61 @@ impl Engine {
         Ok(id)
     }
 
+    /// Venue-run TWAP: placed once, then the venue slices it (keeps running with the app closed).
+    pub fn start_native_twap(&self, ex: Exchange, base: OrderReq, minutes: u32, limit: Option<f64>, randomize: bool, ref_px: f64, ctx: &eframe::egui::Context) -> Result<u64, String> {
+        let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return Err("not connected".into()) };
+        let id = terminal_one::now_ms() as u64;
+        let now = terminal_one::now_ms();
+        account.lock().unwrap().algos.push(AlgoJob {
+            id, ex, symbol: base.symbol.clone(), buy: base.side() == terminal_one::Side::Buy, close: base.close, total: base.qty, sent: 0.0, slices: 0, done: 0,
+            started_ms: now, end_ms: now + minutes as i64 * 60_000, status: "starting".into(), cancelled: false, venue_id: None,
+        });
+        rt.spawn(async move {
+            let k = account.lock().unwrap().keys.get(&ex).cloned();
+            let key = (ex, base.symbol.clone());
+            let (rules, mode) = { let a = account.lock().unwrap(); (a.rules.get(&key).copied(), a.modes.get(&key).copied().flatten()) };
+            let res = match (k, rules) {
+                (Some(k), Some(r)) => {
+                    let mode = match mode { Some(m) => Ok(m), None => trade::mode(ex, &k, &base.symbol).await };
+                    match mode { Ok(m) => trade::place_twap(ex, &k, &base, &r, ref_px, m, minutes, limit, randomize).await, Err(e) => Err(e) }
+                }
+                _ => Err(anyhow::anyhow!("keys or venue rules not loaded")),
+            };
+            let mut a = account.lock().unwrap();
+            let what = format!("{ex:?} {} TWAP {} {} over {minutes} min", base.symbol, if base.side() == terminal_one::Side::Buy { "buy" } else { "sell" }, base.qty);
+            match res {
+                Ok(vid) => {
+                    a.note(format!("OK {what} id {vid}"), true);
+                    if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) { j.venue_id = Some(vid); j.status = format!("running on {ex:?}"); }
+                }
+                Err(e) => {
+                    a.note(format!("FAIL {what}: {e:#}"), false);
+                    if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) { j.status = format!("failed: {e:#}"); j.cancelled = true; j.end_ms = terminal_one::now_ms(); }
+                }
+            }
+            ctx.request_repaint();
+        });
+        Ok(id)
+    }
+
     pub fn cancel_algo(&self, id: u64) {
-        if let Some(j) = self.account.lock().unwrap().algos.iter_mut().find(|j| j.id == id) { j.cancelled = true; j.status = "cancelling".into(); }
+        let mut a = self.account.lock().unwrap();
+        let Some(j) = a.algos.iter_mut().find(|j| j.id == id) else { return };
+        j.cancelled = true;
+        j.status = "cancelling".into();
+        // venue-run: cancel it there too
+        if let (Some(vid), Some(rt)) = (j.venue_id.clone(), self.acct_rt.as_ref()) {
+            let (ex, symbol, account) = (j.ex, j.symbol.clone(), self.account.clone());
+            let Some(k) = a.keys.get(&ex).cloned() else { return };
+            rt.spawn(async move {
+                let r = trade::cancel_twap(ex, &k, &symbol, &vid).await;
+                let mut a = account.lock().unwrap();
+                match r {
+                    Ok(()) => { a.note(format!("OK {ex:?} {symbol} TWAP {vid} cancelled"), true); if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) { j.status = "cancelled".into(); j.end_ms = terminal_one::now_ms(); } }
+                    Err(e) => { a.note(format!("FAIL cancel TWAP {vid}: {e:#}"), false); if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) { j.status = format!("cancel failed: {e:#}"); j.cancelled = false; } }
+                }
+            });
+        }
     }
 
     /// Look up the account's position mode for (venue, symbol) once.
