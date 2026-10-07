@@ -36,6 +36,16 @@ routing across venues, whole-position and staged TP/SL, close / reverse / close-
 funding estimates, order / trade / position history, wallets and transfers between a venue's accounts.
 Private data arrives over WebSocket pushes, never REST polling.
 
+## Getting started
+
+1. Download `Depth-macos-arm64.zip` from the [latest release](https://github.com/ChloePike/depth/releases/latest),
+   move Depth.app to Applications, right-click it and choose **Open** the first time.
+2. Pick a pair in the toolbar and a market (Spot / Margin / Perpetual / Options). Market data needs no account.
+3. To see positions or trade: Settings (⌘,) → API Keys. Start with a read-only key.
+
+The full walkthrough (window layout, every indicator, order entry, smart routing, positions, transfers,
+troubleshooting) is in **[docs/GUIDE.md](docs/GUIDE.md)**.
+
 ## Security
 
 - API keys live in the macOS Keychain (service `terminal-one`), never in files or process arguments.
