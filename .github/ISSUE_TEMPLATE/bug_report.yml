@@ -1,0 +1,45 @@
+name: Bug report
+description: Something is broken or shows wrong data
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste API keys, secrets, account IDs or balances here. Redact screenshots.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Open Perpetual, BTC/USDT\n2. ..."
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Market data / a connector, Chart, Order book, Order entry / trading, Positions / account, Signals / models, Settings, Other]
+    validations:
+      required: true
+  - type: input
+    id: venue
+    attributes:
+      label: Exchange and market (if specific)
+      placeholder: "Bybit perp, Gate spot, ..."
+  - type: input
+    id: version
+    attributes:
+      label: Depth version and macOS version
+      placeholder: "0.1.0 on macOS 26.1"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Contents of ~/Library/Logs/TerminalOne/panic.log if it exists, or probe output (`cargo run --bin probe -- <exchange> <market> BTC`).
+      render: text

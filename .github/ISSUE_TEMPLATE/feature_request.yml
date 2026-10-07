@@ -1,0 +1,16 @@
+name: Feature request
+description: A new indicator, venue, order type or view
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What do you want to do
+      description: The trading problem first, then the feature you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: reference
+    attributes:
+      label: Reference
+      description: How another terminal or exchange does it (screenshots welcome, redacted).

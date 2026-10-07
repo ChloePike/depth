@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/appicon/icon-1024.png" width="128" alt="Depth icon"></p>
+
 # Depth
 
 [![build](https://github.com/ChloePike/depth/actions/workflows/build.yml/badge.svg)](https://github.com/ChloePike/depth/actions/workflows/build.yml)
@@ -6,8 +8,6 @@
 A local, multi-exchange crypto trading terminal for macOS. Ten venues streamed side by side,
 aggregated into one book, one tape and one chart, with order entry on the venues you hold keys for.
 Everything runs on your machine: no relay, no server, no account.
-
-![icon](assets/appicon/icon-1024.png)
 
 ## What it does
 
@@ -80,6 +80,12 @@ scripts/    bundling, icon, live regression
 
 This is a personal tool, not financial advice. Signals and models are descriptive and unvalidated.
 Trading on leverage can lose more than the margin you put up. Test every venue with the minimum size.
+
+## Contributing
+
+Bug reports and feature requests: [open an issue](https://github.com/ChloePike/depth/issues/new/choose).
+Pull requests are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). Security problems: see [SECURITY.md](SECURITY.md),
+not a public issue.
 
 ## License
 
