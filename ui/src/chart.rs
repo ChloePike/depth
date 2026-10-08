@@ -74,7 +74,12 @@ impl Pane {
 /// Heatmap aggregated per chart bar: (bar start, first bin index, max base qty per bin).
 #[derive(Default)]
 struct HeatCache {
-    tf: i64, market: Option<Market>, last_ts: i64, bin: f64, bars: Vec<(i64, i64, Vec<f32>)>,
+    tf: i64, market: Option<Market>, last_ts: i64, bin: f64,
+    /// per bar: (open time, lowest bin, summed qty per bin, samples); drawn as the time-weighted
+    /// mean, so liquidity that was pulled fades instead of staying lit for the whole bar
+    bars: Vec<(i64, i64, Vec<f32>, u32)>,
+    /// the latest column: the live bar shows the book as it is now, not what it was earlier
+    cur: Vec<(i64, f32)>,
     /// bumped whenever `bars` changes; the GPU texture is rebuilt only then (about once a second)
     ver: u64,
     tex: Option<(u64, egui::TextureHandle, TexGeom)>,
@@ -228,7 +233,7 @@ fn grid(lo: f64, hi: f64, target: f64) -> Vec<f64> {
 }
 
 impl HeatCache {
-    /// Incrementally fold new heatmap columns into per-bar max-liquidity rows.
+    /// Incrementally fold new heatmap columns into per-bar summed-liquidity rows.
     fn update(&mut self, h: &Heatmap, tf: i64, market: Market) {
         if self.tf != tf || self.market != Some(market) || self.bin != h.bin {
             *self = HeatCache { tf, market: Some(market), bin: h.bin, ..Default::default() };
@@ -241,9 +246,9 @@ impl HeatCache {
             let t = ts.div_euclid(ms) * ms;
             if self.bars.last().is_none_or(|b| b.0 != t) {
                 let lo = col.iter().map(|c| c.0).min().unwrap_or(0) - 50;
-                self.bars.push((t, lo, vec![]));
+                self.bars.push((t, lo, vec![], 0));
             }
-            let (_, lo, v) = self.bars.last_mut().unwrap();
+            let (_, lo, v, n) = self.bars.last_mut().unwrap();
             if col.iter().any(|c| (c.0 - *lo).abs() > 20_000) { continue; }
             for &(bin, q) in col {
                 if bin < *lo {
@@ -253,8 +258,10 @@ impl HeatCache {
                 }
                 let i = (bin - *lo) as usize;
                 if i >= v.len() { v.resize(i + 1, 0.0); }
-                v[i] = v[i].max(q);
+                v[i] += q;
             }
+            *n += 1;
+            self.cur.clone_from(col);
             self.last_ts = *ts;
             self.ver += 1;
         }
@@ -271,12 +278,20 @@ impl HeatCache {
         let hi = self.bars.iter().map(|b| b.1 + b.2.len() as i64).max()?;
         let (cols, bins) = (((last.0 - first.0) / ms + 1) as usize, (hi - lo).max(1) as usize);
         if cols * bins > 8_000_000 { return None; }
-        let mut qs: Vec<f32> = self.bars.iter().flat_map(|b| b.2.iter().copied().filter(|q| *q > 0.0)).collect();
+        let last_i = self.bars.len() - 1;
+        let vals: Vec<(i64, i64, Vec<f32>)> = self.bars.iter().enumerate().map(|(i, (t, blo, v, n))| {
+            if i == last_i {
+                let mut w = vec![0.0; v.len()];
+                for &(b, q) in &self.cur { if let Some(x) = usize::try_from(b - blo).ok().and_then(|k| w.get_mut(k)) { *x = q; } }
+                (*t, *blo, w)
+            } else { (*t, *blo, v.iter().map(|q| q / (*n).max(1) as f32).collect()) }
+        }).collect();
+        let mut qs: Vec<f32> = vals.iter().flat_map(|b| b.2.iter().copied().filter(|q| *q > 0.0)).collect();
         if qs.is_empty() { return None; }
         qs.sort_by(f32::total_cmp);
         let qmax = qs[(qs.len() * 97 / 100).min(qs.len() - 1)].max(1e-9);
         let mut img = egui::ColorImage::new([cols, bins], vec![Color32::TRANSPARENT; cols * bins]);
-        for (bt, blo, v) in &self.bars {
+        for (bt, blo, v) in &vals {
             let x = ((bt - first.0) / ms) as usize;
             for (k, q) in v.iter().enumerate() {
                 if *q <= 0.0 { continue; }
@@ -1336,6 +1351,20 @@ fn local_parts(ms: i64) -> (String, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heatmap_pulled_wall_fades() {
+        let mut h = Heatmap { bin: 1.0, ..Default::default() };
+        // bar 0: a wall at bin 100 for 1 of 4 samples; bar 1 (live): pulled
+        for (ts, q) in [(1, 40.0), (15_000, 0.0), (30_000, 0.0), (45_000, 0.0), (60_000, 40.0), (61_000, 0.0)] {
+            h.cols.push_back((ts, vec![(100, q), (101, 1.0)]));
+        }
+        let mut c = HeatCache::default();
+        c.update(&h, 1, Market::Perp);
+        let (_, lo, v, n) = &c.bars[0];
+        assert_eq!(v[(100 - lo) as usize] / *n as f32, 10.0);
+        assert_eq!(c.cur, vec![(100, 0.0), (101, 1.0)]);
+    }
 
     #[test]
     fn profile_poc_value_area_and_vwap() {
