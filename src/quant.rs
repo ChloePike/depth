@@ -107,13 +107,18 @@ pub fn detect(i: &Input, now_ms: i64) -> Vec<Signal> {
             }
         }
     }
-    // 2. liquidation cascade: last 3 minutes vs the 4 hours before
-    if p.len() > 60 {
+    // 2. liquidation cascade: last 3 minutes vs up to 4 hours before. History has no liquidations
+    // (all-zero = missing), so the sample starts at the first bar with one: live data only.
+    // Sigma is floored at the sample mean: a mostly-zero sample has MAD 0.
+    let live = p.iter().position(|b| b.liq_long + b.liq_short > 0.0).unwrap_or(p.len());
+    if p.len() >= live + 63 {
         let n = p.len();
         let recent: (f64, f64) = p[n - 3..].iter().fold((0.0, 0.0), |a, b| (a.0 + b.liq_long * b.c, a.1 + b.liq_short * b.c));
-        let hist: Vec<f64> = p[n.saturating_sub(243)..n - 3].windows(3).map(|w| w.iter().map(|b| (b.liq_long + b.liq_short) * b.c).sum()).collect();
+        let hist: Vec<f64> = p[n.saturating_sub(243).max(live)..n - 3].windows(3).map(|w| w.iter().map(|b| (b.liq_long + b.liq_short) * b.c).sum()).collect();
         let tot = recent.0 + recent.1;
-        if let Some(zl) = z(tot, &hist) {
+        let mean = hist.iter().sum::<f64>() / hist.len().max(1) as f64;
+        if let Some((m, sd)) = robust(&hist) {
+            let zl = (tot - m) / sd.max(mean).max(1e-12);
             if zl >= 6.0 && tot > 0.0 {
                 let longs = recent.0 >= recent.1;
                 push("liq_cascade", sev(zl), if longs { -1 } else { 1 },
@@ -276,6 +281,20 @@ mod tests {
         // quiet tape: nothing
         let quiet: Vec<Bar> = (0..150).map(|i| bar(i, 100.0, 10.0 + (i % 3) as f64)).collect();
         assert!(detect(&Input { perp: &quiet, spot: &[], trades: &[], dislocation: &[], base: "BTC" }, 0).iter().all(|x| x.kind != "vol_spike"));
+    }
+
+    #[test]
+    fn liq_cascade_needs_live_sample() {
+        let cascade = |p: &[Bar]| detect(&Input { perp: p, spot: &[], trades: &[], dislocation: &[], base: "BTC" }, 0).into_iter().any(|x| x.kind == "liq_cascade");
+        // history only (zero liquidations), then one small liquidation: not a cascade
+        let mut p: Vec<Bar> = (0..300).map(|i| bar(i, 100.0, 10.0)).collect();
+        p.last_mut().unwrap().liq_long = 0.01;
+        assert!(!cascade(&p));
+        // live hour with sparse liquidations of ~1, then 50 in 3 minutes: cascade
+        let mut p: Vec<Bar> = (0..300).map(|i| { let mut b = bar(i, 100.0, 10.0); if i >= 100 && i % 7 == 0 { b.liq_long = 1.0; } b }).collect();
+        assert!(!cascade(&p));
+        for b in &mut p[297..] { b.liq_long = 20.0; }
+        assert!(cascade(&p));
     }
 
     #[test]

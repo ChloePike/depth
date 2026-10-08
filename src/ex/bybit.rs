@@ -17,7 +17,7 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
     let topics = |names: &[&str]| names.iter().map(|n| format!("{n}.{sym}")).collect::<Vec<_>>();
     match sub.market {
         Market::Spot | Market::Margin => {
-            let args = topics(&["publicTrade", "orderbook.50", "orderbook.1"]);
+            let args = topics(&["publicTrade", "orderbook.1000", "orderbook.1"]);
             let (e1, sym1) = (e.clone(), sym.clone());
             let mut book = 0i64;
             let mut v = vec![tokio::spawn(session(format!("bybit {:?}", sub.market), format!("{WS}/spot"), args,
@@ -29,7 +29,7 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
             v
         }
         Market::Perp => {
-            let args = topics(&["publicTrade", "orderbook.50", "orderbook.1", "tickers", "allLiquidation"]);
+            let args = topics(&["publicTrade", "orderbook.1000", "orderbook.1", "tickers", "allLiquidation"]);
             let (e1, sym1) = (e.clone(), sym.clone());
             let (mut book, mut ticker) = (0i64, Map::new());
             vec![

@@ -172,6 +172,8 @@ pub struct Chart {
     /// bars scrolled away from the live edge (0 = latest at the right)
     #[serde(skip)] right: f32,
     #[serde(skip)] cache: HeatCache,
+    /// last heatmap column time the walls were computed for, and the (bid, ask) walls shown
+    #[serde(skip)] walls_at: (i64, Vec<(f64, f64)>, Vec<(f64, f64)>),
     #[serde(skip)] tool: Option<Tool>,
     /// first point of a two-point drawing in progress
     #[serde(skip)] pending: Option<(i64, f64)>,
@@ -180,7 +182,7 @@ pub struct Chart {
 impl Default for Chart {
     fn default() -> Self {
         Chart {
-            tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(),
+            tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
             drawings: Default::default(), tool: None, pending: None, ma: false, sr: true, walls: false, mark: true, breakouts: true, vwap: true, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
             panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false)],
         }
@@ -311,12 +313,15 @@ impl HeatCache {
     }
 }
 
-/// Estimated liquidation levels left open after `bars`. Model: every OI increase opens a long
-/// and a short at the bar's typical price, spread over LEVERAGE; a level is wiped when price
-/// trades through it, and OI decreases shrink every level proportionally.
-/// ponytail: fixed leverage mix and maintenance margin, no per-venue position data; refine with
-/// venue leverage/position distributions if they ever become available.
-const LEVERAGE: [(f64, f64); 4] = [(10.0, 0.3), (25.0, 0.3), (50.0, 0.25), (100.0, 0.15)];
+/// Estimated liquidation levels left open after `bars`. Model: each bar's traded volume opens
+/// longs and shorts at its typical price, spread over LEVERAGE; a level is wiped once price trades
+/// through it. Calibrated against 90 days of Gate per-5m liquidation sizes (BTC/ETH/SOL, tuned on
+/// the first 60 days, scored on the last 30): out of sample the swept mass explains liquidations
+/// beyond what a 3h breakout alone does (incremental R2 0.10 on log size). Volume beat OI increases
+/// (0.067); adding OI, taker-side splits or time decay did not help.
+/// ponytail: one leverage mix for every venue and asset, no position data; re-fit against venue
+/// liquidation history (Gate contract_stats) if venues ever publish leverage distributions.
+const LEVERAGE: [(f64, f64); 6] = [(3.0, 0.15), (5.0, 0.2), (10.0, 0.25), (20.0, 0.2), (50.0, 0.15), (100.0, 0.05)];
 const MMR: f64 = 0.005;
 
 /// Price of bin i is (lo + i) * bin; quantities in base units.
@@ -332,26 +337,18 @@ fn liq_levels(bars: &[Bar]) -> Option<LiqMap> {
     let bins = (hi - lo + 1) as usize;
     if bins > 200_000 { return None; }
     let (mut long, mut short) = (vec![0f32; bins], vec![0f32; bins]);
-    let mut prev_oi: Option<f64> = None;
     let at = |p: f64| ((p / bin).round() as i64 - lo).clamp(0, bins as i64 - 1) as usize;
     for b in bars {
-        if let (Some(oi), Some(p0)) = (b.oi, prev_oi) {
-            let d = oi - p0;
-            if d > 0.0 {
-                let p = (b.h + b.l + b.c) / 3.0;
-                for (lev, w) in LEVERAGE {
-                    long[at(p * (1.0 - 1.0 / lev + MMR))] += (d * w) as f32;
-                    short[at(p * (1.0 + 1.0 / lev - MMR))] += (d * w) as f32;
-                }
-            } else if p0 > 0.0 {
-                let k = (oi / p0).max(0.0) as f32;
-                long.iter_mut().chain(short.iter_mut()).for_each(|q| *q *= k);
-            }
-        }
-        if b.oi.is_some() { prev_oi = b.oi; }
         // price traded through: longs at or above the low and shorts at or below the high are gone
         long[at(b.l)..].iter_mut().for_each(|q| *q = 0.0);
         short[..=at(b.h)].iter_mut().for_each(|q| *q = 0.0);
+        if b.vol > 0.0 {
+            let p = (b.h + b.l + b.c) / 3.0;
+            for (lev, w) in LEVERAGE {
+                long[at(p * (1.0 - 1.0 / lev + MMR))] += (b.vol * w / 2.0) as f32;
+                short[at(p * (1.0 + 1.0 / lev - MMR))] += (b.vol * w / 2.0) as f32;
+            }
+        }
     }
     Some(LiqMap { bin, lo, long, short })
 }
@@ -436,7 +433,7 @@ fn broken_levels(bars: &[Bar], levels: &[SrLevel], within: usize) -> Vec<(SrLeve
 
 #[derive(Default)]
 struct LiqCache {
-    /// (tf, bar count, last bar time, last OI bits): recomputed only when one of them changes
+    /// (tf, bar count, last bar time, last volume bits): recomputed only when one of them changes
     key: (i64, usize, i64, u64),
     map: Option<LiqMap>,
 }
@@ -444,7 +441,7 @@ struct LiqCache {
 impl LiqCache {
     fn get(&mut self, bars: &[Bar], tf: i64) -> Option<&LiqMap> {
         let last = bars.last()?;
-        let key = (tf, bars.len(), last.t, last.oi.unwrap_or(0.0).to_bits());
+        let key = (tf, bars.len(), last.t, last.vol.to_bits());
         if key != self.key { self.key = key; self.map = liq_levels(bars); }
         self.map.as_ref()
     }
@@ -803,28 +800,27 @@ impl Chart {
                 }
             }
         }
-        // liquidity walls: aggregated resting size far above the book's typical level, within 3%
+        // liquidity walls: resting size that stood far above the book's typical level for most of
+        // the last minute (heatmap columns), so walls neither flicker nor include flashed orders
         if self.walls && self.src.is_none() {
-            if let Some(mid) = a.mid(smarket) {
-                let bin = nice(mid * 2e-4);
-                let (bids, asks) = a.book_where(smarket, bin, 0.03, true, |_| true);
-                let mut qs: Vec<f64> = bids.iter().chain(&asks).map(|l| l.qty).collect();
-                qs.sort_by(f64::total_cmp);
-                if let Some(&med) = qs.get(qs.len() / 2) {
-                    for (side, ask) in [(&bids, false), (&asks, true)] {
-                        let mut big: Vec<&terminal_one::agg::Level> = side.iter().filter(|l| l.qty > med * 5.0).collect();
-                        big.sort_by(|x, z| z.qty.total_cmp(&x.qty));
-                        for l in big.into_iter().take(2).filter(|l| l.px > lo && l.px < hi) {
-                            let col = if ask { dn() } else { up() };
-                            let ly = y(l.px);
-                            let x0 = main.right() - main.width() * 0.35;
-                            painter.extend(egui::Shape::dotted_line(&[pos2(x0, ly), pos2(main.right(), ly)], col.linear_multiply(0.8), 5.0, 1.2));
-                            let tag = format!("{} ${}", if ask { "Ask wall" } else { "Bid wall" }, fmt_usd_short(l.qty * l.px));
-                            let g = painter.layout_no_wrap(tag, mono(10.5), col);
-                            let r = place(Rect::from_min_size(pos2(x0 + 2.0, ly - 15.0), g.size() + vec2(6.0, 2.0)), &mut taken);
-                            painter.rect_filled(r, 2, LABEL_BG.gamma_multiply(0.85));
-                            painter.galley(r.min + vec2(3.0, 1.0), g, col);
-                        }
+            if let (Some(mid), Some(h)) = (a.mid(smarket), a.heat.get(&smarket)) {
+                let ts = h.cols.back().map_or(0, |c| c.0);
+                if ts != self.walls_at.0 {
+                    let prev: Vec<f64> = self.walls_at.1.iter().chain(&self.walls_at.2).map(|w| w.0).collect();
+                    let (b, k) = h.walls(mid, 60, &prev);
+                    self.walls_at = (ts, b, k);
+                }
+                for (side, ask) in [(&self.walls_at.1, false), (&self.walls_at.2, true)] {
+                    for &(px, qty) in side.iter().filter(|(p, _)| *p > lo && *p < hi) {
+                        let col = if ask { dn() } else { up() };
+                        let ly = y(px);
+                        let x0 = main.right() - main.width() * 0.35;
+                        painter.extend(egui::Shape::dotted_line(&[pos2(x0, ly), pos2(main.right(), ly)], col.linear_multiply(0.8), 5.0, 1.2));
+                        let tag = format!("{} ${}", if ask { "Ask wall" } else { "Bid wall" }, fmt_usd_short(qty * px));
+                        let g = painter.layout_no_wrap(tag, mono(10.5), col);
+                        let r = place(Rect::from_min_size(pos2(x0 + 2.0, ly - 15.0), g.size() + vec2(6.0, 2.0)), &mut taken);
+                        painter.rect_filled(r, 2, LABEL_BG.gamma_multiply(0.85));
+                        painter.galley(r.min + vec2(3.0, 1.0), g, col);
                     }
                 }
             }
@@ -1474,21 +1470,18 @@ mod tests {
     }
 
     #[test]
-    fn liq_levels_open_sweep_and_shrink() {
-        let bar = |t: i64, c: f64, oi: f64| Bar { t, o: c, h: c, l: c, c, oi: Some(oi), ..Default::default() };
+    fn liq_levels_open_and_sweep() {
+        let bar = |t: i64, c: f64, vol: f64| Bar { t, o: c, h: c, l: c, c, vol, ..Default::default() };
         let total = |m: &LiqMap| m.long.iter().chain(&m.short).sum::<f32>();
-        // OI up 10 at 100: long levels below, short levels above, totals 10 each side
-        let m = liq_levels(&[bar(0, 100.0, 0.0), bar(1, 100.0, 10.0)]).unwrap();
+        // 20 traded at 100: 10 of long levels below, 10 of short levels above
+        let m = liq_levels(&[bar(0, 100.0, 20.0)]).unwrap();
         let px = |i: usize| (m.lo + i as i64) as f64 * m.bin;
         let below: f32 = m.long.iter().enumerate().filter(|(i, _)| px(*i) < 100.0).map(|(_, q)| q).sum();
         let above: f32 = m.short.iter().enumerate().filter(|(i, _)| px(*i) > 100.0).map(|(_, q)| q).sum();
         assert!((below - 10.0).abs() < 1e-3 && (above - 10.0).abs() < 1e-3, "{below} {above}");
-        // OI halves: everything shrinks by half; then a dip to 97 wipes the 50x/100x long levels
-        // (98.5, 99.5) and keeps 10x/25x (90.5, 96.5)
-        let bars = [bar(0, 100.0, 0.0), bar(1, 100.0, 10.0), bar(2, 100.0, 5.0), Bar { l: 97.0, ..bar(3, 100.0, 5.0) }];
-        assert!((total(&liq_levels(&bars[..3]).unwrap()) - 10.0).abs() < 1e-3);
-        let t = total(&liq_levels(&bars).unwrap());
-        assert!((t - (10.0 - 5.0 * 0.4)).abs() < 1e-3, "{t}");
+        // a dip to 97 with no volume wipes the 50x/100x long levels (98.5, 99.5), keeps 3x..20x
+        let t = total(&liq_levels(&[bar(0, 100.0, 20.0), Bar { l: 97.0, ..bar(1, 100.0, 0.0) }]).unwrap());
+        assert!((t - (20.0 - 10.0 * 0.2)).abs() < 1e-3, "{t}");
     }
 
     #[test]

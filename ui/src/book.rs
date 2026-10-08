@@ -68,13 +68,14 @@ impl BookView {
         let Some(mid) = (match self.src { None => a.mid(market), Some(e) => a.venues.get(&(e, market)).and_then(|v| v.mid()) }) else { return json!({}) };
         let base_bin = terminal_one::agg::nice(mid * 1e-5);
         let bin = base_bin * GROUPS[self.group.min(GROUPS.len() - 1)];
+        terminal_one::ex::hyperliquid::set_book_group(bin);
         let (bids, asks) = match self.src {
             None => {
                 let (b, k) = a.book_where(market, bin, 0.03, true, |e| scope.contains(&e));
                 (b.into_iter().take(n).collect::<Vec<_>>(), k.into_iter().take(n).collect::<Vec<_>>())
             }
             Some(e) => match a.venues.get(&(e, market)) {
-                Some(v) => (group(v.book.bids().take(terminal_one::agg::BOOK_LEVELS), bin, false, e, n), group(v.book.asks().take(terminal_one::agg::BOOK_LEVELS), bin, true, e, n)),
+                Some(v) => (group(v.book.bids(), bin, false, e, n), group(v.book.asks(), bin, true, e, n)),
                 None => (vec![], vec![]),
             },
         };
@@ -159,7 +160,7 @@ impl BookView {
                     (b.into_iter().take(n).collect::<Vec<_>>(), k.into_iter().take(n).collect::<Vec<_>>())
                 }
                 Some(e) => match a.venues.get(&(e, market)) {
-                    Some(v) => (group(v.book.bids().take(terminal_one::agg::BOOK_LEVELS), bin, false, e, n), group(v.book.asks().take(terminal_one::agg::BOOK_LEVELS), bin, true, e, n)),
+                    Some(v) => (group(v.book.bids(), bin, false, e, n), group(v.book.asks(), bin, true, e, n)),
                     None => (vec![], vec![]),
                 },
             };

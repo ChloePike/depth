@@ -26,7 +26,9 @@ struct TopToolbar: ToolbarContent {
             }
         }
         ToolbarItem(placement: .navigation) {
-            TopPrice(price: s.header.price)
+            // reads the price itself: a tick here must not rebuild the toolbar (the segmented market
+            // picker in the middle is re-hosted on every rebuild and visibly jitters)
+            TopPrice(store: store)
         }
         .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .principal) {
@@ -49,11 +51,12 @@ struct TopToolbar: ToolbarContent {
 
 /// Composite index price with a direction arrow; flashes on every change.
 private struct TopPrice: View {
-    let price: Double?
+    let store: Store
     @State private var dir = 0
     @State private var flash = false
 
     var body: some View {
+        let price = store.state.header.price
         let col: Color = dir > 0 ? T1.up : dir < 0 ? T1.down : .primary
         HStack(spacing: 3) {
             Text(Fmt.px(price)).font(.title3.weight(.semibold).monospacedDigit())

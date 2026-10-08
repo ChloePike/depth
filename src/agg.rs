@@ -8,8 +8,11 @@ use crate::*;
 use std::collections::{HashMap, VecDeque};
 
 pub const BAR_MS: i64 = 60_000;
-/// bars of venue volume used to weight the composite price
-const INDEX_BARS: usize = 60;
+/// minutes of venue volume used to weight the composite price
+const INDEX_MIN: i64 = 60;
+/// a venue whose book/BBO is this far behind the freshest venue of its market is left out of
+/// cross-venue prices and books (a dead socket keeps its last book until the reconnect)
+const STALE_MS: i64 = 10_000;
 /// live updates kept per venue while its history loads
 const PENDING_CAP: usize = 200_000;
 /// 7 days of minute bars per series
@@ -42,6 +45,8 @@ pub struct Venue {
     /// cumulative liquidated (longs, shorts), base units
     pub liq: (f64, f64),
     pub ts: i64,
+    /// local receive time of the last book/BBO update
+    pub fresh: i64,
 }
 
 impl Venue {
@@ -186,6 +191,55 @@ pub struct Heatmap {
     pub cols: VecDeque<(i64, Vec<(i64, f32)>)>,
 }
 
+/// Wall thresholds against the median level: enter above IN x, a wall already shown stays until
+/// it drops under OUT x (hysteresis), and it must have stood at half its mean size or more for
+/// PRESENT of the window (a flashed/spoofed order does not count).
+const WALL_IN: f32 = 5.0;
+const WALL_OUT: f32 = 4.0;
+const WALL_PRESENT: f32 = 0.8;
+
+impl Heatmap {
+    /// Liquidity walls over the last `n` columns: (price, mean base qty) for up to two bids and two
+    /// asks, largest first. Sizes are summed over a bin and its neighbours, so an order that
+    /// hops between two bins as venue mids re-align still counts as one wall. `prev` holds the
+    /// prices shown last time (hysteresis).
+    pub fn walls(&self, mid: f64, n: usize, prev: &[f64]) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+        let cols: Vec<&Vec<(i64, f32)>> = self.cols.iter().rev().take(n).map(|(_, c)| c).collect();
+        let none = (vec![], vec![]);
+        if cols.len() < n.min(10) || self.bin <= 0.0 { return none; }
+        let Some(lo) = cols.iter().flat_map(|c| c.iter().map(|x| x.0)).min() else { return none };
+        let hi = cols.iter().flat_map(|c| c.iter().map(|x| x.0)).max().unwrap();
+        let bins = (hi - lo + 1) as usize;
+        if bins > 20_000 { return none; }
+        // per column, the 3-bin windowed size
+        let win: Vec<Vec<f32>> = cols.iter().map(|c| {
+            let mut v = vec![0f32; bins + 2];
+            for &(i, q) in c.iter() { let k = (i - lo) as usize + 1; v[k - 1] += q; v[k] += q; v[k + 1] += q; }
+            v
+        }).collect();
+        let avg: Vec<f32> = (0..bins + 2).map(|k| win.iter().map(|v| v[k]).sum::<f32>() / win.len() as f32).collect();
+        let mut nz: Vec<f32> = avg.iter().copied().filter(|q| *q > 0.0).collect();
+        if nz.is_empty() { return none; }
+        nz.sort_by(f32::total_cmp);
+        let med = nz[nz.len() / 2];
+        let mid_k = mid / self.bin - lo as f64 + 1.0;
+        let (mut bids, mut asks) = (vec![], vec![]);
+        for k in 1..bins + 1 {
+            let a = avg[k];
+            // local peak only; the touch (2 bins either side of mid) churns constantly
+            if !(a >= avg[k - 1] && a > avg[k + 1]) || (k as f64 - mid_k).abs() <= 2.0 { continue; }
+            let px = (lo + k as i64 - 1) as f64 * self.bin;
+            let shown = prev.iter().any(|p| (p - px).abs() <= self.bin * 1.5);
+            if a <= med * if shown { WALL_OUT } else { WALL_IN } { continue; }
+            let present = win.iter().filter(|v| v[k] >= a * 0.5).count() as f32 / win.len() as f32;
+            if present < WALL_PRESENT { continue; }
+            if (k as f64) < mid_k { bids.push((px, a as f64)) } else { asks.push((px, a as f64)) }
+        }
+        for s in [&mut bids, &mut asks] { s.sort_by(|x, y| y.1.total_cmp(&x.1)); s.truncate(2); }
+        (bids, asks)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Opt {
     pub has_info: bool,
@@ -264,20 +318,21 @@ impl Chain {
 }
 
 /// Merge per-venue bars (each with its USD factor) into cross-venue bars: volumes, CVD, OI and
-/// liquidations summed; funding OI-weighted; basis and USD prices as the cross-venue median.
+/// liquidations summed; funding and long/short OI-weighted; basis as the cross-venue median;
+/// prices volume-weighted.
 fn combine(venues: Vec<(f64, Vec<&Bar>)>) -> Vec<Bar> {
     let mut ts: Vec<i64> = venues.iter().flat_map(|(_, bars)| bars.iter().map(|b| b.t)).collect();
     ts.sort_unstable();
     ts.dedup();
     let maps: Vec<(f64, HashMap<i64, &Bar>)> = venues.iter().map(|(k, bars)| (*k, bars.iter().map(|b| (b.t, *b)).collect())).collect();
-    // price weight: each venue's volume over its last INDEX_BARS bars, so the composite moves
+    // price weight: each venue's volume over its last INDEX_MIN minutes, so the composite moves
     // smoothly instead of hopping between venue clusters a few bp apart
     let weights: Vec<HashMap<i64, f64>> = venues.iter().map(|(_, bars)| {
         let (mut q, mut sum, mut out) = (VecDeque::new(), 0.0, HashMap::new());
         for b in bars {
-            q.push_back(b.vol);
+            q.push_back((b.t, b.vol));
             sum += b.vol;
-            if q.len() > INDEX_BARS { sum -= q.pop_front().unwrap_or(0.0); }
+            while q.front().is_some_and(|(t, _)| *t <= b.t - INDEX_MIN * BAR_MS) { sum -= q.pop_front().unwrap().1; }
             out.insert(b.t, sum.max(1e-9));
         }
         out
@@ -288,7 +343,7 @@ fn combine(venues: Vec<(f64, Vec<&Bar>)>) -> Vec<Bar> {
         let mut b = Bar { t, ..Default::default() };
         let (mut o, mut h, mut l, mut c, mut wsum, mut basis) = (0.0, 0.0, 0.0, 0.0, 0.0, vec![]);
         let (mut oi, mut has_oi) = (0.0, false);
-        let (mut fnum, mut fden, mut snum, mut sden) = (0.0, 0.0, 0.0, 0.0);
+        let (mut fnum, mut fden, mut snum, mut sden, mut lnum, mut lden) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         for (i, (k, map)) in maps.iter().enumerate() {
             if let Some(x) = map.get(&t) {
                 carry[i] = Some(x);
@@ -307,6 +362,7 @@ fn combine(venues: Vec<(f64, Vec<&Bar>)>) -> Vec<Bar> {
                     let w = v * x.c * k;
                     if let Some(f) = x.funding_h { fnum += f * w; fden += w; }
                     if let Some(f) = x.funding_settled { snum += f * w; sden += w; }
+                    if let Some(r) = x.ls { lnum += r * w; lden += w; }
                 }
                 if let Some(v) = x.basis_bps { basis.push(v); }
             }
@@ -316,15 +372,13 @@ fn combine(venues: Vec<(f64, Vec<&Bar>)>) -> Vec<Bar> {
         b.oi = has_oi.then_some(oi);
         b.funding_h = (fden > 0.0).then(|| fnum / fden);
         b.funding_settled = (sden > 0.0).then(|| snum / sden);
+        b.ls = (lden > 0.0).then(|| lnum / lden);
         b.basis_bps = median(basis);
         out.push(b);
     }
     out
 }
 
-/// Levels per side taken from every venue's book (aggregate, heatmap, single-venue view), so
-/// venues publishing 1000+ levels don't outweigh those publishing 50.
-pub const BOOK_LEVELS: usize = 50;
 
 #[derive(Default)]
 pub struct Agg {
@@ -414,8 +468,8 @@ impl Agg {
                     }
                 }
             }
-            Event::Book { snapshot, bids, asks } => v.book.apply(*snapshot, bids, asks),
-            Event::Bbo { bid, bid_qty, ask, ask_qty } => v.bbo = Some([*bid, *bid_qty, *ask, *ask_qty]),
+            Event::Book { snapshot, bids, asks } => { v.book.apply(*snapshot, bids, asks); v.fresh = m.recv; }
+            Event::Bbo { bid, bid_qty, ask, ask_qty } => { v.bbo = Some([*bid, *bid_qty, *ask, *ask_qty]); v.fresh = m.recv; }
             Event::Mark { mark, index, funding, next_funding_ms } => {
                 v.mark = Some(*mark);
                 if index.is_some() { v.index = *index; }
@@ -468,15 +522,28 @@ impl Agg {
             _ => {}
         }
         if matches!(m.ev, Event::Trade { .. } | Event::Bbo { .. }) { self.touch_index(mk, ts); }
+        if matches!(m.ev, Event::LongShort { kind: LsKind::Accounts, .. }) && mk == Market::Perp {
+            let ls = self.weighted(|v| v.ls.get(&LsKind::Accounts).copied());
+            if let Some(b) = self.series.entry((None, mk)).or_default().at(ts) { b.ls = ls; }
+        }
     }
 
-    /// Composite USD price for `market`: venue mids weighted by each venue's volume over its last
-    /// INDEX_BARS minutes. Stable across venues that sit a few bp apart, unlike a median.
+    /// Whether a venue's book is current: updated within STALE_MS of the freshest venue of the
+    /// same market (relative, so a replay or a sleeping Mac does not drop every venue).
+    pub fn live(&self, v: &Venue, market: Market) -> bool {
+        let newest = self.venues.iter().filter(|((_, m), _)| *m == market).map(|(_, v)| v.fresh).max().unwrap_or(0);
+        v.fresh >= newest - STALE_MS
+    }
+
+    /// Composite USD price for `market`: live venue mids weighted by each venue's volume over the
+    /// last INDEX_MIN minutes. Stable across venues that sit a few bp apart, unlike a median.
     pub fn index_price(&self, market: Market) -> Option<f64> {
         let (mut num, mut den) = (0.0, 0.0);
-        for ((e, m), v) in self.venues.iter().filter(|((_, m), _)| *m == market) {
+        // minutes, not bars: a thin venue's last 60 bars can span hours
+        let since = self.series.get(&(None, market)).and_then(|s| s.bars.back()).map_or(i64::MIN, |b| b.t - INDEX_MIN * BAR_MS);
+        for ((e, m), v) in self.venues.iter().filter(|((_, m), v)| *m == market && self.live(v, market)) {
             let Some(p) = v.mid() else { continue };
-            let w = self.series.get(&(Some(*e), market)).map(|s| s.bars.iter().rev().take(INDEX_BARS).map(|b| b.vol).sum::<f64>()).unwrap_or(0.0).max(1e-9);
+            let w = self.series.get(&(Some(*e), market)).map(|s| s.bars.iter().rev().take_while(|b| b.t > since).map(|b| b.vol).sum::<f64>()).unwrap_or(0.0).max(1e-9);
             num += p * self.usd(*e, *m) * w;
             den += w;
         }
@@ -520,18 +587,20 @@ impl Agg {
     /// Multiplier that converts a venue's native prices to USD.
     pub fn usd(&self, ex: Exchange, market: Market) -> f64 { self.fx.get(quote_of(ex, market)).copied().unwrap_or(1.0) }
 
-    /// Median spot/margin mid across venues, in USD.
+    /// Median spot/margin mid across live venues, in USD.
     pub fn spot_mid(&self) -> Option<f64> {
-        median(self.venues.iter().filter(|((_, m), _)| matches!(m, Market::Spot | Market::Margin))
+        median(self.venues.iter().filter(|((_, m), v)| matches!(m, Market::Spot | Market::Margin) && self.live(v, *m))
             .filter_map(|((e, m), v)| Some(v.mid()? * self.usd(*e, *m))).collect())
     }
 
-    /// Perp mark vs spot mid in basis points: the venue's own spot book if it has one,
-    /// otherwise the cross-venue median spot.
+    /// Perp mid vs spot mid in basis points (mid, not mark: history basis is close vs close, so
+    /// the two join without a step): the venue's own spot book if live, else the cross-venue
+    /// median spot. None while the perp book is stale.
     pub fn basis_bps(&self, ex: Exchange) -> Option<f64> {
-        let perp = self.venues.get(&(ex, Market::Perp))?.price()? * self.usd(ex, Market::Perp);
+        let pv = self.venues.get(&(ex, Market::Perp)).filter(|v| self.live(v, Market::Perp))?;
+        let perp = pv.mid().or(pv.mark)? * self.usd(ex, Market::Perp);
         let spot = [Market::Spot, Market::Margin].iter()
-            .find_map(|m| Some(self.venues.get(&(ex, *m))?.mid()? * self.usd(ex, *m)))
+            .find_map(|m| Some(self.venues.get(&(ex, *m)).filter(|v| self.live(v, *m))?.mid()? * self.usd(ex, *m)))
             .or_else(|| self.spot_mid())?;
         Some((perp / spot - 1.0) * 1e4)
     }
@@ -578,16 +647,17 @@ impl Agg {
         let (lo, hi) = (mid * (1.0 - range), mid * (1.0 + range));
         let mut bids: std::collections::BTreeMap<i64, Level> = Default::default();
         let mut asks: std::collections::BTreeMap<i64, Level> = Default::default();
-        for ((ex, m), v) in self.venues.iter().filter(|((e, m), _)| *m == market && keep(*e)) {
+        for ((ex, m), v) in self.venues.iter().filter(|((e, m), v)| *m == market && keep(*e) && self.live(v, market)) {
             let mut k = self.usd(*ex, *m);
             if align {
                 // a crossed or one-sided book has no meaningful mid: leave it out of the aligned view
                 let Some(vm) = v.book_mid() else { continue };
                 k = mid / vm;
             }
-            // every venue contributes the same depth: its BOOK_LEVELS best levels per side
-            for (side, levels, up) in [(&mut bids, v.book.bids().take(BOOK_LEVELS).map(|(p, q)| (p * k, q)).take_while(|(p, _)| *p >= lo).collect::<Vec<_>>(), false),
-                                        (&mut asks, v.book.asks().take(BOOK_LEVELS).map(|(p, q)| (p * k, q)).take_while(|(p, _)| *p <= hi).collect::<Vec<_>>(), true)] {
+            // every level a venue holds within the range: grouping is local, so a count cap would leave
+            // coarse groups (or a deep range) showing only the first few dollars of each book
+            for (side, levels, up) in [(&mut bids, v.book.bids().map(|(p, q)| (p * k, q)).take_while(|(p, _)| *p >= lo).collect::<Vec<_>>(), false),
+                                        (&mut asks, v.book.asks().map(|(p, q)| (p * k, q)).take_while(|(p, _)| *p <= hi).collect::<Vec<_>>(), true)] {
                 for (p, q) in levels {
                     let i = if up { (p / bin).ceil() } else { (p / bin).floor() } as i64;
                     let l = side.entry(i).or_insert_with(|| Level { px: i as f64 * bin, qty: 0.0, by: vec![] });
@@ -606,14 +676,24 @@ impl Agg {
     /// Seed one venue's series with REST history, then replay its queued live messages.
     /// Call it for every venue passed to `expect_history` (with an empty `History` if the fetch
     /// failed), then call `finish_history` once.
+    /// Queued trades inside a complete history minute are already in its kline and are skipped;
+    /// the still-forming minute is dropped from history and rebuilt from the live trades.
     pub fn load_history(&mut self, ex: Exchange, market: Market, h: &History) {
-        self.seed_history(ex, market, h);
-        for m in self.pending.remove(&(ex, market)).unwrap_or_default() { self.on(&m); }
+        let covered = self.seed_history(ex, market, h);
+        for m in self.pending.remove(&(ex, market)).unwrap_or_default() {
+            if matches!(m.ev, Event::Trade { .. }) && m.ts.div_euclid(BAR_MS) * BAR_MS <= covered { continue; }
+            self.on(&m);
+        }
     }
 
-    fn seed_history(&mut self, ex: Exchange, market: Market, h: &History) {
+    /// Returns the open time of the last history minute kept (i64::MIN if none).
+    fn seed_history(&mut self, ex: Exchange, market: Market, h: &History) -> i64 {
         self.seeded.insert((ex, market));
-        let bars = history_bars(h);
+        let mut bars = history_bars(h);
+        // ponytail: the forming minute's trades before the connect are lost (volume undercounted
+        // for that one minute); keeping it instead would double count every queued trade
+        if bars.last().is_some_and(|b| b.t + BAR_MS > now_ms()) { bars.pop(); }
+        let covered = bars.last().map_or(i64::MIN, |b| b.t);
         let last = bars.last().cloned();
         let offset = self.series.entry((Some(ex), market)).or_default().seed(bars);
         let v = self.venues.entry((ex, market)).or_default();
@@ -623,6 +703,7 @@ impl Agg {
             if v.funding_settled.is_none() { v.funding_settled = b.funding_settled; }
             if v.last.is_none() { v.last = Some(b.c); }
         }
+        covered
     }
 
     /// After all `load_history` calls: derive historical basis and rebuild the cross-venue series.
@@ -708,7 +789,8 @@ impl Agg {
         let (Some(v), Some(x)) = (self.series.get(&(Some(ex), market)), self.series.get(&(None, market))) else { return vec![] };
         let k = self.usd(ex, market);
         let idx: HashMap<i64, f64> = x.bars.iter().filter(|b| b.c > 0.0).map(|b| (b.t, b.c)).collect();
-        v.bars.iter().filter(|b| b.c > 0.0).filter_map(|b| Some((b.t, (b.c * k / idx.get(&b.t)? - 1.0) * 1e4))).collect()
+        // minutes with a trade only: a quiet venue's carried-forward close is not a price
+        v.bars.iter().filter(|b| b.c > 0.0 && b.vol > 0.0).filter_map(|b| Some((b.t, (b.c * k / idx.get(&b.t)? - 1.0) * 1e4))).collect()
     }
 
     /// Push one heatmap column per spot/perp market. Call about once a second.
@@ -911,14 +993,15 @@ mod tests {
         let k = |i: i64| Kline { t: t0 + i * BAR_MS, o: 1.0, h: 1.0, l: 1.0, c: 1.0, vol: 1.0, buy: Some(1.0) };
         a.expect_history(Exchange::Gate, Market::Perp);
         a.expect_history(Exchange::Mexc, Market::Perp);
-        // an old-stamped live trade arrives first: it must not cut off the history after it
+        // an old-stamped live trade arrives first: it must not cut off the history after it, and
+        // its minute is complete in history, so the kline already holds it (not added twice)
         a.on(&msg(Exchange::Gate, Market::Perp, "X", t0 + BAR_MS, Event::Trade { px: 1.0, qty: 5.0, side: Side::Sell }));
         a.load_history(Exchange::Gate, Market::Perp, &History { klines: (0..4).map(k).collect(), oi: vec![(t0, 10.0)], ..Default::default() });
         a.load_history(Exchange::Mexc, Market::Perp, &History { klines: (0..4).map(k).collect(), ..Default::default() });
         a.finish_history();
         let g = &a.series[&(Some(Exchange::Gate), Market::Perp)].bars;
         assert_eq!(g.len(), 4);
-        assert_eq!(g.iter().map(|b| b.cvd).collect::<Vec<_>>(), vec![1.0, -3.0, -2.0, -1.0]);
+        assert_eq!(g.iter().map(|b| b.cvd).collect::<Vec<_>>(), vec![1.0, 2.0, 3.0, 4.0]);
         assert!(g.iter().all(|b| b.oi == Some(10.0)));
         // MEXC has no OI history: its first live OI backfills, and the aggregate has no jump
         assert_eq!(a.series[&(None, Market::Perp)].bars[0].oi, Some(10.0));
@@ -972,5 +1055,71 @@ mod tests {
         assert_eq!(nice(17.2), 20.0);
         assert_eq!(nice(0.03), 0.05);
         assert_eq!(nice(2.0), 2.0);
+    }
+
+    #[test]
+    fn walls_need_persistence_and_survive_bin_hops() {
+        // flat book of 1 per bin around mid 100 (bin 1); a 30-lot bid wall hopping 90 <-> 91,
+        // and a 300-lot ask flashed for 5 of 60 seconds
+        let mut h = Heatmap { bin: 1.0, ..Default::default() };
+        for t in 0..60i64 {
+            let mut c: Vec<(i64, f32)> = (80..=120).map(|i| (i, 1.0)).collect();
+            c[(90 + t % 2 - 80) as usize].1 += 30.0;
+            if t >= 55 { c[110 - 80].1 += 300.0; }
+            h.cols.push_back((t, c));
+        }
+        let (b, a) = h.walls(100.0, 60, &[]);
+        assert_eq!(b.len(), 1);
+        assert!((b[0].0 - 90.0).abs() <= 1.0, "{b:?}");
+        assert!(a.is_empty(), "{a:?}");
+        // hysteresis: a wall at 4.5x median shows only if it was already shown
+        let mut h = Heatmap { bin: 1.0, ..Default::default() };
+        for t in 0..60i64 {
+            let mut c: Vec<(i64, f32)> = (80..=120).map(|i| (i, 1.0)).collect();
+            c[110 - 80].1 += 10.5; // windowed: 13.5 vs median 3 = 4.5x
+            h.cols.push_back((t, c));
+        }
+        assert!(h.walls(100.0, 60, &[]).1.is_empty());
+        assert_eq!(h.walls(100.0, 60, &[110.0]).1.len(), 1);
+    }
+
+    #[test]
+    fn stale_venue_leaves_index_book_and_basis() {
+        let mut a = Agg::default();
+        let at = |ex, market, recv: i64, ev| Msg { ex, market, symbol: "X".into(), ts: recv, recv, ev };
+        let bbo = |b: f64| Event::Bbo { bid: b, bid_qty: 1.0, ask: b + 0.2, ask_qty: 1.0 };
+        let book = |b: f64| Event::Book { snapshot: true, bids: vec![(b, 1.0)], asks: vec![(b + 0.2, 1.0)] };
+        for (ex, px) in [(Exchange::Bybit, 100.0), (Exchange::Okx, 110.0)] {
+            a.on(&at(ex, Market::Perp, 1_000, book(px)));
+            a.on(&at(ex, Market::Perp, 1_000, bbo(px)));
+        }
+        assert!((a.index_price(Market::Perp).unwrap() - 105.1).abs() < 1e-6);
+        // OKX goes silent; Bybit keeps updating 20 s later
+        a.on(&at(Exchange::Bybit, Market::Perp, 21_000, bbo(100.0)));
+        assert!((a.index_price(Market::Perp).unwrap() - 100.1).abs() < 1e-6);
+        let (bids, _) = a.book_where(Market::Perp, 0.1, 0.5, false, |_| true);
+        assert!(bids.iter().all(|l| l.by.iter().all(|(e, _)| *e != Exchange::Okx)));
+        assert!(a.basis_bps(Exchange::Okx).is_none());
+    }
+
+    #[test]
+    fn history_replay_does_not_double_count_queued_trades() {
+        let mut a = Agg::default();
+        let (ex, mk) = (Exchange::Binance, Market::Perp);
+        let now = now_ms();
+        let done = (now - 3 * BAR_MS).div_euclid(BAR_MS) * BAR_MS; // a complete minute
+        let forming = now.div_euclid(BAR_MS) * BAR_MS;
+        a.expect_history(ex, mk);
+        let trade = |ts| Msg { ex, market: mk, symbol: "X".into(), ts, recv: ts, ev: Event::Trade { px: 100.0, qty: 1.0, side: Side::Buy } };
+        a.on(&trade(done + 1_000));
+        a.on(&trade(forming + 1));
+        // the REST klines already hold that trade (complete minute) and part of the forming one
+        let k = |t| Kline { t, o: 100.0, h: 100.0, l: 100.0, c: 100.0, vol: 1.0, buy: Some(1.0) };
+        a.load_history(ex, mk, &History { klines: vec![k(done), k(forming)], ..Default::default() });
+        let s = &a.series[&(Some(ex), mk)];
+        let vol = |t| s.bars.iter().find(|b| b.t == t).map(|b| b.vol);
+        assert_eq!(vol(done), Some(1.0));
+        assert_eq!(vol(forming), Some(1.0));
+        assert_eq!(a.venues[&(ex, mk)].cvd, 2.0);
     }
 }

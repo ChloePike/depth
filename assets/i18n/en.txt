@@ -26,7 +26,7 @@ src.agg = Aggregate
 chart.tf = Interval
 chart.heatmap = Book Heatmap
 chart.liqmap = Liquidation Map
-chart.liqmap_tip = Estimated liquidation levels on the right edge: each OI increase is treated as new longs and shorts at that price, spread over 10/25/50/100x leverage; a level clears once price trades through it. Red = long liquidations, green = short liquidations; longer = denser.
+chart.liqmap_tip = Estimated liquidation levels on the right edge (a model, not venue data): each bar's traded volume is treated as new longs and shorts at that price, spread over 3-100x leverage; a level clears once price trades through it. Backtested on 90 days of real Gate liquidations: out of sample it predicts liquidations beyond a plain breakout, but read it as zones, not exact prices. Red = long liquidations, green = short liquidations; longer = denser.
 chart.vol = Volume
 chart.cvd = CVD
 chart.oi = Open Interest

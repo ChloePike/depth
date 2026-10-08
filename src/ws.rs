@@ -23,17 +23,24 @@ pub struct Spec {
     /// with `login_first`: build extra messages from the first reply (e.g. sign a challenge);
     /// they are sent before the remaining `subs`
     pub on_login: Option<Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>>,
+    /// subscriptions that change while connected: `.0` gives the ones in force at (re)connect,
+    /// sent after `subs`; messages on `.1` (unsubscribe / subscribe) go out mid-session
+    pub dynamic: Option<(Arc<dyn Fn() -> Vec<String> + Send + Sync>, Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<String>>>)>,
 }
 
 impl Spec {
     pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
-        Spec { name: name.into(), url: url.into(), subs: vec![], ping: None, idle: Duration::from_secs(60), login_first: false, on_login: None }
+        Spec { name: name.into(), url: url.into(), subs: vec![], ping: None, idle: Duration::from_secs(60), login_first: false, on_login: None, dynamic: None }
     }
     pub fn sub(mut self, s: impl Into<String>) -> Self { self.subs.push(s.into()); self }
     pub fn ping(mut self, every: Duration, msg: impl Into<String>) -> Self { self.ping = Some((every, msg.into())); self }
     pub fn login_first(mut self) -> Self { self.login_first = true; self }
     /// login_first + messages derived from the first reply (challenge / response handshakes)
     pub fn on_login(mut self, f: impl Fn(&str) -> Vec<String> + Send + Sync + 'static) -> Self { self.login_first = true; self.on_login = Some(Arc::new(f)); self }
+    /// subscriptions swapped on the live connection (see `dynamic`)
+    pub fn dynamic(mut self, current: impl Fn() -> Vec<String> + Send + Sync + 'static, rx: tokio::sync::mpsc::UnboundedReceiver<String>) -> Self {
+        self.dynamic = Some((Arc::new(current), Arc::new(tokio::sync::Mutex::new(rx)))); self
+    }
 }
 
 /// Runs forever, reconnecting with exponential backoff. The same handler is reused across
@@ -88,6 +95,16 @@ async fn session(spec: &Spec, handler: &mut (impl FnMut(Frame) -> bool + Send)) 
         }
     }
     for s in rest { ws.send(WsFrame::text(s.clone())).await?; }
+    let mut out = match &spec.dynamic {
+        Some((current, rx)) => {
+            let mut rx = rx.clone().lock_owned().await;
+            // swaps queued while disconnected are already reflected in `current`
+            while rx.try_recv().is_ok() {}
+            for s in current() { ws.send(WsFrame::text(s)).await?; }
+            Some(rx)
+        }
+        None => None,
+    };
     let (every, ping) = spec.ping.clone().unwrap_or((Duration::from_secs(3600), String::new()));
     let mut tick = interval(every);
     tick.tick().await;
@@ -105,6 +122,7 @@ async fn session(spec: &Spec, handler: &mut (impl FnMut(Frame) -> bool + Send)) 
                 if !keep { return Ok(()) }
             }
             _ = tick.tick(), if !ping.is_empty() => ws.send(WsFrame::text(ping.clone())).await?,
+            Some(m) = async { match out.as_mut() { Some(rx) => rx.recv().await, None => std::future::pending().await } } => ws.send(WsFrame::text(m)).await?,
         }
     }
 }

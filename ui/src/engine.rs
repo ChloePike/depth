@@ -314,7 +314,7 @@ impl Engine {
                     let trades: Vec<(i64, f64, bool)> = a.trades.iter().filter(|t| t.market == Market::Perp)
                         .map(|t| (t.ts, t.px * t.qty * a.usd(t.ex, t.market), t.side == terminal_one::Side::Buy)).collect();
                     let index = a.mid(Market::Perp);
-                    let dislocation: Vec<(String, f64)> = a.venues.iter().filter(|((_, m), _)| *m == Market::Perp)
+                    let dislocation: Vec<(String, f64)> = a.venues.iter().filter(|((_, m), v)| *m == Market::Perp && a.live(v, *m))
                         .filter_map(|((e, m), v)| {
                             // measured against the venue's own normal premium (USD vs USDT perps sit a few bp apart
                             // all day), and only when that move is far outside its usual noise

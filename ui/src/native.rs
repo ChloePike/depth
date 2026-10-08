@@ -293,7 +293,7 @@ impl App {
                     Some(json!({"ex": ex_name(*e), "color": format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b()),
                         "bid_usd": bid, "ask_usd": ask, "vol_usd": vol, "buy_usd": buy, "sell_usd": sell,
                         "quote": terminal_one::agg::quote_of(*e, *vm), "bid": top.map(|t| t.0), "ask": top.map(|t| t.1),
-                        "prem_bps": prem, "norm_bps": norm, "stale": now_ms() - ven.ts > 10_000}))
+                        "prem_bps": prem, "norm_bps": norm, "stale": !a.live(ven, *vm)}))
                 }).collect();
                 rows.sort_by(|x, y| y["vol_usd"].as_f64().unwrap_or(0.0).total_cmp(&x["vol_usd"].as_f64().unwrap_or(0.0)));
                 // executable cross: same quote only, fresh books only, net of both taker fees

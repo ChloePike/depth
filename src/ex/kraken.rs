@@ -6,7 +6,8 @@
 //! WS v2 uses BTC; REST and futures use XBT. Perps are always USD-quoted.
 //!
 //! Perp funding: the ticker's `funding_rate` is an absolute USD amount per contract per hour;
-//! we emit `relative_funding_rate` (= funding_rate / price), the hourly relative rate.
+//! we emit `relative_funding_rate_prediction` (the next hour's predicted relative rate; the settled
+//! `relative_funding_rate` only if the prediction is missing).
 //! OI is in contracts, and one PF contract is one unit of base.
 //!
 //! Options: Kraken has no public options market data.
@@ -125,7 +126,7 @@ fn on_perp(e: &Emit, seq: &mut Option<i64>, f: Frame) -> bool {
             let ts = d["time"].as_i64().unwrap_or(0);
             e.send(sym, ts, Event::Bbo { bid: num(&d["bid"]), bid_qty: num(&d["bid_size"]), ask: num(&d["ask"]), ask_qty: num(&d["ask_size"]) });
             e.send(sym, ts, Event::Mark { mark: num(&d["markPrice"]), index: opt_num(&d["index"]),
-                funding: opt_num(&d["relative_funding_rate"]), next_funding_ms: d["next_funding_rate_time"].as_i64() });
+                funding: opt_num(&d["relative_funding_rate_prediction"]).or_else(|| opt_num(&d["relative_funding_rate"])), next_funding_ms: d["next_funding_rate_time"].as_i64() });
             e.send(sym, ts, Event::OpenInterest { oi: num(&d["openInterest"]), oi_usd: None });
         }
         _ => {}
