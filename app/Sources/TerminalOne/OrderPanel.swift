@@ -320,13 +320,14 @@ struct OrderPanel: View {
                 Spacer(minLength: 4)
                 // the button shows the short name; the menu explains each option
                 Menu {
-                    Picker(L("Time in force"), selection: $tif) {
-                        Text(L("GTC · good till cancelled")).tag("gtc")
-                        Text(L("IOC · fill what's there, cancel the rest")).tag("ioc")
-                        if t.caps.fok { Text(L("FOK · fill completely or cancel")).tag("fok") }
-                        Text(L("Post only (ALO) · maker or cancel")).tag("post")
+                    // plain buttons: an inline Picker inside a Menu renders greyed rows and a blank checked item
+                    let opts: [(String, String)] = [("gtc", L("GTC · good till cancelled")), ("ioc", L("IOC · fill what's there, cancel the rest"))]
+                        + (t.caps.fok ? [("fok", L("FOK · fill completely or cancel"))] : []) + [("post", L("Post only (ALO) · maker or cancel"))]
+                    ForEach(opts, id: \.0) { k, name in
+                        Button { tif = k } label: {
+                            if tif == k { Label(name, systemImage: "checkmark") } else { Text(name) }
+                        }
                     }
-                    .pickerStyle(.inline)
                 } label: {
                     Text(useBbo ? "GTC" : ["gtc": "GTC", "ioc": "IOC", "fok": "FOK", "post": L("Post only")][tif] ?? "GTC")
                         .lineLimit(1)
