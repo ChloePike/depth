@@ -4,6 +4,7 @@ import SwiftUI
 /// window's trailing inspector). Every price comes from the trade venue's own book
 /// (`trade.bid/ask`); the composite (`header.price`) never prices an order.
 struct OrderPanel: View {
+    static let width: CGFloat = 300
     @Environment(Store.self) private var store
     @FocusState private var focus: OrderFieldID?
 
@@ -77,7 +78,7 @@ struct OrderPanel: View {
 
     var body: some View {
       // cards size to their content; the column scrolls as a whole when the window is short
-      ScrollView {
+      ScrollView(.vertical) {
        VStack(spacing: 8) {
           VStack(alignment: .leading, spacing: 14) {
             header
@@ -110,8 +111,11 @@ struct OrderPanel: View {
           .glassCard()
           accountCard
        }
+       // exactly the column width: content never re-centers when a value or the scroller changes width
+       .frame(width: OrderPanel.width)
       }
       .scrollIndicators(.never)
+      .scrollBounceBehavior(.basedOnSize)
         .toggleStyle(RowSwitch())
         .labeledContentStyle(RowLabeled())
         .onChange(of: s.book_click) {
@@ -127,6 +131,8 @@ struct OrderPanel: View {
         .sheet(item: $ticket) { OrderConfirm(ticket: $0) }
         .sheet(item: $tpslFor) { OrderTpSlSheet(p: $0) }
         .sheet(isPresented: $levSheet) { LeverageSheet() }
+        // T1_LEV_SHEET=1: screenshot runs open the leverage sheet
+        .task { if ProcessInfo.processInfo.environment["T1_LEV_SHEET"] != nil { try? await Task.sleep(for: .seconds(4)); levSheet = true } }
         .confirmationDialog(algoConfirm?.title ?? "", isPresented: Binding(get: { algoConfirm != nil }, set: { if !$0 { algoConfirm = nil } }), titleVisibility: .visible, presenting: algoConfirm) { a in
             Button(L("Cancel"), role: .cancel) {}
             Button(L("Confirm")) {
@@ -296,13 +302,16 @@ struct OrderPanel: View {
             }
             .pickerStyle(.segmented).labelsHidden()
             .opacity(inMore ? 0.6 : 1)
-            .layoutPriority(1)
-            Menu(inMore ? (more.first { $0.0 == kind }?.1 ?? L("More")) : L("More")) {
+            // short labels, no indicator: a wider row pushed past the column and made the whole
+            // panel jump sideways
+            Menu {
                 ForEach(more, id: \.0) { k, name in
                     Button { kind = k } label: { if kind == k { Label(name, systemImage: "checkmark") } else { Text(name) } }
                 }
+            } label: {
+                Text(inMore ? (kind == .trailing ? L("Trailing") : (more.first { $0.0 == kind }?.1 ?? L("More"))) : L("More")).lineLimit(1)
             }
-            .menuStyle(.button).buttonStyle(.bordered).fixedSize()
+            .menuStyle(.button).buttonStyle(.bordered).menuIndicator(.hidden).fixedSize()
             .tint(inMore ? Color.accentColor : nil)
         }
         .onChange(of: t.venue) { if (kind == .stop && !c.stop) || (kind == .trailing && !c.trailing) { kind = .limit } }
@@ -886,10 +895,12 @@ struct LeverageSheet: View {
                         Slider(value: $lev, in: 1...maxL, step: 1) {
                             EmptyView()
                         } minimumValueLabel: { Text("1x") } maximumValueLabel: { Text(String(format: "%gx", maxL)) }
-                        Picker(L("Presets"), selection: $lev) {
-                            ForEach([1.0, 2, 3, 5, 10, 20, 50, 100, 125].filter { $0 <= maxL }, id: \.self) { Text(String(format: "%gx", $0)).tag($0) }
+                        HStack(spacing: 6) {
+                            ForEach([1.0, 2, 3, 5, 10, 20, 50, 100, 125].filter { $0 <= maxL }, id: \.self) { v in
+                                Button(String(format: "%gx", v)) { lev = v }
+                                    .buttonStyle(.bordered).controlSize(.small).tint(lev == v ? .accentColor : nil)
+                            }
                         }
-                        .pickerStyle(.segmented).labelsHidden()
                     } else {
                         HStack { ProgressView().controlSize(.small); Text(L("Reading the venue's limit…")).foregroundStyle(.secondary) }
                     }
@@ -898,6 +909,10 @@ struct LeverageSheet: View {
                 }
             }
             .formStyle(.grouped)
+            // sized to its content: a fixed height made the scroller come and go, the footer rewrap
+            // and the sheet re-layout endlessly
+            .scrollDisabled(true)
+            .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 10) {
                 Spacer()
                 Button(L("Cancel")) { dismiss() }.keyboardShortcut(.cancelAction)
@@ -911,7 +926,7 @@ struct LeverageSheet: View {
             .controlSize(.large)
             .padding([.horizontal, .bottom], 20)
         }
-        .frame(width: 420, height: 400)
+        .frame(width: 420)
         .onAppear {
             lev = t.lev ?? 10
             store.call("leverage_max")

@@ -35,6 +35,23 @@ struct AppCommands: Commands {
             Button(orderPanel ? L("Hide Order Panel") : L("Show Order Panel")) { orderPanel.toggle() }
                 .keyboardShortcut("i", modifiers: [.command, .option])
         }
+        CommandMenu(L("Market")) {
+            Button(L("Choose Pair…")) { NotificationCenter.default.post(name: .init("T1OpenPicker"), object: nil) }
+                .keyboardShortcut("k")
+            Button(L("Previous Favorite")) { Pairs.step(-1) }.keyboardShortcut("[")
+            Button(L("Next Favorite")) { Pairs.step(1) }.keyboardShortcut("]")
+            Button(L("Add to / Remove from Favorites")) { Pairs.toggleFavorite(Store.shared.state.base) }.keyboardShortcut("d")
+            Divider()
+            ForEach(Array(Pairs.modes.enumerated()), id: \.offset) { i, m in
+                Button(L(m.label)) { Store.shared.call("set_mode", ["mode": m.id]) }
+                    .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")))
+            }
+            Divider()
+            ForEach(Array(Pairs.intervals.enumerated()), id: \.offset) { i, tf in
+                Button(tf.1) { Store.shared.call("chart", ["tf": tf.0]) }
+                    .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")), modifiers: .control)
+            }
+        }
     }
 }
 
@@ -107,7 +124,7 @@ struct RootView: View {
                 .frame(minHeight: 280)
                 .contentCard()
                 if perp && orderPanel {
-                    OrderPanel().frame(width: 300).clipped()
+                    OrderPanel().frame(width: OrderPanel.width).clipped()
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }

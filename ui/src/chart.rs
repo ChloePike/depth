@@ -417,19 +417,20 @@ fn session_vwap(bars: &[Bar]) -> Vec<(i64, f64, f64)> {
     }).collect()
 }
 
-/// Levels closed through within the last `within` bars: (level, up) where `up` = broken upward
-/// (a resistance that now acts as support). Needs a close on each side, beyond the level's zone.
-fn broken_levels(bars: &[Bar], levels: &[SrLevel], within: usize) -> Vec<(SrLevel, bool)> {
+/// Levels closed through within the last `within` bars: (level, upward, failed). A break that
+/// was closed back through the other way inside the window is reported as the original break,
+/// failed (a fakeout / trap), rather than as a fresh break the other way.
+fn broken_levels(bars: &[Bar], levels: &[SrLevel], within: usize) -> Vec<(SrLevel, bool, bool)> {
     let n = bars.len();
     if n < 2 { return vec![]; }
     let from = n.saturating_sub(within + 1);
     levels.iter().filter_map(|l| {
-        (from + 1..n).rev().find_map(|k| {
+        let ev: Vec<bool> = (from + 1..n).filter_map(|k| {
             let (a, b) = (bars[k - 1].c, bars[k].c);
-            if a < l.px - l.half && b > l.px + l.half { Some((*l, true)) }
-            else if a > l.px + l.half && b < l.px - l.half { Some((*l, false)) }
-            else { None }
-        })
+            if a < l.px - l.half && b > l.px + l.half { Some(true) } else if a > l.px + l.half && b < l.px - l.half { Some(false) } else { None }
+        }).collect();
+        let last = *ev.last()?;
+        Some(if ev.len() > 1 { (*l, !last, true) } else { (*l, last, false) })
     }).take(2).collect()
 }
 
@@ -707,7 +708,7 @@ impl Chart {
             // support below the last price, resistance above
             let last = bars.last().map_or(0.0, |b| b.c);
             let closed = &bars[..bars.len().saturating_sub(1)];
-            let broken: Vec<f64> = if self.breakouts { broken_levels(closed, &p.hvns(), 10).into_iter().map(|(l, _)| l.px).collect() } else { vec![] };
+            let broken: Vec<f64> = if self.breakouts { broken_levels(closed, &p.hvns(), 10).into_iter().map(|(l, _, _)| l.px).collect() } else { vec![] };
             let mut nodes: Vec<SrLevel> = p.hvns().into_iter().filter(|l| (l.px - poc).abs() > p.bin * 3.0 && !broken.contains(&l.px)).collect();
             nodes.sort_by(|a, b| b.score.total_cmp(&a.score));
             for l in nodes.into_iter().take(2) {
@@ -731,12 +732,16 @@ impl Chart {
             // only the most recent break: older ones are history the candles already show
             // closed bars only: the live bar's close is the moving price and would flip the verdict
             let closed = &bars[..bars.len().saturating_sub(1)];
-            for (l, is_up) in broken_levels(closed, &levels, 10).into_iter().take(1) {
+            for (l, is_up, failed) in broken_levels(closed, &levels, 10).into_iter().take(1) {
                 if !(l.px > lo && l.px < hi) { continue; }
-                let col = if is_up { up() } else { dn() };
+                // a failed break up traps longs (bearish), a failed break down traps shorts: color by that
+                let col = if is_up != failed { up() } else { dn() };
                 let ly = y(l.px);
-                painter.with_clip_rect(main_plot).hline(main.left()..=main.right(), ly, Stroke::new(1.5, col));
-                let tag = format!("{} {} {}", if is_up { "↑" } else { "↓" }, t(if is_up { "chart.broke_up" } else { "chart.broke_down" }), fmt_px(l.px));
+                let clip = painter.with_clip_rect(main_plot);
+                if failed { clip.extend(egui::Shape::dashed_line(&[pos2(main.left(), ly), pos2(main.right(), ly)], Stroke::new(1.2, col), 6.0, 4.0)); }
+                else { clip.hline(main.left()..=main.right(), ly, Stroke::new(1.5, col)); }
+                let key = match (is_up, failed) { (true, false) => "chart.broke_up", (false, false) => "chart.broke_down", (true, true) => "chart.failed_up", (false, true) => "chart.failed_down" };
+                let tag = format!("{} {} {}", if failed { "✕" } else if is_up { "↑" } else { "↓" }, t(key), fmt_px(l.px));
                 let g = painter.layout_no_wrap(tag, mono(10.5), col);
                 let r = place(Rect::from_min_size(pos2(main.center().x, ly - 9.0), g.size() + vec2(10.0, 4.0)), &mut taken);
                 painter.rect_filled(r, 3, LABEL_BG);
@@ -1461,7 +1466,10 @@ mod tests {
         let lv = [SrLevel { px: 102.0, half: 0.4, score: 1.0 }];
         let c = |t: i64, c: f64| Bar { t, o: c, h: c, l: c, c, ..Default::default() };
         let b = broken_levels(&[c(0, 101.0), c(1, 103.0)], &lv, 10);
-        assert!(b.len() == 1 && b[0].1);
+        assert!(b.len() == 1 && b[0].1 && !b[0].2);
+        // broke up, then the last close is back below: failed
+        let f = broken_levels(&[c(0, 101.0), c(1, 103.0), c(2, 101.0)], &lv, 10);
+        assert!(f.len() == 1 && f[0].1 && f[0].2);
         assert!(broken_levels(&[c(0, 101.0), c(1, 102.1)], &lv, 10).is_empty());
     }
 

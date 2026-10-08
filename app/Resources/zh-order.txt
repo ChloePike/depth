@@ -207,3 +207,4 @@ Presets = 预设
 Reading the venue's limit… = 正在读取交易所上限…
 Set %gx = 设为 %gx
 Change leverage for this symbol = 调整该交易对的杠杆
+Trailing = 跟踪止损

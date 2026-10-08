@@ -6,7 +6,6 @@ struct TopToolbar: ToolbarContent {
     @Bindable var store: Store
     @State private var picker = false
 
-    private static let modes: [(id: String, label: String)] = [("Spot", "Spot"), ("Margin", "Margin"), ("Perp", "Perpetual"), ("Option", "Options")]
 
     var body: some ToolbarContent {
         let s = store.state
@@ -18,7 +17,10 @@ struct TopToolbar: ToolbarContent {
                     Image(systemName: "chevron.down").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
                 }
             }
-            .help(L("Choose pair"))
+            .help(L("Choose pair") + " (⌘K)")
+            .onReceive(NotificationCenter.default.publisher(for: .init("T1OpenPicker"))) { _ in picker = true }
+            // T1_PICKER=1: screenshot runs open the picker
+            .task { if ProcessInfo.processInfo.environment["T1_PICKER"] != nil { try? await Task.sleep(for: .seconds(4)); picker = true } }
             .popover(isPresented: $picker, arrowEdge: .bottom) {
                 SymbolPicker(current: s.base) { picker = false }.environment(store)
             }
@@ -29,7 +31,7 @@ struct TopToolbar: ToolbarContent {
         .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .principal) {
             Picker(L("Market"), selection: Binding(get: { s.mode }, set: { m in store.call("set_mode", ["mode": m]) })) {
-                ForEach(Self.modes, id: \.id) { Text(L($0.label)).tag($0.id) }
+                ForEach(Pairs.modes, id: \.id) { Text(L($0.label)).tag($0.id) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()

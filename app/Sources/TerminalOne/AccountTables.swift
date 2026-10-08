@@ -50,7 +50,7 @@ struct AccountSymbolCell<Badge: View>: View {
     /// Jump the whole terminal to this pair's perpetual market.
     private func open(_ base: String) {
         let st = Store.shared
-        if st.state.base != base { st.call("set_base", ["base": base]) }
+        Pairs.open(base)
         if st.state.mode != "Perp" { st.call("set_mode", ["mode": "Perp"]) }
     }
 }
