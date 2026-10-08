@@ -373,6 +373,10 @@ impl Engine {
         rt.spawn(async move {
             let mut buf = Vec::with_capacity(1024);
             let mut dirty: std::collections::HashSet<Exchange> = Default::default();
+            // venues whose position pushes carry no liquidation price (Binance, Kraken): positions are
+            // refetched after a push, at most every 3s, so the venue's own figure replaces the old one
+            let mut pos_dirty: std::collections::HashSet<Exchange> = Default::default();
+            let mut last_pos: HashMap<Exchange, std::time::Instant> = HashMap::new();
             let mut last_bal: HashMap<Exchange, std::time::Instant> = HashMap::new();
             let mut bal_tick = tokio::time::interval(Duration::from_secs(1));
             let mut reconcile = tokio::time::interval(Duration::from_secs(300));
@@ -389,8 +393,13 @@ impl Engine {
                             for (ex, ev) in buf.drain(..) {
                                 match ev {
                                     trade::AccEvent::Resync => resync.push(ex),
-                                    trade::AccEvent::BalanceDirty => { dirty.insert(ex); }
+                                    trade::AccEvent::BalanceDirty => {
+                                        dirty.insert(ex);
+                                        // equity moved (fill, funding, transfer): cross liquidation prices with it
+                                        if matches!(ex, Exchange::Binance | Exchange::Kraken) { pos_dirty.insert(ex); }
+                                    }
                                     ev => {
+                                        if let trade::AccEvent::Position { p, .. } = &ev { if p.qty > 0.0 && p.liq.is_none() { pos_dirty.insert(ex); } }
                                         let wallet = matches!(ev, trade::AccEvent::Wallet { .. });
                                         changed |= apply(&mut a, ex, ev);
                                         // run after the lock is released: spawn_top_up locks the account itself
@@ -404,6 +413,21 @@ impl Engine {
                         if changed { ctx.request_repaint(); }
                     }
                     _ = bal_tick.tick() => {
+                        let due: Vec<Exchange> = pos_dirty.iter().copied().filter(|e| last_pos.get(e).is_none_or(|t| t.elapsed() >= Duration::from_secs(3))).collect();
+                        for ex in due {
+                            pos_dirty.remove(&ex);
+                            last_pos.insert(ex, std::time::Instant::now());
+                            let (acc, ctx) = (account.clone(), ctx.clone());
+                            tokio::spawn(async move {
+                                let Some(k) = acc.lock().unwrap().keys.get(&ex).cloned() else { return };
+                                if let Ok(p) = trade::positions(ex, &k).await {
+                                    let mut a = acc.lock().unwrap();
+                                    a.positions.retain(|x| x.ex != ex);
+                                    a.positions.extend(p);
+                                    ctx.request_repaint();
+                                }
+                            });
+                        }
                         let due: Vec<Exchange> = dirty.iter().copied().filter(|e| last_bal.get(e).is_none_or(|t| t.elapsed() >= Duration::from_secs(3))).collect();
                         for ex in due {
                             dirty.remove(&ex);
@@ -869,17 +893,15 @@ async fn refresh_venue(account: &Arc<Mutex<Account>>, ex: Exchange) {
         }
     }
     let mut a = account.lock().unwrap();
-    match (p, o, b) {
-        (Ok(p), Ok(o), Ok(b)) => {
-            a.positions.retain(|x| x.ex != ex);
-            a.positions.extend(p);
-            a.orders.retain(|x| x.ex != ex);
-            a.orders.extend(o);
-            a.balances.insert(ex, b);
-            a.errors.remove(&ex);
-        }
-        (p, o, b) => {
-            let e = [p.err(), o.err(), b.err()].into_iter().flatten().next().map(|e| format!("{e:#}")).unwrap_or_default();
+    // each part applies on its own: a failing orders or balance call must not freeze positions
+    let mut err = None;
+    match p { Ok(p) => { a.positions.retain(|x| x.ex != ex); a.positions.extend(p); } Err(e) => err = err.or(Some(e)) }
+    match o { Ok(o) => { a.orders.retain(|x| x.ex != ex); a.orders.extend(o); } Err(e) => err = err.or(Some(e)) }
+    match b { Ok(b) => { a.balances.insert(ex, b); } Err(e) => err = err.or(Some(e)) }
+    match err {
+        None => { a.errors.remove(&ex); }
+        Some(e) => {
+            let e = format!("{e:#}");
             if a.errors.get(&ex) != Some(&e) { a.note(format!("{ex:?} account: {e}"), false); }
             a.errors.insert(ex, e);
         }
@@ -937,14 +959,18 @@ fn apply(a: &mut Account, ex: Exchange, ev: trade::AccEvent) -> bool {
             let old = a.positions.iter().find(|x| same(x)).cloned();
             a.positions.retain(|x| !same(x));
             if p.qty > 0.0 {
-                // fields a push leaves out keep their last known value
+                // fields a push leaves out keep their last known value, except the liquidation price
+                // and margin of a position whose size or entry changed: those belonged to the old
+                // position (the venue's figure is refetched, see pos_dirty)
                 if let Some(o) = old {
+                    let same = o.qty == p.qty && o.entry == p.entry;
                     if p.mark == 0.0 { p.mark = o.mark; }
-                    if p.liq.is_none() { p.liq = o.liq; }
+                    if p.liq.is_none() && same { p.liq = o.liq; }
                     if p.lev == 0.0 { p.lev = o.lev; }
-                    if p.margin == 0.0 { p.margin = o.margin; }
+                    if p.margin == 0.0 && same { p.margin = o.margin; }
                 }
                 if p.mark == 0.0 { p.mark = p.entry; }
+                if p.margin == 0.0 && p.lev > 0.0 { p.margin = p.mark * p.qty / p.lev; }
                 if p.lev > 0.0 { a.levs.insert((ex, p.symbol.clone()), p.lev); }
                 a.positions.push(p);
             }
@@ -952,11 +978,30 @@ fn apply(a: &mut Account, ex: Exchange, ev: trade::AccEvent) -> bool {
         }
         E::Mark { symbol, mark } => {
             let mut changed = false;
-            for p in a.positions.iter_mut().filter(|p| p.ex == ex && p.symbol == symbol) {
+            // equity change from this mark, applied below to the other cross positions' liquidation prices
+            let mut moved = vec![];
+            for (i, p) in a.positions.iter_mut().enumerate().filter(|(_, p)| p.ex == ex && p.symbol == symbol) {
                 let sign = if p.side == terminal_one::Side::Buy { 1.0 } else { -1.0 };
+                let upnl = (mark - p.entry) * p.qty * sign;
+                if p.cross == Some(true) { moved.push((i, upnl - p.upnl)); }
                 p.mark = mark;
-                p.upnl = (mark - p.entry) * p.qty * sign;
+                p.upnl = upnl;
+                // cross margin is notional at mark over leverage (what the venues show); isolated stays put
+                if p.cross == Some(true) && p.lev > 0.0 { p.margin = mark * p.qty / p.lev; }
                 changed = true;
+            }
+            // Venues' cross liquidation price of a position solves equity(P) = maintenance at fixed
+            // other prices, so between the venue's own figures (refetched after each account push)
+            // another position's PnL change d moves it by d / qty: down for a long, up for a short.
+            // ponytail: ignores the maintenance-rate factor 1 / (1 - mmr) (~0.5%) and collateral
+            // haircut moves; the next refetch replaces it with the venue's number.
+            for (i, d) in moved {
+                for (j, o) in a.positions.iter_mut().enumerate() {
+                    if j == i || o.ex != ex || o.cross != Some(true) || o.qty <= 0.0 { continue }
+                    let sign = if o.side == terminal_one::Side::Buy { 1.0 } else { -1.0 };
+                    // at or below zero the venue shows none
+                    o.liq = o.liq.map(|l| l - d * sign / o.qty).filter(|l| *l > 0.0);
+                }
             }
             changed
         }
@@ -985,17 +1030,38 @@ mod tests {
     }
 
     #[test]
+    fn cross_liq_follows_other_positions_pnl() {
+        let mut a = Account::default();
+        let ex = Exchange::Binance;
+        let p = |sym: &str, side, qty, entry, liq| Position { ex, symbol: sym.into(), side, qty, entry, mark: entry, liq, upnl: 0.0, lev: 10.0, margin: 0.0, cross: Some(true) };
+        a.positions.push(p("SOLUSDT", Side::Buy, 10.0, 100.0, Some(50.0)));
+        a.positions.push(p("ETHUSDT", Side::Sell, 2.0, 3000.0, Some(4000.0)));
+        // SOL +1 => +10 equity: the short ETH liq rises by 10 / 2, SOL's own liq is unchanged
+        apply(&mut a, ex, E::Mark { symbol: "SOLUSDT".into(), mark: 101.0 });
+        assert_eq!(a.positions[0].liq, Some(50.0));
+        assert_eq!(a.positions[1].liq, Some(4005.0));
+        // cross margin follows mark: 101 * 10 / 10
+        assert_eq!(a.positions[0].margin, 101.0);
+        // ETH +10 => short loses 20: SOL's long liq rises by 20 / 10
+        apply(&mut a, ex, E::Mark { symbol: "ETHUSDT".into(), mark: 3010.0 });
+        assert_eq!(a.positions[0].liq, Some(52.0));
+    }
+
+    #[test]
     fn pushes_merge_into_account_state() {
         let mut a = Account::default();
         let ex = Exchange::Binance;
         // REST snapshot row with fields a push does not carry
         a.positions.push(Position { liq: Some(80.0), lev: 10.0, margin: 50.0, mark: 101.0, ..pos(Side::Buy, 1.0) });
-        // hedge push for the long keeps liq/lev/margin/mark, short added alongside
+        // a push with the same size keeps liq/margin; a resized one drops them (they belonged to the
+        // old position): liq until the refetch, margin recomputed at mark; short added alongside
+        apply(&mut a, ex, E::Position { p: pos(Side::Buy, 1.0), one_way: false });
+        assert_eq!((a.positions[0].liq, a.positions[0].margin), (Some(80.0), 50.0));
         apply(&mut a, ex, E::Position { p: pos(Side::Buy, 2.0), one_way: false });
         apply(&mut a, ex, E::Position { p: pos(Side::Sell, 1.0), one_way: false });
         assert_eq!(a.positions.len(), 2);
         let long = a.positions.iter().find(|p| p.side == Side::Buy).unwrap();
-        assert_eq!((long.qty, long.liq, long.lev, long.mark), (2.0, Some(80.0), 10.0, 101.0));
+        assert_eq!((long.qty, long.liq, long.lev, long.mark, long.margin), (2.0, None, 10.0, 101.0, 20.2));
         // mark drives upnl on both sides
         apply(&mut a, ex, E::Mark { symbol: "BTCUSDT".into(), mark: 110.0 });
         let upnl: Vec<f64> = a.positions.iter().map(|p| p.upnl).collect();
