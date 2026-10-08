@@ -100,7 +100,6 @@ struct OrderPanel: View {
             if !waiting.isEmpty {
                 PanelSection(L("TP/SL waiting for fill")) { ForEach(waiting) { pendingRow($0) } }
             }
-            ForEach(positions) { positionLine($0) }
           }
           .padding(14)
           .glassCard()
