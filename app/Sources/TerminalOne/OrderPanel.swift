@@ -302,6 +302,7 @@ struct OrderPanel: View {
             }
             .pickerStyle(.segmented).labelsHidden()
             .opacity(inMore ? 0.6 : 1)
+            .frame(maxWidth: .infinity, alignment: .leading)
             // short labels, no indicator: a wider row pushed past the column and made the whole
             // panel jump sideways
             Menu {
@@ -314,6 +315,9 @@ struct OrderPanel: View {
             .menuStyle(.button).buttonStyle(.bordered).menuIndicator(.hidden).fixedSize()
             .tint(inMore ? Color.accentColor : nil)
         }
+        // pinned to the card's inner width: if a translation is still too wide it overflows here,
+        // instead of widening the whole column and shifting every row sideways
+        .frame(width: OrderPanel.width - 28)
         .onChange(of: t.venue) { if (kind == .stop && !c.stop) || (kind == .trailing && !c.trailing) { kind = .limit } }
     }
 
