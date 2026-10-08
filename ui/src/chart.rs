@@ -150,6 +150,9 @@ pub struct Chart {
     breakouts: bool,
     /// session VWAP with sigma bands
     vwap: bool,
+    /// overlay defaults generation: settings from before 2 get the calmer defaults once
+    #[serde(default)]
+    style: u32,
     /// expected-move cone from the volatility model (+-1 / +-2 sigma over the next bars)
     cone: bool,
     scale: Scale,
@@ -172,7 +175,7 @@ impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(),
-            drawings: Default::default(), tool: None, pending: None, ma: true, sr: true, walls: true, mark: true, breakouts: true, vwap: true, cone: true, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            drawings: Default::default(), tool: None, pending: None, ma: false, sr: true, walls: false, mark: true, breakouts: true, vwap: true, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
             panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false)],
         }
     }
@@ -478,6 +481,8 @@ fn fmt_big(v: f64) -> String {
 
 impl Chart {
     pub fn show(&mut self, ui: &mut Ui, a: &Agg, market: Market, base: &str) {
+        // one-time move to the calmer defaults (fewer overlays on by default); each stays a toggle
+        if self.style < 2 { self.ma = false; self.walls = false; self.cone = false; self.style = 2; }
         let smarket = if market == Market::Margin { Market::Spot } else { market };
         // hosted: the native toolbar above the chart drives these through native_set
         if !native() { self.toolbar(ui, a, smarket, base); }
@@ -559,10 +564,14 @@ impl Chart {
         // percent scale: labels relative to the first visible close
         let base_px = vis.first().map_or(1.0, |b| b.c);
         let pct = self.scale == Scale::Percent;
-        let axis_label = |v: f64| if pct { format!("{:+.2}%", (v / base_px - 1.0) * 100.0) } else { fmt_px(v) };
+        // as many decimals as the grid step needs (83,000 not 83,000.0; 0.4512 when the step is 0.0005)
+        let gv: Vec<f64> = grid(lo, hi, (main_plot.height() as f64 / 60.0).max(2.0));
+        let gdp = gv.windows(2).map(|w| (w[1] - w[0]).abs()).fold(f64::MAX, f64::min);
+        let gdp = if gdp.is_finite() && gdp > 0.0 { super::step_dp(gdp) } else { 2 };
+        let axis_label = |v: f64| if pct { format!("{:+.2}%", (v / base_px - 1.0) * 100.0) } else { super::fmt_dp(v, gdp) };
 
         // grid + price axis
-        for v in grid(lo, hi, (main_plot.height() as f64 / 60.0).max(2.0)) {
+        for v in gv.iter().copied() {
             let yy = y(v);
             painter.hline(main.left()..=main.right(), yy, Stroke::new(1.0, GRID));
             painter.text(pos2(main.right() + 8.0, yy), Align2::LEFT_CENTER, axis_label(v), mono(11.0), MU);
@@ -571,6 +580,7 @@ impl Chart {
         let wm = format!("{base}USDT · {}", self.src.map(|e| format!("{e:?}")).unwrap_or_else(|| t("src.agg").to_string()));
         // hosted: the toolbar already names the market; the watermark is just noise behind the candles
         if !native() { painter.text(main_plot.center(), Align2::CENTER_CENTER, wm, prop(44.0), Color32::from_white_alpha(9)); }
+        else { painter.text(pos2(main_plot.left() + 14.0, main_plot.bottom() - 12.0), Align2::LEFT_BOTTOM, "Depth", prop(30.0), Color32::from_white_alpha(14)); }
 
         // one textured quad: x by bar index, y by price of the top/bottom bin edges
         let quad = |tex: egui::TextureId, g: TexGeom, bin: f64| {
@@ -663,7 +673,7 @@ impl Chart {
                 let len = w * (*v / max) as f32;
                 let col = if i == p.poc() { Color32::from_rgb(0xf0, 0xb9, 0x0b) } else if (va0..=va1).contains(&i) { accent() } else { MU };
                 // anchored on the left: the right edge already carries the book depth and liquidation profiles
-                clip.rect_filled(Rect::from_min_max(pos2(main.left(), y0 + 0.5), pos2(main.left() + len, (y1 - 0.5).max(y0 + 1.0))), 0, col.linear_multiply(0.22));
+                clip.rect_filled(Rect::from_min_max(pos2(main.left(), y0 + 0.5), pos2(main.left() + len, (y1 - 0.5).max(y0 + 1.0))), 0, col.linear_multiply(0.14));
             }
             let poc = p.px(p.poc());
             let gold = Color32::from_rgb(0xf0, 0xb9, 0x0b);
@@ -757,7 +767,7 @@ impl Chart {
                 let cyan = Color32::from_rgb(0x4f, 0xc3, 0xf7);
                 for (j, pts) in lines.into_iter().enumerate() {
                     if pts.len() < 2 { continue; }
-                    let (wdt, a) = match j { 2 => (1.6, 0.95), 1 | 3 => (1.0, 0.5), _ => (1.0, 0.3) };
+                    let (wdt, a) = match j { 2 => (1.5, 0.9), 1 | 3 => (0.8, 0.32), _ => (0.8, 0.18) };
                     clip.add(egui::Shape::line(pts, Stroke::new(wdt, cyan.linear_multiply(a))));
                 }
                 if let Some(&(_, m, sd)) = vw.last() {
@@ -1042,7 +1052,8 @@ impl Chart {
                     }
                 }
                 let vols: Vec<f64> = vis.iter().map(|b| b.vol).collect();
-                for (n, col) in [(5usize, accent()), (10, dn())] {
+                // volume averages follow the MA toggle: off by default, the bars speak for themselves
+                for (n, col) in [(5usize, accent()), (10, dn())].into_iter().filter(|_| self.ma) {
                     let m = sma(&vols, n);
                     line(m.iter().enumerate().filter_map(|(k, v)| Some((k, (*v)?))).collect(), 0.0, max, col.linear_multiply(0.9), false);
                 }

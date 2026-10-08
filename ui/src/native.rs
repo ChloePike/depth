@@ -78,7 +78,7 @@ impl App {
             "available": bal.as_ref().map(|b| b.available), "equity": bal.as_ref().map(|b| b.equity),
             "uni_mmr": bal.as_ref().and_then(|b| b.uni_mmr), "mm_rate": bal.as_ref().and_then(|b| b.mm_rate),
             "bid": bbo.map(|b| b.0), "ask": bbo.map(|b| b.1),
-            "tick": rules.map(|r| r.tick), "step": rules.map(|r| r.step), "min_qty": rules.map(|r| r.min_qty), "min_notional": rules.map(|r| r.min_notional),
+            "max_lev": acc.max_levs.get(&key), "tick": rules.map(|r| r.tick), "step": rules.map(|r| r.step), "min_qty": rules.map(|r| r.min_qty), "min_notional": rules.map(|r| r.min_notional),
             "bbo_levels": trade::bbo_levels(ex), "caps": trade::caps(ex), "native_twap": trade::native_twap(ex), "push_ms": push_ms, "rtt_ms": acc.order_rtt.get(&ex),
             "fee": {"taker": fee_t, "maker": fee_m},
             "smart": self.route.smart, "error": acc.errors.get(&ex),
@@ -312,6 +312,11 @@ impl App {
                 return Ok(json!({"id": id}));
             }
             "cancel_algo" => self.eng.cancel_algo(v["id"].as_u64().ok_or("id")?),
+            "leverage_max" => self.eng.load_max_leverage(self.trade.ex, trade::symbol(&self.eng.base), ctx),
+            "set_leverage" => {
+                let lev = v["leverage"].as_u64().ok_or("leverage")? as u32;
+                self.eng.set_leverage(self.trade.ex, trade::symbol(&self.eng.base), lev, ctx);
+            }
             "book_fill" => { if let (Some(e), Some(px)) = (parse_ex(&v["ex"]), v["px"].as_f64()) { self.trade.fill = Some((e, px)); } }
             "load_history" => self.eng.load_history(ctx),
             "load_wallets" => self.eng.load_wallets(exv()?, ctx),

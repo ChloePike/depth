@@ -38,6 +38,8 @@ pub struct Account {
     pub tpsl: Vec<trade::tpsl::TpSl>,
     /// client-side execution jobs (TWAP), newest last
     pub algos: Vec<AlgoJob>,
+    /// venue maximum leverage per (venue, symbol), read when the leverage sheet opens
+    pub max_levs: HashMap<(Exchange, String), f64>,
     /// order / trade / closed-PnL history per venue with fetch time; loaded on demand
     pub history: HashMap<Exchange, (trade::History, i64)>,
     pub history_loading: std::collections::HashSet<Exchange>,
@@ -569,6 +571,36 @@ impl Engine {
             ctx.request_repaint();
         });
         Ok(id)
+    }
+
+    /// Read the venue's maximum leverage for `symbol` in the background (leverage sheet).
+    pub fn load_max_leverage(&self, ex: Exchange, symbol: String, ctx: &eframe::egui::Context) {
+        let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        rt.spawn(async move {
+            let Some(k) = account.lock().unwrap().keys.get(&ex).cloned() else { return };
+            match trade::max_leverage(ex, &k, &symbol).await {
+                Ok(m) => { account.lock().unwrap().max_levs.insert((ex, symbol), m); }
+                Err(e) => account.lock().unwrap().note(format!("FAIL {ex:?} {symbol} max leverage: {e:#}"), false),
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Set the venue's leverage for `symbol` (user-confirmed), then re-read it.
+    pub fn set_leverage(&self, ex: Exchange, symbol: String, lev: u32, ctx: &eframe::egui::Context) {
+        let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        rt.spawn(async move {
+            let Some(k) = account.lock().unwrap().keys.get(&ex).cloned() else { return };
+            let r = trade::set_leverage(ex, &k, &symbol, lev).await;
+            let read = trade::leverage(ex, &k, &symbol).await;
+            let mut a = account.lock().unwrap();
+            match r {
+                Ok(()) => a.note(format!("OK {ex:?} {symbol} leverage {lev}x"), true),
+                Err(e) => a.note(format!("FAIL {ex:?} {symbol} leverage {lev}x: {e:#}"), false),
+            }
+            if let Ok(l) = read { a.levs.insert((ex, symbol), l); }
+            ctx.request_repaint();
+        });
     }
 
     pub fn cancel_algo(&self, id: u64) {

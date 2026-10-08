@@ -49,6 +49,7 @@ struct OrderPanel: View {
     @State private var twapNative = true
     @State private var twapRandom = false
     @State private var algoConfirm: AlgoTicket?
+    @State private var levSheet = false
     private let pending = OrderPendingTpSl.shared
 
     private var s: AppState { store.state }
@@ -80,7 +81,11 @@ struct OrderPanel: View {
        VStack(spacing: 8) {
           VStack(alignment: .leading, spacing: 14) {
             header
-            GlassSegments(selection: $close, items: [(false, L("Open")), (true, L("Close"))])
+            Picker(L("Side"), selection: $close) {
+                Text(L("Open")).tag(false)
+                Text(L("Close")).tag(true)
+            }
+            .pickerStyle(.segmented).labelsHidden()
             typeTabs
             Divider()
             order
@@ -121,6 +126,7 @@ struct OrderPanel: View {
         .onChange(of: s.positions.map { "\($0.id)|\($0.qty)" }) { pending.check(s.positions, orders: s.orders) }
         .sheet(item: $ticket) { OrderConfirm(ticket: $0) }
         .sheet(item: $tpslFor) { OrderTpSlSheet(p: $0) }
+        .sheet(isPresented: $levSheet) { LeverageSheet() }
         .confirmationDialog(algoConfirm?.title ?? "", isPresented: Binding(get: { algoConfirm != nil }, set: { if !$0 { algoConfirm = nil } }), titleVisibility: .visible, presenting: algoConfirm) { a in
             Button(L("Cancel"), role: .cancel) {}
             Button(L("Confirm")) {
@@ -241,9 +247,12 @@ struct OrderPanel: View {
     /// Venue and its account mode / leverage (read-only: changed on the exchange), like Binance's chips.
     private var header: some View {
         HStack(spacing: 6) {
-            chip(t.mode.map { $0 == "hedge" ? L("Hedge") : L("One-Way") } ?? "–")
-                .help(L("Position mode and leverage for this symbol (change them on the exchange)"))
-            chip(t.lev.map { String(format: "%gx", $0) } ?? "–")
+            Button(t.mode.map { $0 == "hedge" ? L("Hedge") : L("One-Way") } ?? "–") {}
+                .buttonStyle(.bordered).allowsHitTesting(false)
+                .help(L("Position mode for this symbol (change it on the exchange)"))
+            Button(t.lev.map { String(format: "%gx", $0) } ?? "–") { levSheet = true }
+                .buttonStyle(.bordered).disabled(!t.has_key)
+                .help(L("Change leverage for this symbol"))
             if !t.verified {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     .help(L("Order placement on this venue is not yet verified on a live account: start with the minimum size."))
@@ -277,23 +286,24 @@ struct OrderPanel: View {
     /// Limit / Market / Post Only as text tabs with an accent underline.
     private var typeTabs: some View {
         let c = t.caps
-        let main: [(OrderKind, String)] = [(.limit, L("Limit")), (.market, L("Market"))] + (c.stop ? [(.stop, L("Conditional"))] : [])
+        let main: [(OrderKind, String)] = [(.limit, L("Limit")), (.market, L("Market"))] + (c.stop ? [(.stop, L("Stop"))] : [])
         let more: [(OrderKind, String)] = (c.trailing ? [(.trailing, L("Trailing Stop"))] : []) + [(.scaled, L("Scaled")), (.twap, L("TWAP"))]
         let inMore = more.contains { $0.0 == kind }
-        return HStack(spacing: 14) {
-            ForEach(main, id: \.0) { k, name in tab(name, kind == k) { kind = k } }
-            Menu {
-                ForEach(more, id: \.0) { k, name in Button(name) { kind = k } }
-            } label: {
-                VStack(spacing: 5) {
-                    Text((inMore ? (more.first { $0.0 == kind }?.1 ?? "") : L("More")) + " ▾")
-                        .font(.body.weight(inMore ? .semibold : .regular)).foregroundStyle(inMore ? .primary : .secondary)
-                        .lineLimit(1).fixedSize()
-                    Capsule().fill(inMore ? Color.accentColor : .clear).frame(width: 18, height: 3)
+        return HStack(spacing: 8) {
+            // a segmented control for the everyday types; the rest behind a menu button
+            Picker(L("Order type"), selection: Binding(get: { inMore ? OrderKind.limit : kind }, set: { kind = $0 })) {
+                ForEach(main, id: \.0) { Text($0.1).tag($0.0) }
+            }
+            .pickerStyle(.segmented).labelsHidden()
+            .opacity(inMore ? 0.6 : 1)
+            .layoutPriority(1)
+            Menu(inMore ? (more.first { $0.0 == kind }?.1 ?? L("More")) : L("More")) {
+                ForEach(more, id: \.0) { k, name in
+                    Button { kind = k } label: { if kind == k { Label(name, systemImage: "checkmark") } else { Text(name) } }
                 }
             }
-            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
-            Spacer()
+            .menuStyle(.button).buttonStyle(.bordered).fixedSize()
+            .tint(inMore ? Color.accentColor : nil)
         }
         .onChange(of: t.venue) { if (kind == .stop && !c.stop) || (kind == .trailing && !c.trailing) { kind = .limit } }
     }
@@ -416,14 +426,13 @@ struct OrderPanel: View {
         } else if useBbo {
             VStack(alignment: .leading, spacing: 6) {
             Text(L("Price")).font(.callout).foregroundStyle(.secondary)
-            OrderFieldShell(active: true) {
+            HStack(spacing: 6) {
                 Picker(L("Price"), selection: bboChoice) {
                     Section(L("Counterparty")) { ForEach(t.bbo_levels, id: \.self) { Text(bboName(false, $0)).tag(BboChoice(queue: false, level: $0)) } }
                     Section(L("Queue")) { ForEach(t.bbo_levels, id: \.self) { Text(bboName(true, $0)).tag(BboChoice(queue: true, level: $0)) } }
                 }
-                .pickerStyle(.menu).labelsHidden().buttonStyle(.borderless).fixedSize()
+                .pickerStyle(.menu).labelsHidden().frame(maxWidth: .infinity)
                 .help(bboQueue ? L("Own side of the book: rests as a maker at the best price.") : L("Opposite side of the book: fills like a taker at the price the venue sees on arrival."))
-                Spacer()
                 bboButton
             }
             }
@@ -435,25 +444,8 @@ struct OrderPanel: View {
     }
 
     private var bboButton: some View {
-        Button { bboOn.toggle() } label: {
-            Text("BBO").font(.caption.weight(.bold))
-                .padding(.horizontal, 7).padding(.vertical, 3)
-                .foregroundStyle(bboOn ? Color.white : Color.secondary)
-                .background(bboOn ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.fill.secondary), in: .capsule)
-        }
-        .buttonStyle(.plain)
-        .help(L("Priced by the venue's book when the order arrives (Counterparty: opposite side; Queue: own side; number: book level)"))
-    }
-
-    private func quickFill(_ label: String, _ v: Double?, _ c: Color) -> some View {
-        Button { if let v { price = OrderNum.px(v, tick: t.tick) } } label: {
-            HStack(spacing: 4) {
-                Text(label).foregroundStyle(.secondary)
-                Text(Fmt.px(v)).monospacedDigit().foregroundStyle(c)
-            }
-        }
-        .buttonStyle(.bordered).controlSize(.small)
-        .help(L("Use the venue's own best price"))
+        Toggle("BBO", isOn: $bboOn).toggleStyle(.button).controlSize(.small)
+            .help(L("Priced by the venue's book when the order arrives (Counterparty: opposite side; Queue: own side; number: book level)"))
     }
 
     private func bboName(_ queue: Bool, _ level: Int) -> String { "\(queue ? L("Queue") : L("Counterparty")) \(level)" }
@@ -726,17 +718,18 @@ struct OrderField<Accessory: View>: View {
     @ViewBuilder var accessory: () -> Accessory
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 5) {
             Text(label).font(.callout).foregroundStyle(.secondary)
-            OrderFieldShell(active: focus.wrappedValue == id) {
+            HStack(spacing: 6) {
                 TextField(label, text: $text, prompt: Text(placeholder))
                     .labelsHidden()
-                    .textFieldStyle(.plain)
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
                     .font(.body.monospacedDigit())
                     .focused(focus, equals: id)
                     .onSubmit(onSubmit)
                     .disabled(disabled)
-                if !unit.isEmpty { Text(unit).foregroundStyle(.secondary) }
+                if !unit.isEmpty { Text(unit).foregroundStyle(.secondary).fixedSize() }
                 accessory()
             }
         }
@@ -793,12 +786,11 @@ struct OrderBigButton: View {
     var enabled = true
     let action: () -> Void
     var body: some View {
-        Button(action: action) {
-            Text(title).font(.headline).foregroundStyle(.white).frame(maxWidth: .infinity).frame(height: 40).contentShape(.rect(cornerRadius: 10))
-        }
-        .buttonStyle(.plain)
-        // explicit fill: system prominent / tinted glass buttons go grey whenever the window is inactive
-        .background(color.opacity(enabled ? 0.9 : 0.35).gradient, in: .rect(cornerRadius: 10))
+        Button(action: action) { Text(title).fontWeight(.semibold).frame(maxWidth: .infinity) }
+            // system prominent button, tinted green / red (dims in an inactive window, as every macOS button does)
+            .buttonStyle(.borderedProminent)
+            .tint(color)
+            .controlSize(.extraLarge)
         .disabled(!enabled)
     }
 }
@@ -862,6 +854,67 @@ struct AlgoJobsView: View {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Leverage for the current symbol on the trade venue: slider up to the venue's maximum, then a
+/// confirmed change on the exchange.
+struct LeverageSheet: View {
+    @Environment(Store.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var lev = 10.0
+
+    var body: some View {
+        let t = store.state.trade
+        let maxL = max(t.max_lev ?? 0, 1)
+        VStack(spacing: 0) {
+            Form {
+                Section {
+                    LabeledContent(L("Symbol"), value: "\(t.symbol) · \(t.venue)")
+                    LabeledContent(L("Current"), value: t.lev.map { String(format: "%gx", $0) } ?? "–")
+                }
+                Section {
+                    HStack {
+                        Text(L("Leverage"))
+                        Spacer()
+                        TextField("", value: $lev, format: .number.precision(.fractionLength(0)))
+                            .textFieldStyle(.roundedBorder).multilineTextAlignment(.trailing).frame(width: 70)
+                        Text("x").foregroundStyle(.secondary)
+                    }
+                    if t.max_lev != nil {
+                        Slider(value: $lev, in: 1...maxL, step: 1) {
+                            EmptyView()
+                        } minimumValueLabel: { Text("1x") } maximumValueLabel: { Text(String(format: "%gx", maxL)) }
+                        Picker(L("Presets"), selection: $lev) {
+                            ForEach([1.0, 2, 3, 5, 10, 20, 50, 100, 125].filter { $0 <= maxL }, id: \.self) { Text(String(format: "%gx", $0)).tag($0) }
+                        }
+                        .pickerStyle(.segmented).labelsHidden()
+                    } else {
+                        HStack { ProgressView().controlSize(.small); Text(L("Reading the venue's limit…")).foregroundStyle(.secondary) }
+                    }
+                } footer: {
+                    Text(L("Changes the setting on the exchange for this symbol (both sides). Higher leverage moves the liquidation price closer; the venue may refuse it for a large position."))
+                }
+            }
+            .formStyle(.grouped)
+            HStack(spacing: 10) {
+                Spacer()
+                Button(L("Cancel")) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(String(format: L("Set %gx"), lev.rounded())) {
+                    store.call("set_leverage", ["leverage": Int(lev.rounded())])
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                .disabled(lev < 1 || (t.max_lev != nil && lev > maxL) || lev.rounded() == (t.lev ?? 0))
+            }
+            .controlSize(.large)
+            .padding([.horizontal, .bottom], 20)
+        }
+        .frame(width: 420, height: 400)
+        .onAppear {
+            lev = t.lev ?? 10
+            store.call("leverage_max")
         }
     }
 }

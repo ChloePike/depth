@@ -121,7 +121,7 @@ struct Stats: Decodable, Equatable { var msgs_per_s: Double? = 0; var mem_mb: Do
 
 struct TradeCtx: Decodable, Equatable {
     var venue = "Bybit"; var symbol = ""; var has_key = false; var verified = true
-    var mode: String?; var lev: Double?; var available: Double?; var equity: Double?; var uni_mmr: Double?; var mm_rate: Double?
+    var mode: String?; var lev: Double?; var max_lev: Double?; var available: Double?; var equity: Double?; var uni_mmr: Double?; var mm_rate: Double?
     var bid: Double?; var ask: Double?; var tick: Double?; var step: Double?; var min_qty: Double?; var min_notional: Double?
     var bbo_levels: [Int] = []; var caps = OrderCaps(); var native_twap: [Int]?; var push_ms: Double?; var rtt_ms: Double?; var fee = Fee(); var smart = false; var error: String?
 }

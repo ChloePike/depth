@@ -107,7 +107,7 @@ struct RootView: View {
                 .frame(minHeight: 280)
                 .contentCard()
                 if perp && orderPanel {
-                    OrderPanel().frame(width: 300)
+                    OrderPanel().frame(width: 300).clipped()
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }

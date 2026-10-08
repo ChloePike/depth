@@ -114,14 +114,17 @@ struct OrderConfirm: View {
                 }
             }
             .formStyle(.grouped)
-            HStack(spacing: 8) {
-                Button { dismiss() } label: { Text(L("Cancel")).frame(maxWidth: .infinity) }
-                    .controlSize(.large).keyboardShortcut(.cancelAction)
-                OrderBigButton(title: "\(L("Confirm")) \(ticket.title)", color: color) {
+            // standard macOS dialog buttons: trailing, Cancel then the default action
+            HStack(spacing: 10) {
+                Spacer()
+                Button(L("Cancel")) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("\(L("Confirm")) \(ticket.title)") {
                     if let e = orderPlace(ticket) { error = e } else { dismiss() }
                 }
+                .buttonStyle(.borderedProminent).tint(color)
                 .keyboardShortcut(.defaultAction)
             }
+            .controlSize(.large)
             .padding([.horizontal, .bottom], 20)
         }
         .frame(width: 460, height: 560)

@@ -245,3 +245,6 @@ Carry = 资金成本
 Predicted funding, annualized; basis = perp over spot = 预测资金费率（年化）；基差 = 合约相对现货
 Expected move cone (volatility model) = 预期波动区间（波动率模型）
 Book depth ±0.5% and 5 min aggressor flow; describes now, not a forecast = 盘口 ±0.5% 深度与 5 分钟主动成交；描述当前，不是预测
+Show PnL amount = 显示盈亏金额
+Show entry and mark price = 显示开仓价和标记价
+Size, margin and account balances are never on the card. = 仓位大小、保证金和账户余额不会出现在卡片上。

@@ -322,6 +322,8 @@ fn pm_path(fapi: &str) -> &str {
         "/fapi/v1/symbolConfig" => "/papi/v1/um/symbolConfig",
         "/fapi/v1/algoOrder" => "/papi/v1/um/algo/order",
         "/fapi/v1/openAlgoOrders" => "/papi/v1/um/algo/openAlgoOrders",
+        "/fapi/v1/leverage" => "/papi/v1/um/leverage",
+        "/fapi/v1/leverageBracket" => "/papi/v1/um/leverageBracket",
         p => p,
     }
 }
@@ -575,6 +577,42 @@ pub async fn mode(ex: Exchange, k: &Keys, symbol: &str) -> Result<Mode> {
         Exchange::Hyperliquid => hyperliquid::mode(k, symbol).await,
         Exchange::Lighter => lighter::mode(k, symbol).await,
         _ => bail!("{ex:?} trading not implemented"),
+    }
+}
+
+/// Highest leverage the venue allows for `symbol` at the smallest position size.
+/// Bybit: public instrument info. Binance: leverage brackets (signed, weight 1).
+pub async fn max_leverage(ex: Exchange, k: &Keys, symbol: &str) -> Result<f64> {
+    match ex {
+        Exchange::Bybit => {
+            let v = ws::get_json(&format!("{}/v5/market/instruments-info?category=linear&symbol={symbol}", bybit_url())).await?;
+            crate::opt_num(&v["result"]["list"][0]["leverageFilter"]["maxLeverage"]).ok_or_else(|| anyhow!("bybit: no max leverage for {symbol}"))
+        }
+        Exchange::Binance => {
+            let v = binance(k, reqwest::Method::GET, "/fapi/v1/leverageBracket", &[("symbol", symbol.into())]).await?;
+            // USD-M returns an array of {symbol, brackets}; Portfolio Margin the same shape
+            let row = if v.is_array() { v[0].clone() } else { v };
+            crate::opt_num(&row["brackets"][0]["initialLeverage"]).ok_or_else(|| anyhow!("binance: no leverage brackets for {symbol}"))
+        }
+        _ => bail!("{ex:?}: changing leverage from Depth is not supported yet"),
+    }
+}
+
+/// Change the account's leverage for `symbol` (both sides on Bybit). This changes an exchange
+/// setting, so it is only called after the user confirms.
+pub async fn set_leverage(ex: Exchange, k: &Keys, symbol: &str, lev: u32) -> Result<()> {
+    if lev == 0 { bail!("leverage must be at least 1x"); }
+    match ex {
+        Exchange::Bybit => {
+            let l = lev.to_string();
+            match bybit(k, false, "/v5/position/set-leverage", json!({"category": "linear", "symbol": symbol, "buyLeverage": l, "sellLeverage": l})).await {
+                // 110043: already at this leverage
+                Err(e) if format!("{e:#}").contains("110043") => Ok(()),
+                r => r.map(|_| ()),
+            }
+        }
+        Exchange::Binance => binance(k, reqwest::Method::POST, "/fapi/v1/leverage", &[("symbol", symbol.into()), ("leverage", lev.to_string())]).await.map(|_| ()),
+        _ => bail!("{ex:?}: changing leverage from Depth is not supported yet"),
     }
 }
 

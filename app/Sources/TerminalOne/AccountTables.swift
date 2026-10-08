@@ -167,6 +167,10 @@ struct AccountPositionsTable: View {
             Button(confirmButton(a), role: .destructive) { run(a) }
         } message: { a in Text(confirmMessage(a)) }
         .sheet(item: $share) { PnLShareSheet(p: $0) }
+        // T1_SHARE=1: open the share sheet for the first position after launch (screenshots)
+        .onChange(of: rows.count, initial: true) {
+            if ProcessInfo.processInfo.environment["T1_SHARE"] != nil, share == nil, let p = rows.first { share = p }
+        }
         .sheet(item: $tpsl) { OrderTpSlSheet(p: $0) }
     }
 
@@ -644,67 +648,97 @@ struct AccountLogView: View {
     }
 }
 
-/// PnL card as an image: preview, copy to the clipboard, save as PNG.
+/// PnL card as an image (1200 x 675, the size social apps preview): preview, options for what to
+/// reveal, copy to the clipboard or save as PNG.
 struct PnLShareSheet: View {
     let p: PositionRow
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("t1.share.amount") private var showAmount = true
+    @AppStorage("t1.share.prices") private var showPrices = true
     @State private var note: String?
 
     var body: some View {
-        VStack(spacing: 16) {
-            card.frame(width: 420, height: 260)
-            HStack {
-                if let note { Text(note).font(.caption).foregroundStyle(.secondary) }
+        VStack(spacing: 0) {
+            Form {
+                Section {
+                    card.frame(width: 600, height: 337.5).scaleEffect(1).clipShape(.rect(cornerRadius: 14))
+                        .frame(maxWidth: .infinity)
+                }
+                Section {
+                    Toggle(L("Show PnL amount"), isOn: $showAmount)
+                    Toggle(L("Show entry and mark price"), isOn: $showPrices)
+                } footer: {
+                    Text(L("Size, margin and account balances are never on the card."))
+                }
+            }
+            .formStyle(.grouped)
+            HStack(spacing: 10) {
+                if let note { Label(note, systemImage: "checkmark.circle.fill").foregroundStyle(.secondary) }
                 Spacer()
                 Button(L("Close")) { dismiss() }.keyboardShortcut(.cancelAction)
                 Button(L("Save…")) { save() }
-                Button(L("Copy Image")) { copyImage() }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+                Button(L("Copy Image")) { copyImage() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
             }
+            .controlSize(.large)
+            .padding([.horizontal, .bottom], 20)
         }
-        .padding(20)
+        .frame(width: 680, height: 600)
     }
 
+    /// The card, laid out at 600 x 337.5 and rendered at 2x.
     private var card: some View {
         let up = p.upnl >= 0
         let col = up ? Color(nsColor: .systemGreen) : Color(nsColor: .systemRed)
+        let side = p.isLong ? Color(nsColor: .systemGreen) : Color(nsColor: .systemRed)
         return ZStack(alignment: .topLeading) {
-            LinearGradient(colors: [Color(hex: 0x15181d), col.opacity(0.35)], startPoint: .topLeading, endPoint: .bottomTrailing)
-            VStack(alignment: .leading, spacing: 10) {
+            LinearGradient(colors: [Color(white: 0.10), Color(white: 0.03)], startPoint: .top, endPoint: .bottom)
+            // soft glow in the result's color and the order-book motif of the app icon
+            RadialGradient(colors: [col.opacity(0.35), .clear], center: .bottomTrailing, startRadius: 10, endRadius: 420)
+            ShareBookMotif().opacity(0.16).frame(width: 260, height: 220).position(x: 470, y: 190)
+            VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 8) {
-                    Image(systemName: "chart.line.uptrend.xyaxis").font(.title3)
-                    Text("Depth").font(.headline)
+                    if let icon = NSImage(named: "Depth") ?? NSApp.applicationIconImage { Image(nsImage: icon).resizable().frame(width: 26, height: 26) }
+                    Text("Depth").font(.system(size: 17, weight: .semibold))
                     Spacer()
-                    Text(Date.now.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.white.opacity(0.6))
+                    Text(Date.now.formatted(date: .abbreviated, time: .shortened)).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
                 }
+                Spacer(minLength: 18)
                 HStack(spacing: 8) {
-                    Text(p.symbol).font(.title2.weight(.bold))
-                    Text("\(p.isLong ? "Long" : "Short") \(Int(p.lev))x").font(.callout.weight(.semibold))
-                        .padding(.horizontal, 8).padding(.vertical, 2).background((p.isLong ? Color(nsColor: .systemGreen) : Color(nsColor: .systemRed)).opacity(0.3), in: .capsule)
-                    Text("Perp · \(p.ex)").font(.callout).foregroundStyle(.white.opacity(0.6))
+                    CoinIcon(base: p.base, size: 24)
+                    Text(p.symbol).font(.system(size: 22, weight: .bold))
+                    Text("Perp").font(.system(size: 12, weight: .medium)).padding(.horizontal, 7).padding(.vertical, 3).background(.white.opacity(0.12), in: .capsule)
+                    Text("\(p.isLong ? "Long" : "Short") \(Int(p.lev))x").font(.system(size: 12, weight: .semibold)).foregroundStyle(side)
+                        .padding(.horizontal, 7).padding(.vertical, 3).background(side.opacity(0.18), in: .capsule)
                 }
-                Text(Fmt.signed(p.roe * 100) + "%").font(.system(size: 54, weight: .heavy).monospacedDigit()).foregroundStyle(col)
-                Text("\(Fmt.signed(p.upnl)) USDT").font(.title3.weight(.semibold).monospacedDigit()).foregroundStyle(col)
-                Spacer(minLength: 0)
-                HStack(spacing: 28) {
-                    kv("Entry", Fmt.px(p.entry))
-                    kv("Mark", Fmt.px(p.mark))
+                Text(Fmt.signed(p.roe * 100) + "%").font(.system(size: 64, weight: .heavy).monospacedDigit()).foregroundStyle(col)
+                    .padding(.top, 10)
+                if showAmount {
+                    Text("\(Fmt.signed(p.upnl)) USDT").font(.system(size: 18, weight: .semibold).monospacedDigit()).foregroundStyle(col.opacity(0.9))
+                }
+                Spacer(minLength: 16)
+                if showPrices {
+                    HStack(spacing: 34) {
+                        kv("Entry", Fmt.px(p.entry))
+                        kv("Mark", Fmt.px(p.mark))
+                        kv("Venue", p.ex)
+                    }
                 }
             }
-            .padding(22)
+            .padding(26)
             .foregroundStyle(.white)
         }
-        .clipShape(.rect(cornerRadius: 18))
+        .frame(width: 600, height: 337.5)
     }
 
     private func kv(_ k: String, _ v: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(k).font(.caption).foregroundStyle(.white.opacity(0.6))
-            Text(v).font(.headline.monospacedDigit())
+        VStack(alignment: .leading, spacing: 3) {
+            Text(k).font(.system(size: 11)).foregroundStyle(.white.opacity(0.5))
+            Text(v).font(.system(size: 15, weight: .semibold).monospacedDigit())
         }
     }
 
     @MainActor private func image() -> NSImage? {
-        let r = ImageRenderer(content: card.frame(width: 420, height: 260))
+        let r = ImageRenderer(content: card.environment(\.colorScheme, .dark))
         r.scale = 2
         return r.nsImage
     }
@@ -723,6 +757,20 @@ struct PnLShareSheet: View {
     }
 }
 
+/// The app icon's mirrored order book, as a background motif.
+private struct ShareBookMotif: View {
+    let bids: [Double] = [0.34, 0.56, 0.44, 0.82, 0.62, 1.0]
+    let asks: [Double] = [0.30, 0.50, 0.72, 0.46, 0.92, 0.76]
+    var body: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .trailing, spacing: 9) { ForEach(bids.indices, id: \.self) { i in RoundedRectangle(cornerRadius: 4).fill(Color(nsColor: .systemGreen)).frame(width: 110 * bids[i], height: 20) } }
+                .frame(width: 110, alignment: .trailing)
+            Capsule().fill(.white).frame(width: 5, height: 190)
+            VStack(alignment: .leading, spacing: 9) { ForEach(asks.indices, id: \.self) { i in RoundedRectangle(cornerRadius: 4).fill(Color(nsColor: .systemRed)).frame(width: 110 * asks[i], height: 20) } }
+                .frame(width: 110, alignment: .leading)
+        }
+    }
+}
 
 /// Positions as hand-laid rows (not Table): full-row side tint, one font, aligned numeric columns,
 /// "Close All" in the close column's header like Binance.
@@ -784,12 +832,7 @@ struct PosCol<C: View>: View {
 struct PosField: View {
     @Binding var text: String
     var width: Double
-    @FocusState private var focused: Bool
     var body: some View {
-        TextField("", text: $text).textFieldStyle(.plain).multilineTextAlignment(.trailing).monospacedDigit()
-            .focused($focused)
-            .padding(.horizontal, 8).frame(width: width, height: 26)
-            .background(.fill.tertiary, in: .rect(cornerRadius: 7))
-            .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(focused ? Color.accentColor : Color.primary.opacity(0.08)) }
+        TextField("", text: $text).textFieldStyle(.roundedBorder).multilineTextAlignment(.trailing).monospacedDigit().frame(width: width)
     }
 }

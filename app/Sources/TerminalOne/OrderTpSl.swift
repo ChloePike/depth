@@ -122,11 +122,12 @@ struct OrderTpSlSheet: View {
                 }
             }
             .formStyle(.grouped)
-            HStack(spacing: 8) {
-                Button { dismiss() } label: { Text(L("Close")).frame(maxWidth: .infinity) }
-                    .controlSize(.large).keyboardShortcut(.cancelAction)
-                OrderBigButton(title: L("Confirm"), color: Color.accentColor) { apply() }.keyboardShortcut(.defaultAction)
+            HStack(spacing: 10) {
+                Spacer()
+                Button(L("Close")) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(L("Confirm")) { apply() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
             }
+            .controlSize(.large)
             .padding([.horizontal, .bottom], 20)
         }
         .frame(width: 480, height: 600)
