@@ -184,11 +184,11 @@ pub fn detect(i: &Input, now_ms: i64) -> Vec<Signal> {
                 format!("Whale {} ${:.0}k", if t.2 { "buy" } else { "sell" }, t.1 / 1e3), format!("{} market order at {:.6}", i.base, px(p)));
         }
     }
-    // 8. a venue away from the composite: possible arbitrage or a stale feed
+    // 8. a venue away from its usual premium to the composite (deviation in bp, pre-filtered on its own noise)
     for (v, d) in i.dislocation {
-        if d.abs() >= 25.0 {
-            push("dislocation", if d.abs() >= 60.0 { 2 } else { 1 }, 0, format!("{v} {d:+.0} bp from index"),
-                format!("{v} trades {} the composite: check fees before treating it as arbitrage", if *d > 0.0 { "above" } else { "below" }));
+        if d.abs() >= 10.0 {
+            push("dislocation", if d.abs() >= 30.0 { 2 } else { 1 }, 0, format!("{v} {d:+.0} bp off its usual premium"),
+                format!("{v} trades {} the composite than it normally does: a venue leading the move, a stale feed or an opening for arbitrage (see Venues)", if *d > 0.0 { "further above" } else { "further below" }));
         }
     }
     out
@@ -209,9 +209,39 @@ impl Feed {
     }
 }
 
+/// One venue's top of book for `best_cross`: prices in the venue's own quote, taker fee as a fraction.
+pub struct Top<'a> { pub ex: &'a str, pub quote: &'a str, pub bid: f64, pub ask: f64, pub taker: f64 }
+
+/// The best buy-here-sell-there pair among venues with the same quote currency (USD vs USDT
+/// needs an FX leg, so it is never offered as arbitrage): (buy index, sell index, gross bp, net
+/// of both taker fees bp). Returned even when net is negative, so the UI can show how close it is.
+pub fn best_cross(v: &[Top]) -> Option<(usize, usize, f64, f64)> {
+    let mut best: Option<(usize, usize, f64, f64)> = None;
+    for (i, b) in v.iter().enumerate() {
+        for (j, s) in v.iter().enumerate() {
+            if i == j || b.quote != s.quote || !(b.ask > 0.0 && s.bid > 0.0) { continue; }
+            let gross = (s.bid / b.ask - 1.0) * 1e4;
+            let net = gross - (b.taker + s.taker) * 1e4;
+            if best.is_none_or(|x| net > x.3) { best = Some((i, j, gross, net)); }
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cross_same_quote_net_of_fees() {
+        let t = |ex, quote, bid, ask| Top { ex, quote, bid, ask, taker: 0.0005 };
+        // Kraken (USD) bids far above but is another currency; Bybit bids 20 bp over OKX's ask
+        let v = [t("Okx", "USDT", 99.9, 100.0), t("Bybit", "USDT", 100.2, 100.3), t("Kraken", "USD", 101.0, 101.1)];
+        let (i, j, gross, net) = best_cross(&v).unwrap();
+        assert_eq!((v[i].ex, v[j].ex), ("Okx", "Bybit"));
+        assert!((gross - 20.0).abs() < 1e-6 && (net - 10.0).abs() < 1e-6, "{gross} {net}");
+        assert!(best_cross(&v[2..]).is_none());
+    }
 
     fn bar(t: i64, c: f64, vol: f64) -> Bar { Bar { t: t * 60_000, o: c, h: c, l: c, c, vol, buy: vol / 2.0, sell: vol / 2.0, ..Default::default() } }
 

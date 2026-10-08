@@ -33,6 +33,7 @@ chart.funding = 资金费率
 chart.funding_pred = 预测
 chart.funding_settled = 已结算
 chart.basis = 基差
+chart.premium = 交易所溢价
 chart.ls = 多空比
 chart.liq = 爆仓
 chart.loading = 正在加载历史数据…

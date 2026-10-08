@@ -34,6 +34,7 @@ chart.funding = Funding
 chart.funding_pred = Predicted
 chart.funding_settled = Settled
 chart.basis = Basis
+chart.premium = Venue premium
 chart.ls = Long/Short
 chart.liq = Liquidations
 chart.loading = Loading history…

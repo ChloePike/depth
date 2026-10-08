@@ -59,13 +59,14 @@ fn stitch(hist: &[Bar], live: Vec<Bar>, first_live_1m: i64, tf: i64) -> Vec<Bar>
 }
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-enum Pane { Vol, Cvd, Oi, Funding, Basis, Ls }
+enum Pane { Vol, Cvd, Oi, Funding, Basis, Ls, Premium }
 
 impl Pane {
     fn key(self) -> &'static str {
         match self {
             Pane::Vol => "chart.vol", Pane::Cvd => "chart.cvd", Pane::Oi => "chart.oi",
             Pane::Funding => "chart.funding", Pane::Basis => "chart.basis", Pane::Ls => "chart.ls",
+            Pane::Premium => "chart.premium",
         }
     }
     fn perp_only(self) -> bool { matches!(self, Pane::Oi | Pane::Funding | Pane::Basis | Pane::Ls) }
@@ -181,7 +182,7 @@ impl Default for Chart {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(),
             drawings: Default::default(), tool: None, pending: None, ma: false, sr: true, walls: false, mark: true, breakouts: true, vwap: true, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
-            panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false)],
+            panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false)],
         }
     }
 }
@@ -498,6 +499,8 @@ impl Chart {
     pub fn show(&mut self, ui: &mut Ui, a: &Agg, market: Market, base: &str) {
         // one-time move to the calmer defaults (fewer overlays on by default); each stays a toggle
         if self.style < 2 { self.ma = false; self.walls = false; self.cone = false; self.style = 2; }
+        // panes added after a layout was saved
+        if !self.panes.iter().any(|p| p.0 == Pane::Premium) { self.panes.push((Pane::Premium, false)); }
         let smarket = if market == Market::Margin { Market::Spot } else { market };
         // hosted: the native toolbar above the chart drives these through native_set
         if !native() { self.toolbar(ui, a, smarket, base); }
@@ -948,7 +951,8 @@ impl Chart {
         // hover index
         let hover = resp.hover_pos().filter(|p| p.x < main.right());
         let hi_idx = hover.map(|p| fr.idx(p.x).round().clamp(i0 as f32, i1 as f32) as usize).unwrap_or(bars.len() - 1);
-        for (p, r) in &pane_rects { self.draw_pane(&painter, *p, *r, vis, i0, &fr, &bars[hi_idx]); }
+        let prem = if panes.contains(&Pane::Premium) { premium_lines(a, smarket, vis, self.tf * 60_000, hi_idx.checked_sub(i0)) } else { vec![] };
+        for (p, r) in &pane_rects { self.draw_pane(&painter, *p, *r, vis, i0, &fr, &bars[hi_idx], &prem); }
 
         // time axis
         let ty = top + TIME_H / 2.0;
@@ -1029,7 +1033,8 @@ impl Chart {
         }
     }
 
-    fn draw_pane(&self, painter: &egui::Painter, p: Pane, r: Rect, vis: &[Bar], i0: usize, fr: &Frame, hb: &Bar) {
+    #[allow(clippy::too_many_arguments)]
+    fn draw_pane(&self, painter: &egui::Painter, p: Pane, r: Rect, vis: &[Bar], i0: usize, fr: &Frame, hb: &Bar, prem: &[Prem]) {
         // the top 18px hold the legend, so lines never run through it
         let inner = Rect::from_min_max(pos2(r.left(), r.top() + 18.0), pos2(r.right(), r.bottom() - 4.0));
         let label = |s: String, col: Color32, x: f32| painter.text(pos2(x, r.top() + 9.0), Align2::LEFT_CENTER, s, mono(10.5), col).right() + 10.0;
@@ -1088,6 +1093,40 @@ impl Chart {
                 let fmt: &dyn Fn(f64) -> String = match p { Pane::Ls => &|v| format!("{v:.3}"), Pane::Basis => &|v| format!("{v:+.2}bp"), _ => &fmt_big };
                 if let Some(v) = get(hb) { label(fmt(v), col, lx); }
                 axis(lo, hi, fmt);
+            }
+            Pane::Premium => {
+                // each venue against the composite; the axis ignores the 2% most extreme points so one
+                // stale feed cannot flatten the rest
+                let mut all: Vec<f64> = prem.iter().flat_map(|l| l.vals.iter().flatten().copied()).collect();
+                if all.is_empty() { return; }
+                all.sort_by(f64::total_cmp);
+                let n = all.len();
+                let (lo, hi) = range(&[all[n / 50], all[(n - 1) - n / 50]], true);
+                zero_line(lo, hi);
+                for l in prem {
+                    let mut pts: Vec<Pos2> = vec![];
+                    let flush = |pts: &mut Vec<Pos2>| {
+                        let pts = std::mem::take(pts);
+                        if pts.len() > 1 { painter.add(egui::Shape::line(pts, Stroke::new(if l.odd { 1.6 } else { 1.0 }, l.col.linear_multiply(if l.odd { 1.0 } else { 0.55 })))); }
+                    };
+                    for (k, v) in l.vals.iter().enumerate() {
+                        match v {
+                            Some(v) => pts.push(pos2(fr.x((i0 + k) as f32), y_of(v.clamp(lo, hi), lo, hi, inner))),
+                            None => flush(&mut pts),
+                        }
+                    }
+                    flush(&mut pts);
+                }
+                // legend: venues furthest from their usual premium first; "usual" only when it matters
+                let mut leg: Vec<&Prem> = prem.iter().filter(|l| l.hover.is_some()).collect();
+                leg.sort_by(|x, y| y.dev().abs().total_cmp(&x.dev().abs()));
+                for l in leg {
+                    let v = l.hover.unwrap_or(0.0);
+                    let s = if l.odd { format!("{} {v:+.1} ({:+.1} vs usual)", l.name, l.dev()) } else { format!("{} {v:+.1}", l.name) };
+                    if lx > r.right() - 60.0 { break; }
+                    lx = label(s, l.col, lx);
+                }
+                axis(lo, hi, &|v| format!("{v:+.1}bp"));
             }
             Pane::Funding => {
                 let pred: Vec<(usize, f64)> = vis.iter().enumerate().filter_map(|(k, b)| Some((k, b.funding_h? * 1e4))).collect();
@@ -1300,6 +1339,40 @@ fn tool_button(ui: &mut Ui, tool: Option<Tool>, on: bool) -> egui::Response {
         }
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// One venue's line in the premium pane.
+pub(crate) struct Prem {
+    col: Color32, name: String,
+    /// premium over the composite (bp) per visible bar
+    vals: Vec<Option<f64>>,
+    /// value at the hovered (or last) bar
+    hover: Option<f64>,
+    /// the venue's usual premium: median of its 1m history
+    usual: f64,
+    /// the hovered value is far outside the venue's own noise (same rule as the dislocation signal)
+    odd: bool,
+}
+
+impl Prem { fn dev(&self) -> f64 { self.hover.map_or(0.0, |v| v - self.usual) } }
+
+/// Per-venue premium over the composite for the visible bars (mean of the 1m premiums inside
+/// each bar), its usual level and whether the hovered bar is abnormal.
+fn premium_lines(a: &Agg, market: Market, vis: &[Bar], ms: i64, hk: Option<usize>) -> Vec<Prem> {
+    let mut out: Vec<Prem> = a.venues.keys().filter(|(_, m)| *m == market).filter_map(|&(e, m)| {
+        let p = a.premium_bps(e, m);
+        let (usual, sd) = terminal_one::quant::robust(&p.iter().map(|x| x.1).collect::<Vec<_>>())?;
+        let map: std::collections::BTreeMap<i64, f64> = p.into_iter().collect();
+        let vals: Vec<Option<f64>> = vis.iter().map(|b| {
+            let (n, sum) = map.range(b.t..b.t + ms).fold((0usize, 0.0), |acc, (_, v)| (acc.0 + 1, acc.1 + v));
+            (n > 0).then(|| sum / n as f64)
+        }).collect();
+        let hover = hk.and_then(|k| vals.get(k).copied().flatten());
+        let odd = hover.is_some_and(|v| (v - usual).abs() >= 5.0 * sd.max(1.0));
+        Some(Prem { col: ex_color(e), name: format!("{e:?}"), vals, hover, usual, odd })
+    }).collect();
+    out.sort_by(|x, y| x.name.cmp(&y.name));
+    out
 }
 
 /// dark blue -> cyan -> yellow ramp for liquidity

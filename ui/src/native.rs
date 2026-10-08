@@ -285,11 +285,26 @@ impl App {
                     let (vol, buy, sell) = a.series.get(&(Some(*e), *vm)).map(|s| s.bars.iter().rev().take(mins)
                         .fold((0.0, 0.0, 0.0), |acc, b| (acc.0 + b.vol * mid * k, acc.1 + b.buy * mid * k, acc.2 + b.sell * mid * k))).unwrap_or_default();
                     let c = super::theme::ex_color(*e);
+                    // premium over the composite now, and this venue's normal premium (last hour's median)
+                    let prem = a.mid(*vm).map(|ix| (mid * k / ix - 1.0) * 1e4);
+                    let hist: Vec<f64> = a.premium_bps(*e, *vm).iter().rev().take(60).map(|x| x.1).collect();
+                    let norm = terminal_one::quant::robust(&hist).map(|x| x.0);
+                    let top = ven.bbo.map(|b| (b[0], b[2])).or_else(|| Some((ven.book.best_bid()?.0, ven.book.best_ask()?.0)));
                     Some(json!({"ex": ex_name(*e), "color": format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b()),
-                        "bid_usd": bid, "ask_usd": ask, "vol_usd": vol, "buy_usd": buy, "sell_usd": sell}))
+                        "bid_usd": bid, "ask_usd": ask, "vol_usd": vol, "buy_usd": buy, "sell_usd": sell,
+                        "quote": terminal_one::agg::quote_of(*e, *vm), "bid": top.map(|t| t.0), "ask": top.map(|t| t.1),
+                        "prem_bps": prem, "norm_bps": norm, "stale": now_ms() - ven.ts > 10_000}))
                 }).collect();
                 rows.sort_by(|x, y| y["vol_usd"].as_f64().unwrap_or(0.0).total_cmp(&x["vol_usd"].as_f64().unwrap_or(0.0)));
-                return Ok(json!({"rows": rows, "minutes": mins}));
+                // executable cross: same quote only, fresh books only, net of both taker fees
+                let tops: Vec<terminal_one::quant::Top> = rows.iter().filter(|r| r["stale"] == false).filter_map(|r| {
+                    let ex = r["ex"].as_str()?;
+                    Some(terminal_one::quant::Top { ex, quote: r["quote"].as_str()?, bid: r["bid"].as_f64()?, ask: r["ask"].as_f64()?,
+                        taker: Exchange::parse(ex).map(|e| super::settings::fee(e).0).unwrap_or(0.0005) })
+                }).collect();
+                let arb = terminal_one::quant::best_cross(&tops).map(|(i, j, gross, net)| json!({
+                    "buy": tops[i].ex, "sell": tops[j].ex, "ask": tops[i].ask, "bid": tops[j].bid, "quote": tops[i].quote, "gross_bps": gross, "net_bps": net}));
+                return Ok(json!({"rows": rows, "minutes": mins, "arb": arb}));
             }
             "place_scaled" => {
                 let req = self.order_req(&json!({"pos": v["pos"], "close": v["close"], "qty": v["qty"], "kind": "market"}))?;

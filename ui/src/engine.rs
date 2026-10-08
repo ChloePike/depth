@@ -315,7 +315,14 @@ impl Engine {
                         .map(|t| (t.ts, t.px * t.qty * a.usd(t.ex, t.market), t.side == terminal_one::Side::Buy)).collect();
                     let index = a.mid(Market::Perp);
                     let dislocation: Vec<(String, f64)> = a.venues.iter().filter(|((_, m), _)| *m == Market::Perp)
-                        .filter_map(|((e, m), v)| Some((format!("{e:?}"), (v.mid()? * a.usd(*e, *m) / index? - 1.0) * 1e4))).collect();
+                        .filter_map(|((e, m), v)| {
+                            // measured against the venue's own normal premium (USD vs USDT perps sit a few bp apart
+                            // all day), and only when that move is far outside its usual noise
+                            let now_bp = (v.mid()? * a.usd(*e, *m) / index? - 1.0) * 1e4;
+                            let hist: Vec<f64> = a.premium_bps(*e, *m).iter().rev().take(60).map(|x| x.1).collect();
+                            let (med, sd) = terminal_one::quant::robust(&hist)?;
+                            ((now_bp - med).abs() >= 5.0 * sd.max(1.0)).then(|| (format!("{e:?}"), now_bp - med))
+                        }).collect();
                     let input = terminal_one::quant::Input {
                         perp: terminal_one::quant::complete(&perp, now), spot: terminal_one::quant::complete(&spot, now),
                         trades: &trades, dislocation: &dislocation, base: &base_s,

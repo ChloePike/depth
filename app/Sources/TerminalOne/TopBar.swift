@@ -35,6 +35,7 @@ struct TopToolbar: ToolbarContent {
             .labelsHidden()
             .fixedSize()
         }
+        ToolbarItem(placement: .primaryAction) { MarketClock() }
         ToolbarItem(placement: .primaryAction) {
             Button { NotificationCenter.default.post(name: .init("T1OpenSettings"), object: nil) } label: {
                 Label(L("Settings"), systemImage: "gearshape")

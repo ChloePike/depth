@@ -60,20 +60,25 @@ extension Color {
 
 struct VenueShareRow: Decodable, Identifiable {
     var ex: String; var color: String; var bid_usd: Double; var ask_usd: Double; var vol_usd: Double; var buy_usd: Double; var sell_usd: Double
+    var quote: String; var bid: Double?; var ask: Double?; var prem_bps: Double?; var norm_bps: Double?; var stale: Bool
     var id: String { ex }
 }
-struct VenueShareReply: Decodable { var rows: [VenueShareRow] }
+/// Best same-quote cross: buy at `buy`'s ask, sell at `sell`'s bid; net is after both taker fees.
+struct VenueArb: Decodable { var buy: String; var sell: String; var ask: Double; var bid: Double; var quote: String; var gross_bps: Double; var net_bps: Double }
+struct VenueShareReply: Decodable { var rows: [VenueShareRow]; var arb: VenueArb? }
 
 /// Each venue's share of resting depth (+-1% of its mid) and of traded volume over the window.
 struct VenueShare: View {
     let window: Int
     @State private var rows: [VenueShareRow] = []
+    @State private var arb: VenueArb?
 
     var body: some View {
         let depth = rows.reduce(0) { $0 + $1.bid_usd + $1.ask_usd }
         let vol = rows.reduce(0) { $0 + $1.vol_usd }
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                prices
                 section(L("Volume share"), "\(L("Traded")) \(window >= 1440 ? "24h" : window >= 60 ? "1h" : "\(window)m") · $\(Fmt.big(vol))",
                         rows.sorted { $0.vol_usd > $1.vol_usd }, total: vol, value: \.vol_usd) { r in
                     let b = r.buy_usd + r.sell_usd
@@ -90,8 +95,45 @@ struct VenueShare: View {
         .scrollIndicators(.never)
         .task(id: window) {
             while !Task.isCancelled {
-                if let r = Store.shared.query("venue_share", ["minutes": window], as: VenueShareReply.self) { rows = r.rows }
+                if let r = Store.shared.query("venue_share", ["minutes": window], as: VenueShareReply.self) { rows = r.rows; arb = r.arb }
                 try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    /// Executable spread between venues, then each venue's premium over the composite next to its usual level.
+    private var prices: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(L("Price spread")).font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(L("vs composite · usual")).font(.caption).foregroundStyle(.secondary)
+            }
+            if let a = arb, a.net_bps > 0 {
+                Label {
+                    Text(String(format: L("Buy %@ %@, sell %@ %@: %+.1f bp after fees"), a.buy, Fmt.px(a.ask), a.sell, Fmt.px(a.bid), a.net_bps))
+                        .font(.caption.monospacedDigit())
+                } icon: { Image(systemName: "arrow.left.arrow.right") }
+                .foregroundStyle(T1.up)
+                .help(String(format: L("%@ books only, gross %+.1f bp, taker fees from Settings → Trading. Top of book only: size and latency decide whether it fills."), a.quote, a.gross_bps))
+            } else {
+                Text(arb.map { String(format: L("No executable spread (best %+.1f bp after fees)"), $0.net_bps) } ?? L("No executable spread"))
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            ForEach(rows.filter { $0.prem_bps != nil }.sorted { ($0.prem_bps ?? 0) > ($1.prem_bps ?? 0) }) { r in
+                let p = r.prem_bps ?? 0
+                // far from its own usual premium: highlight (the usual offset itself is structure, not signal)
+                let off = r.norm_bps.map { abs(p - $0) >= 5 } ?? false
+                HStack(spacing: 6) {
+                    VenueIcon(ex: r.ex, size: 13)
+                    Text(r.ex).font(.caption)
+                    Text(r.quote).font(.caption2).foregroundStyle(.tertiary)
+                    if r.stale { Image(systemName: "clock.badge.exclamationmark").font(.caption2).foregroundStyle(.orange).help(L("No update for 10 s")) }
+                    Spacer(minLength: 4)
+                    Text(r.norm_bps.map { String(format: "%+.1f", $0) } ?? "–").font(.caption2.monospacedDigit()).foregroundStyle(.tertiary).frame(width: 40, alignment: .trailing)
+                    Text(String(format: "%+.1f bp", p)).font(.caption.monospacedDigit().weight(off ? .semibold : .regular))
+                        .foregroundStyle(off ? (p > (r.norm_bps ?? 0) ? T1.up : T1.down) : .primary).frame(width: 62, alignment: .trailing)
+                }
             }
         }
     }

@@ -701,6 +701,16 @@ impl Agg {
         set.agg.insert(Market::Perp, perp);
     }
 
+    /// One venue's per-minute premium over the composite, in bp: its close (USD) against the
+    /// cross-venue close of the same minute.
+    /// ponytail: converts with today's FX rate, fine while USDT/USD moves a few bp a day.
+    pub fn premium_bps(&self, ex: Exchange, market: Market) -> Vec<(i64, f64)> {
+        let (Some(v), Some(x)) = (self.series.get(&(Some(ex), market)), self.series.get(&(None, market))) else { return vec![] };
+        let k = self.usd(ex, market);
+        let idx: HashMap<i64, f64> = x.bars.iter().filter(|b| b.c > 0.0).map(|b| (b.t, b.c)).collect();
+        v.bars.iter().filter(|b| b.c > 0.0).filter_map(|b| Some((b.t, (b.c * k / idx.get(&b.t)? - 1.0) * 1e4))).collect()
+    }
+
     /// Push one heatmap column per spot/perp market. Call about once a second.
     pub fn sample_heatmap(&mut self, now: i64) {
         for market in [Market::Spot, Market::Perp] {
