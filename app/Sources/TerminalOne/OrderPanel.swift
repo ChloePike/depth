@@ -316,15 +316,22 @@ struct OrderPanel: View {
         case .limit:
             priceField
             HStack(spacing: 6) {
-                Text(L("Time in force")).foregroundStyle(.secondary)
-                Spacer()
-                Picker(L("Time in force"), selection: $tif) {
-                    Text(L("GTC · good till cancelled")).tag("gtc")
-                    Text(L("IOC · fill what's there, cancel the rest")).tag("ioc")
-                    if t.caps.fok { Text(L("FOK · fill completely or cancel")).tag("fok") }
-                    Text(L("Post only (ALO) · maker or cancel")).tag("post")
+                Text(L("Time in force")).foregroundStyle(.secondary).lineLimit(1).fixedSize()
+                Spacer(minLength: 4)
+                // the button shows the short name; the menu explains each option
+                Menu {
+                    Picker(L("Time in force"), selection: $tif) {
+                        Text(L("GTC · good till cancelled")).tag("gtc")
+                        Text(L("IOC · fill what's there, cancel the rest")).tag("ioc")
+                        if t.caps.fok { Text(L("FOK · fill completely or cancel")).tag("fok") }
+                        Text(L("Post only (ALO) · maker or cancel")).tag("post")
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    Text(useBbo ? "GTC" : ["gtc": "GTC", "ioc": "IOC", "fok": "FOK", "post": L("Post only")][tif] ?? "GTC")
+                        .lineLimit(1)
                 }
-                .pickerStyle(.menu).labelsHidden().fixedSize().disabled(useBbo)
+                .menuStyle(.borderlessButton).fixedSize().disabled(useBbo)
                 .help(useBbo ? L("BBO orders are good till cancelled") : L("How long the order may rest on the book"))
             }
             .font(.callout)
