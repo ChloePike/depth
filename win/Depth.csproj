@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Windows host of Depth: WinUI 3, code-only (no .xaml), unpackaged, Windows App SDK self-contained.
+       The terminal itself is t1_ffi.dll, built by cargo; see README.md. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <!-- Windows App SDK 1.6 needs the CsWinRT 2.1 Windows projection (.38 or later) -->
+    <WindowsSdkPackageVersion>10.0.19041.38</WindowsSdkPackageVersion>
+    <RootNamespace>Depth</RootNamespace>
+    <AssemblyName>Depth</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <RuntimeIdentifier Condition="'$(Platform)' == 'ARM64'">win-arm64</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+    <!-- generates resources.pri (the built-in control templates) for the unpackaged app -->
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.250602001" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1742" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\target\release\t1_ffi.dll" Condition="'$(Platform)' != 'ARM64'" Link="t1_ffi.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\target\aarch64-pc-windows-msvc\release\t1_ffi.dll" Condition="'$(Platform)' == 'ARM64'" Link="t1_ffi.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\assets\icons\*.png" LinkBase="Icons" CopyToOutputDirectory="PreserveNewest" />
+    <!-- UI translations, shared with the macOS host -->
+    <Content Include="..\app\Resources\*.txt" LinkBase="Resources" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
