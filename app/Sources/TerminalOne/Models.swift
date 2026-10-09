@@ -10,7 +10,9 @@ import Foundation
 final class AppState {
     var base = "BTC"
     var mode = "Perp"
-    var lang_zh = false
+    var lang = "en"
+    /// (code, native name) of every UI language, from the Rust side
+    var langs: [[String]] = []
     var header = Header()
     var venues: [VenueStatus] = []
     var stats = Stats()
@@ -38,7 +40,8 @@ final class AppState {
     func apply(_ n: Snapshot) {
         if base != n.base { base = n.base }
         if mode != n.mode { mode = n.mode }
-        if lang_zh != n.lang_zh { lang_zh = n.lang_zh }
+        if lang != n.lang { lang = n.lang }
+        if langs != n.langs { langs = n.langs }
         if header != n.header { header = n.header }
         if venues != n.venues { venues = n.venues }
         if stats != n.stats { stats = n.stats }
@@ -69,7 +72,9 @@ final class AppState {
 struct Snapshot: Decodable {
     var base = "BTC"
     var mode = "Perp"
-    var lang_zh = false
+    var lang = "en"
+    /// (code, native name) of every UI language, from the Rust side
+    var langs: [[String]] = []
     var header = Header()
     var venues: [VenueStatus] = []
     var stats = Stats()
@@ -99,13 +104,13 @@ struct Snapshot: Decodable {
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: K.self)
         func v<T: Decodable>(_ k: K, _ def: T) -> T { (try? c.decodeIfPresent(T.self, forKey: k)) ?? def }
-        base = v(.base, base); mode = v(.mode, mode); lang_zh = v(.lang_zh, lang_zh); header = v(.header, header)
+        base = v(.base, base); mode = v(.mode, mode); lang = v(.lang, lang); langs = v(.langs, langs); header = v(.header, header)
         venues = v(.venues, venues); stats = v(.stats, stats); trade = v(.trade, trade); positions = v(.positions, positions)
         orders = v(.orders, orders); tpsl = v(.tpsl, tpsl); history = v(.history, history); wallets = v(.wallets, wallets)
         balances = v(.balances, balances); algos = v(.algos, algos); transferring = v(.transferring, transferring); binance_pm = v(.binance_pm, binance_pm); log = v(.log, log); keys = v(.keys, keys); prefs = v(.prefs, prefs)
         route = v(.route, route); tradable = v(.tradable, tradable); book_click = v(.book_click, book_click); chart = v(.chart, chart); book = v(.book, book); signals = v(.signals, signals); quant = v(.quant, quant)
     }
-    enum K: String, CodingKey { case base, mode, lang_zh, header, venues, stats, trade, positions, orders, tpsl, history, wallets, balances, algos, transferring, binance_pm, log, keys, prefs, route, tradable, book_click, chart, book, signals, quant }
+    enum K: String, CodingKey { case base, mode, lang, langs, header, venues, stats, trade, positions, orders, tpsl, history, wallets, balances, algos, transferring, binance_pm, log, keys, prefs, route, tradable, book_click, chart, book, signals, quant }
 }
 
 struct Header: Decodable, Equatable {
@@ -185,6 +190,10 @@ struct KeyTest: Decodable, Equatable { var ok: Bool; var msg: String }
 
 /// Settings > Appearance / Orders (round-trips through set_prefs).
 struct Prefs: Codable, Equatable {
+    /// "system" | "dark" | "light"
+    var theme = "system"
+    /// display time zone, minutes from UTC; nil follows the system
+    var tz_min: Int?
     var accent: [Int] = [76, 158, 235]; var red_up = false; var zoom = 1.0; var radius = 5; var confirm = true
     var fees: [String: [Double]] = [:]
 }

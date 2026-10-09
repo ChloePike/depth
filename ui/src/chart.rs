@@ -589,14 +589,14 @@ impl Chart {
         // grid + price axis
         for v in gv.iter().copied() {
             let yy = y(v);
-            painter.hline(main.left()..=main.right(), yy, Stroke::new(1.0, GRID));
-            painter.text(pos2(main.right() + 8.0, yy), Align2::LEFT_CENTER, axis_label(v), mono(11.0), MU);
+            painter.hline(main.left()..=main.right(), yy, Stroke::new(1.0, super::theme::grid()));
+            painter.text(pos2(main.right() + 8.0, yy), Align2::LEFT_CENTER, axis_label(v), mono(11.0), mu());
         }
         // watermark: the instrument, faint, behind everything
         let wm = format!("{base}USDT · {}", self.src.map(|e| format!("{e:?}")).unwrap_or_else(|| t("src.agg").to_string()));
         // hosted: the toolbar already names the market; the watermark is just noise behind the candles
-        if !native() { painter.text(main_plot.center(), Align2::CENTER_CENTER, wm, prop(44.0), Color32::from_white_alpha(9)); }
-        else { painter.text(pos2(main_plot.left() + 14.0, main_plot.bottom() - 12.0), Align2::LEFT_BOTTOM, "Depth", prop(30.0), Color32::from_white_alpha(14)); }
+        if !native() { painter.text(main_plot.center(), Align2::CENTER_CENTER, wm, prop(44.0), fg().gamma_multiply(0.04)); }
+        else { painter.text(pos2(main_plot.left() + 14.0, main_plot.bottom() - 12.0), Align2::LEFT_BOTTOM, "Depth", prop(30.0), fg().gamma_multiply(0.06)); }
 
         // one textured quad: x by bar index, y by price of the top/bottom bin edges
         let quad = |tex: egui::TextureId, g: TexGeom, bin: f64| {
@@ -648,8 +648,8 @@ impl Chart {
         let ba = bid_ask(a, self.src, smarket, last_bar.c);
         let ba_rect = ba.map(|(bid, ask)| {
             let (ka, kb) = (t("tr.ask"), t("tr.bid"));
-            let lw = painter.layout_no_wrap(ka.to_string(), prop(10.0), FG).size().x.max(painter.layout_no_wrap(kb.to_string(), prop(10.0), FG).size().x);
-            let vw = painter.layout_no_wrap(fmt_px(ask.max(bid)), mono(10.0), FG).size().x;
+            let lw = painter.layout_no_wrap(ka.to_string(), prop(10.0), fg()).size().x.max(painter.layout_no_wrap(kb.to_string(), prop(10.0), fg()).size().x);
+            let vw = painter.layout_no_wrap(fmt_px(ask.max(bid)), mono(10.0), fg()).size().x;
             let w = lw + vw + 16.0;
             Rect::from_min_size(pos2(main.right() - w - 4.0, last_ly - 15.0), vec2(w, 30.0))
         });
@@ -687,7 +687,7 @@ impl Chart {
                 if *v <= 0.0 { continue; }
                 let (y0, y1) = (y(p.lo + (i + 1) as f64 * p.bin), y(p.lo + i as f64 * p.bin));
                 let len = w * (*v / max) as f32;
-                let col = if i == p.poc() { Color32::from_rgb(0xf0, 0xb9, 0x0b) } else if (va0..=va1).contains(&i) { accent() } else { MU };
+                let col = if i == p.poc() { Color32::from_rgb(0xf0, 0xb9, 0x0b) } else if (va0..=va1).contains(&i) { accent() } else { mu() };
                 // anchored on the left: the right edge already carries the book depth and liquidation profiles
                 clip.rect_filled(Rect::from_min_max(pos2(main.left(), y0 + 0.5), pos2(main.left() + len, (y1 - 0.5).max(y0 + 1.0))), 0, col.linear_multiply(0.14));
             }
@@ -717,7 +717,7 @@ impl Chart {
                 if !(px > lo && px < hi) { continue; }
                 let g = painter.layout_no_wrap(tag, mono(10.5), col);
                 let r = place(Rect::from_min_size(pos2(main.left() + w + 8.0, y(px) - 9.0), vec2(g.size().x + 10.0, 16.0)), &mut taken);
-                painter.rect_filled(r, 3, LABEL_BG);
+                painter.rect_filled(r, 3, label_bg());
                 painter.galley(r.center() - g.size() / 2.0, g, col);
             }
         }
@@ -741,7 +741,7 @@ impl Chart {
                 let tag = format!("{} {} {}", if failed { "✕" } else if is_up { "↑" } else { "↓" }, t(key), fmt_px(l.px));
                 let g = painter.layout_no_wrap(tag, mono(10.5), col);
                 let r = place(Rect::from_min_size(pos2(main.center().x, ly - 9.0), g.size() + vec2(10.0, 4.0)), &mut taken);
-                painter.rect_filled(r, 3, LABEL_BG);
+                painter.rect_filled(r, 3, label_bg());
                 painter.rect_stroke(r, 3, Stroke::new(1.0, col), egui::StrokeKind::Inside);
                 painter.galley(r.min + vec2(5.0, 2.0), g, col);
             }
@@ -819,7 +819,7 @@ impl Chart {
                         let tag = format!("{} ${}", if ask { "Ask wall" } else { "Bid wall" }, fmt_usd_short(qty * px));
                         let g = painter.layout_no_wrap(tag, mono(10.5), col);
                         let r = place(Rect::from_min_size(pos2(x0 + 2.0, ly - 15.0), g.size() + vec2(6.0, 2.0)), &mut taken);
-                        painter.rect_filled(r, 2, LABEL_BG.gamma_multiply(0.85));
+                        painter.rect_filled(r, 2, label_bg().gamma_multiply(0.85));
                         painter.galley(r.min + vec2(3.0, 1.0), g, col);
                     }
                 }
@@ -854,8 +854,8 @@ impl Chart {
             // point the label toward the chart's middle so it never runs off the right edge
             let left = x > main.center().x;
             let (end, align) = if left { (x - 22.0, Align2::RIGHT_CENTER) } else { (x + 22.0, Align2::LEFT_CENTER) };
-            painter.line_segment([pos2(x, yy), pos2(end, yy)], Stroke::new(1.0, MU));
-            painter.text(pos2(end + if left { -3.0 } else { 3.0 }, yy), align, fmt_px(v), mono(10.5), FG);
+            painter.line_segment([pos2(x, yy), pos2(end, yy)], Stroke::new(1.0, mu()));
+            painter.text(pos2(end + if left { -3.0 } else { 3.0 }, yy), align, fmt_px(v), mono(10.5), fg());
         }
 
         // liquidation bubbles: longs liquidated under the candle, shorts above
@@ -882,13 +882,13 @@ impl Chart {
             let both = place(Rect::from_min_size(pos2(x0, ly - 10.0), vec2(g1.size().x + g2.size().x + 28.0, 20.0)), &mut taken);
             let r1 = Rect::from_min_size(both.min, vec2(g1.size().x + 14.0, 20.0));
             let r2 = Rect::from_min_size(pos2(r1.right(), both.top()), vec2(g2.size().x + 14.0, 20.0));
-            painter.rect_filled(r1.union(r2), 3, LABEL_BG);
+            painter.rect_filled(r1.union(r2), 3, label_bg());
             painter.rect_filled(r1, egui::CornerRadius { nw: 3, sw: 3, ne: 0, se: 0 }, l.col);
             painter.rect_stroke(r1.union(r2), 3, Stroke::new(1.0, l.col), egui::StrokeKind::Inside);
             painter.galley(r1.center() - g1.size() / 2.0, g1, Color32::WHITE);
             painter.galley(r2.center() - g2.size() / 2.0, g2, l.col);
             let ax = place(Rect::from_min_size(pos2(main.right() + 2.0, ly - 9.0), vec2(AXIS_W - 4.0, 18.0)), &mut taken);
-            painter.rect_filled(ax, 3, LABEL_BG);
+            painter.rect_filled(ax, 3, label_bg());
             painter.rect_stroke(ax, 3, Stroke::new(1.0, l.col), egui::StrokeKind::Inside);
             painter.text(ax.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(l.price), mono(11.0), l.col);
         }
@@ -944,7 +944,7 @@ impl Chart {
         let mut pane_rects = vec![];
         for p in &panes {
             let r = Rect::from_min_size(pos2(rect.left(), top), vec2(plot_w, SUB_H));
-            painter.hline(rect.left()..=rect.right(), r.top(), Stroke::new(1.0, LINE));
+            painter.hline(rect.left()..=rect.right(), r.top(), Stroke::new(1.0, line()));
             pane_rects.push((*p, r));
             top += SUB_H;
         }
@@ -957,29 +957,29 @@ impl Chart {
 
         // time axis
         let ty = top + TIME_H / 2.0;
-        painter.hline(rect.left()..=rect.right(), top, Stroke::new(1.0, LINE));
+        painter.hline(rect.left()..=rect.right(), top, Stroke::new(1.0, line()));
         let every = [1usize, 2, 3, 5, 10, 15, 30, 60, 120, 240, 480].into_iter().find(|k| *k as f32 * self.bar_w >= 90.0).unwrap_or(960);
         for (k, b) in vis.iter().enumerate() {
             if ((b.t / (self.tf * 60_000)) as usize) % every != 0 { continue; }
             let x = fr.x((i0 + k) as f32);
-            painter.vline(x, main.top()..=top, Stroke::new(1.0, GRID));
-            painter.text(pos2(x, ty), Align2::CENTER_CENTER, fmt_time(b.t, every as i64 * self.tf >= 1440), mono(10.5), MU);
+            painter.vline(x, main.top()..=top, Stroke::new(1.0, super::theme::grid()));
+            painter.text(pos2(x, ty), Align2::CENTER_CENTER, fmt_time(b.t, every as i64 * self.tf >= 1440), mono(10.5), mu());
         }
-        painter.vline(main.right(), rect.top()..=rect.bottom(), Stroke::new(1.0, LINE));
+        painter.vline(main.right(), rect.top()..=rect.bottom(), Stroke::new(1.0, line()));
         // scale toggles in the corner under the price axis: % and log (click again for linear)
         let corner = Rect::from_min_max(pos2(main.right() + 1.0, top + 1.0), pos2(rect.right(), rect.bottom()));
         let ar = Rect::from_min_size(pos2(corner.left() + 50.0, corner.top() + 1.0), vec2(18.0, corner.height() - 2.0));
         let auto_resp = ui.interact(ar, ui.id().with("auto"), Sense::click());
         let auto = self.y_range.is_none();
-        if auto || auto_resp.hovered() { painter.rect_filled(ar, 3, HL); }
-        painter.text(ar.center(), Align2::CENTER_CENTER, "A", mono(10.5), if auto { accent() } else { MU });
+        if auto || auto_resp.hovered() { painter.rect_filled(ar, 3, hl()); }
+        painter.text(ar.center(), Align2::CENTER_CENTER, "A", mono(10.5), if auto { accent() } else { mu() });
         if auto_resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t("chart.auto_tip")).clicked() { self.y_range = None; }
         for (i, (sc, lab)) in [(Scale::Percent, "%"), (Scale::Log, "log")].into_iter().enumerate() {
             let r = Rect::from_min_size(pos2(corner.left() + 2.0 + i as f32 * 22.0, corner.top() + 1.0), vec2(20.0 + i as f32 * 6.0, corner.height() - 2.0));
             let rs = ui.interact(r, ui.id().with(("scale", i)), Sense::click());
             let on = self.scale == sc;
-            if on || rs.hovered() { painter.rect_filled(r, 3, HL); }
-            painter.text(r.center(), Align2::CENTER_CENTER, lab, mono(10.5), if on { accent() } else { MU });
+            if on || rs.hovered() { painter.rect_filled(r, 3, hl()); }
+            painter.text(r.center(), Align2::CENTER_CENTER, lab, mono(10.5), if on { accent() } else { mu() });
             if rs.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.scale = if on { Scale::Linear } else { sc }; }
         }
 
@@ -987,18 +987,18 @@ impl Chart {
         if let Some(p) = hover {
             let x = fr.x(hi_idx as f32);
             // dashed and faint: the crosshair must not hide the candles and lines under it
-            let cross = Stroke::new(1.0, MU.linear_multiply(0.55));
+            let cross = Stroke::new(1.0, mu().linear_multiply(0.55));
             painter.extend(egui::Shape::dashed_line(&[pos2(x, rect.top()), pos2(x, top)], cross, 4.0, 4.0));
             if main_plot.contains(p) {
                 painter.extend(egui::Shape::dashed_line(&[pos2(main.left(), p.y), pos2(main.right(), p.y)], cross, 4.0, 4.0));
                 let v = ps.v(p.y);
                 let lab = Rect::from_min_size(pos2(main.right() + 1.0, p.y - 9.0), vec2(AXIS_W - 2.0, 18.0));
-                painter.rect_filled(lab, 2, HL);
-                painter.text(lab.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, axis_label(v), mono(11.0), FG);
+                painter.rect_filled(lab, 2, hl());
+                painter.text(lab.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, axis_label(v), mono(11.0), fg());
             }
             let tl = Rect::from_center_size(pos2(x, ty), vec2(110.0, TIME_H - 2.0));
-            painter.rect_filled(tl, 2, HL);
-            painter.text(tl.center(), Align2::CENTER_CENTER, fmt_time_full(bars[hi_idx].t), mono(10.5), FG);
+            painter.rect_filled(tl, 2, hl());
+            painter.text(tl.center(), Align2::CENTER_CENTER, fmt_time_full(bars[hi_idx].t), mono(10.5), fg());
         }
 
         // legend: row 1 time + OHLC + change + range (labels muted, values colored), row 2 MAs
@@ -1007,11 +1007,11 @@ impl Chart {
         let range = if b.l > 0.0 { (b.h / b.l - 1.0) * 100.0 } else { 0.0 };
         let c = if b.c >= b.o { up() } else { dn() };
         let kv = |x: f32, yy: f32, k: &str, v: String, col: Color32| -> f32 {
-            let r = painter.text(pos2(x, yy), Align2::LEFT_CENTER, k, prop(11.5), DIM);
+            let r = painter.text(pos2(x, yy), Align2::LEFT_CENTER, k, prop(11.5), dim());
             painter.text(pos2(r.right() + 5.0, yy), Align2::LEFT_CENTER, v, mono(11.5), col).right() + 12.0
         };
         let y1 = main.top() + 12.0;
-        let mut lx = painter.text(pos2(main.left() + 8.0, y1), Align2::LEFT_CENTER, fmt_time_full(b.t), mono(11.5), MU).right() + 12.0;
+        let mut lx = painter.text(pos2(main.left() + 8.0, y1), Align2::LEFT_CENTER, fmt_time_full(b.t), mono(11.5), mu()).right() + 12.0;
         for (k, v) in [("chart.o", b.o), ("chart.h", b.h), ("chart.l", b.l), ("chart.c", b.c)] { lx = kv(lx, y1, t(k), fmt_px(v), c); }
         lx = kv(lx, y1, t("chart.chg"), format!("{chg:+.2}%"), c);
         kv(lx, y1, t("chart.range"), format!("{range:.2}%"), c);
@@ -1021,7 +1021,7 @@ impl Chart {
             lx = kv(lx, y2, &format!("MA({n})"), m[hi_idx].map(fmt_px).unwrap_or("-".into()), col);
         }
         if lmax > 0.0 {
-            kv(lx, y2, t("chart.liq"), format!("{} / {}", fmt_big(b.liq_long), fmt_big(b.liq_short)), DIM);
+            kv(lx, y2, t("chart.liq"), format!("{} / {}", fmt_big(b.liq_long), fmt_big(b.liq_short)), dim());
         }
         let y3 = main.top() + 48.0;
         let mut lx = main.left() + 8.0;
@@ -1040,10 +1040,10 @@ impl Chart {
         let inner = Rect::from_min_max(pos2(r.left(), r.top() + 18.0), pos2(r.right(), r.bottom() - 4.0));
         let label = |s: String, col: Color32, x: f32| painter.text(pos2(x, r.top() + 9.0), Align2::LEFT_CENTER, s, mono(10.5), col).right() + 10.0;
         // pane name in the UI font, values in mono
-        let mut lx = painter.text(pos2(r.left() + 8.0, r.top() + 9.0), Align2::LEFT_CENTER, t(p.key()), prop(11.5), MU).right() + 10.0;
+        let mut lx = painter.text(pos2(r.left() + 8.0, r.top() + 9.0), Align2::LEFT_CENTER, t(p.key()), prop(11.5), mu()).right() + 10.0;
         let axis = |lo: f64, hi: f64, fmt: &dyn Fn(f64) -> String| {
-            painter.text(pos2(r.right() + 6.0, inner.top() + 4.0), Align2::LEFT_CENTER, fmt(hi), mono(10.0), DIM);
-            painter.text(pos2(r.right() + 6.0, inner.bottom() - 4.0), Align2::LEFT_CENTER, fmt(lo), mono(10.0), DIM);
+            painter.text(pos2(r.right() + 6.0, inner.top() + 4.0), Align2::LEFT_CENTER, fmt(hi), mono(10.0), dim());
+            painter.text(pos2(r.right() + 6.0, inner.bottom() - 4.0), Align2::LEFT_CENTER, fmt(lo), mono(10.0), dim());
         };
         let line = |vals: Vec<(usize, f64)>, lo: f64, hi: f64, col: Color32, step: bool| {
             let mut pts: Vec<Pos2> = vec![];
@@ -1055,7 +1055,7 @@ impl Chart {
             if pts.len() > 1 { painter.add(egui::Shape::line(pts, Stroke::new(1.3, col))); }
         };
         let range = |vals: &[f64], zero: bool| padded_range(vals.iter().copied(), 0.08, zero);
-        let zero_line = |lo: f64, hi: f64| { if lo < 0.0 && hi > 0.0 { painter.hline(r.left()..=r.right(), y_of(0.0, lo, hi, inner), Stroke::new(1.0, LINE)); } };
+        let zero_line = |lo: f64, hi: f64| { if lo < 0.0 && hi > 0.0 { painter.hline(r.left()..=r.right(), y_of(0.0, lo, hi, inner), Stroke::new(1.0, super::theme::line())); } };
         match p {
             Pane::Vol => {
                 let max = vis.iter().map(|b| b.vol).fold(0.0, f64::max).max(1e-12);
@@ -1069,7 +1069,7 @@ impl Chart {
                         painter.rect_filled(Rect::from_min_max(pos2(x - bw / 2.0, base - hb), pos2(x + bw / 2.0, base)), 0, up().linear_multiply(0.6));
                         painter.rect_filled(Rect::from_min_max(pos2(x - bw / 2.0, base - h), pos2(x + bw / 2.0, base - hb)), 0, dn().linear_multiply(0.6));
                     } else {
-                        painter.rect_filled(Rect::from_min_max(pos2(x - bw / 2.0, base - h), pos2(x + bw / 2.0, base)), 0, DIM);
+                        painter.rect_filled(Rect::from_min_max(pos2(x - bw / 2.0, base - h), pos2(x + bw / 2.0, base)), 0, dim());
                     }
                 }
                 let vols: Vec<f64> = vis.iter().map(|b| b.vol).collect();
@@ -1078,9 +1078,9 @@ impl Chart {
                     let m = sma(&vols, n);
                     line(m.iter().enumerate().filter_map(|(k, v)| Some((k, (*v)?))).collect(), 0.0, max, col.linear_multiply(0.9), false);
                 }
-                lx = label(format!("{} {}", fmt_big(hb.vol), self.base_unit), FG, lx);
-                lx = label(format!("≈{} USDT", fmt_big(hb.vol * hb.c)), MU, lx);
-                if hb.buy + hb.sell > 0.0 { label(format!("B {} / S {}", fmt_big(hb.buy), fmt_big(hb.sell)), MU, lx); }
+                lx = label(format!("{} {}", fmt_big(hb.vol), self.base_unit), fg(), lx);
+                lx = label(format!("≈{} USDT", fmt_big(hb.vol * hb.c)), mu(), lx);
+                if hb.buy + hb.sell > 0.0 { label(format!("B {} / S {}", fmt_big(hb.buy), fmt_big(hb.sell)), mu(), lx); }
                 axis(0.0, max, &fmt_big);
             }
             Pane::Cvd | Pane::Oi | Pane::Ls | Pane::Basis => {
@@ -1089,7 +1089,7 @@ impl Chart {
                 if vals.is_empty() { return; }
                 let (lo, hi) = range(&vals.iter().map(|x| x.1).collect::<Vec<_>>(), p == Pane::Basis);
                 zero_line(lo, hi);
-                let col = match p { Pane::Cvd => accent(), Pane::Oi => WARN, Pane::Ls => PURPLE, _ => FG };
+                let col = match p { Pane::Cvd => accent(), Pane::Oi => WARN, Pane::Ls => PURPLE, _ => fg() };
                 line(vals, lo, hi, col, false);
                 let fmt: &dyn Fn(f64) -> String = match p { Pane::Ls => &|v| format!("{v:.3}"), Pane::Basis => &|v| format!("{v:+.2}bp"), _ => &fmt_big };
                 if let Some(v) = get(hb) { label(fmt(v), col, lx); }
@@ -1258,7 +1258,7 @@ impl Chart {
             }
             // a menu interval in use shows as a selected tab after the quick ones
             if let Some((_, l)) = TFS[TF_QUICK..].iter().find(|(m, _)| *m == self.tf) { tab(ui, l, true, 12.0); }
-            ui.menu_button(RichText::new("▾").color(MU), |ui| {
+            ui.menu_button(RichText::new("▾").color(mu()), |ui| {
                 ui.set_min_width(90.0);
                 for (m, l) in &TFS[TF_QUICK..] { if ui.selectable_label(self.tf == *m, *l).clicked() { self.tf = *m; ui.close(); } }
             });
@@ -1308,8 +1308,8 @@ impl Chart {
 fn tool_button(ui: &mut Ui, tool: Option<Tool>, on: bool) -> egui::Response {
     let (r, resp) = ui.allocate_exact_size(vec2(26.0, 22.0), Sense::click());
     let p = ui.painter();
-    if on { p.rect_filled(r, 3, HL); } else if resp.hovered() { p.rect_filled(r, 3, HL.linear_multiply(0.6)); }
-    let col = if on { accent() } else if resp.hovered() { FG } else { MU };
+    if on { p.rect_filled(r, 3, hl()); } else if resp.hovered() { p.rect_filled(r, 3, hl().linear_multiply(0.6)); }
+    let col = if on { accent() } else if resp.hovered() { fg() } else { mu() };
     let s = Stroke::new(1.4, col);
     let c = r.center();
     match tool {

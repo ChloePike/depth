@@ -2,19 +2,26 @@ import SwiftUI
 
 /// Palette shared with the Rust side (ui/src/theme.rs); accent and up/down follow Settings.
 enum T1 {
-    static let bg = Color(hex: 0x0a0d11)
-    static let panel = Color(hex: 0x12161c)
-    static let panel2 = Color(hex: 0x1a1f27)
-    static let hl = Color(hex: 0x20262f)
-    static let line = Color(hex: 0x242a33)
-    static let fg = Color(hex: 0xe6e9ed)
-    static let mu = Color(hex: 0x8a929d)
-    static let dim = Color(hex: 0x59616c)
+    static let bg = Color(dark: 0x0a0d11, light: 0xffffff)
+    static let panel = Color(dark: 0x12161c, light: 0xf5f5f7)
+    static let panel2 = Color(dark: 0x1a1f27, light: 0xececf0)
+    static let hl = Color(dark: 0x20262f, light: 0xe3e3e8)
+    static let line = Color(dark: 0x242a33, light: 0xd8d8de)
+    static let fg = Color(dark: 0xe6e9ed, light: 0x1d1d1f)
+    static let mu = Color(dark: 0x8a929d, light: 0x6e6e73)
+    static let dim = Color(dark: 0x59616c, light: 0x9a9aa0)
     static let warn = Color(hex: 0xe8a33d)
     static let green = Color(nsColor: .systemGreen)
     static let red = Color(nsColor: .systemRed)
 
     @MainActor static var accent: Color { let a = Store.shared.state.prefs.accent; return a.count == 3 ? Color(red: Double(a[0]) / 255, green: Double(a[1]) / 255, blue: Double(a[2]) / 255) : .blue }
+    /// Display time zone (Settings > General), the system's by default.
+    @MainActor static var tz: TimeZone { Store.shared.state.prefs.tz_min.flatMap { TimeZone(secondsFromGMT: $0 * 60) } ?? .current }
+    static func tzLabel(_ tz: TimeZone, at d: Date = .now) -> String {
+        let m = tz.secondsFromGMT(for: d) / 60
+        if m == 0 { return "UTC" }
+        return "UTC" + (m < 0 ? "-" : "+") + (abs(m) % 60 == 0 ? "\(abs(m) / 60)" : String(format: "%d:%02d", abs(m) / 60, abs(m) % 60))
+    }
     @MainActor static var up: Color { Store.shared.state.prefs.red_up ? red : green }
     @MainActor static var down: Color { Store.shared.state.prefs.red_up ? green : red }
 
@@ -23,6 +30,13 @@ enum T1 {
 }
 
 extension Color {
+    /// Follows the effective appearance (Settings > Appearance > Theme).
+    init(dark: UInt32, light: UInt32) {
+        self.init(nsColor: NSColor(name: nil) { a in
+            let h = a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+            return NSColor(srgbRed: CGFloat((h >> 16) & 0xff) / 255, green: CGFloat((h >> 8) & 0xff) / 255, blue: CGFloat(h & 0xff) / 255, alpha: 1)
+        })
+    }
     init(hex: UInt32) { self.init(red: Double((hex >> 16) & 0xff) / 255, green: Double((hex >> 8) & 0xff) / 255, blue: Double(hex & 0xff) / 255) }
 }
 
@@ -59,8 +73,8 @@ enum Fmt {
         if abs(v) < 0.5 * pow(10, -Double(d)) { return num(0, d) }
         return (v > 0 ? "+" : "") + num(v, d)
     }
-    static func time(_ ms: Int64) -> String {
-        let f = DateFormatter(); f.dateFormat = "MM-dd HH:mm:ss"
+    @MainActor static func time(_ ms: Int64) -> String {
+        let f = DateFormatter(); f.dateFormat = "MM-dd HH:mm:ss"; f.timeZone = T1.tz
         return f.string(from: Date(timeIntervalSince1970: Double(ms) / 1000))
     }
 }
@@ -107,41 +121,46 @@ struct VenueIcon: View {
     }
 }
 
-/// UI text: English in source, Chinese from app/Resources/zh-*.txt ("English = Chinese" per line),
-/// chosen by the app language (Settings / status bar, shared with the Rust side).
+/// UI text: English in source, translations from app/Resources/<lang>-*.txt ("English = translation"
+/// per line), chosen by the app language (Settings / status bar, shared with the Rust side).
 @MainActor func L(_ en: String) -> String {
-    Store.shared.state.lang_zh ? (I18n.zh[en] ?? en) : en
+    let lang = Store.shared.state.lang
+    return lang == "en" ? en : (I18n.table(lang)[en] ?? en)
 }
 
-enum I18n {
-    static let zh: [String: String] = {
+@MainActor enum I18n {
+    private static var cache: [String: [String: String]] = [:]
+    static func table(_ lang: String) -> [String: String] {
+        if let t = cache[lang] { return t }
         var out: [String: String] = [:]
         // packaged: Contents/Resources; development: the source tree next to this file
         let bundled = Bundle.main.resourceURL.map { [$0] } ?? []
         let src = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources")
         for dir in bundled + [src] {
             guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { continue }
-            for f in files where f.lastPathComponent.hasPrefix("zh-") && f.pathExtension == "txt" {
+            for f in files where f.lastPathComponent.hasPrefix(lang + "-") && f.pathExtension == "txt" {
                 guard let text = try? String(contentsOf: f, encoding: .utf8) else { continue }
                 for line in text.split(separator: "\n") where !line.hasPrefix("#") {
                     let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-                    if parts.count == 2, out[parts[0]] == nil { out[parts[0]] = parts[1] }
+                    if parts.count == 2, !parts[1].isEmpty, out[parts[0]] == nil { out[parts[0]] = parts[1] }
                 }
             }
             if !out.isEmpty { break }
         }
+        cache[lang] = out
         return out
-    }()
+    }
 }
 
 /// Liquid Glass panel: a floating glass card with concentric corners, inset from the window edge.
 struct GlassCard: ViewModifier {
     var radius: CGFloat = 18
+    @Environment(\.colorScheme) private var scheme
     func body(content: Content) -> some View {
         content
             .clipShape(.rect(cornerRadius: radius))
             // darkened glass: the plain regular material lifts everything into a milky haze in dark mode
-            .glassEffect(.regular.tint(.black.opacity(0.35)), in: .rect(cornerRadius: radius))
+            .glassEffect(.regular.tint(scheme == .dark ? .black.opacity(0.35) : .white.opacity(0.25)), in: .rect(cornerRadius: radius))
     }
 }
 extension View {

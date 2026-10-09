@@ -176,7 +176,7 @@ impl App {
             (self.chart.native_json(&ag, self.mode, &self.eng.base), b)
         };
         json!({
-            "base": self.eng.base, "mode": format!("{:?}", self.mode), "lang_zh": super::is_zh(),
+            "base": self.eng.base, "mode": format!("{:?}", self.mode), "lang": super::lang_code(), "langs": super::LANGS,
             "header": header, "venues": venues, "stats": stats, "trade": trade_v,
             "positions": positions, "orders": orders, "tpsl": tpsl,
             "history": {"orders": hist.0, "fills": hist.1, "closed": hist.2, "updated_ms": (hist.3 != i64::MAX).then_some(hist.3),
@@ -209,7 +209,9 @@ impl App {
                 self.pending_restart = true;
             }
             "set_trade_venue" => { let e = exv()?; if !trade::TRADABLE.contains(&e) { return Err("not tradable".into()); } self.trade.ex = e; self.route.fixed = e; }
-            "set_lang" => super::set_zh(v["zh"].as_bool().unwrap_or(false)),
+            "cache_size" => return Ok(json!({"bytes": terminal_one::sys::cache_bytes()})),
+            "clear_cache" => return Ok(json!({"freed": terminal_one::sys::clear_cache(), "bytes": terminal_one::sys::cache_bytes()})),
+            "set_lang" => super::set_lang(v["lang"].as_str().unwrap_or("en")),
             "set_prefs" => { self.prefs = serde_json::from_value(v["prefs"].clone()).map_err(|e| e.to_string())?; self.prefs.apply(ctx); }
             "set_route" => { self.route = serde_json::from_value(v["route"].clone()).map_err(|e| e.to_string())?; }
             "tickers" => {

@@ -40,6 +40,7 @@ final class EguiNSView: NSView {
         if handle == nil {
             handle = t1_view_new(Unmanaged.passUnretained(self).toOpaque(), Float(bounds.width), Float(bounds.height), scale)
             if let h = handle { Store.shared.attach(h) }
+            viewDidChangeEffectiveAppearance()
             let l = displayLink(target: self, selector: #selector(tick))
             l.add(to: .main, forMode: .common)
             link = l
@@ -51,6 +52,13 @@ final class EguiNSView: NSView {
         super.layout()
         (layer as? CAMetalLayer)?.contentsScale = CGFloat(scale)
         if let h = handle { t1_view_resize(h, Float(bounds.width), Float(bounds.height), scale) }
+    }
+
+    /// egui's "system" theme follows this view's appearance (NSApp.appearance, set from the theme pref).
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        guard let h = handle else { return }
+        t1_view_appearance(h, effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 1 : 0)
     }
 
     override func viewDidChangeBackingProperties() {

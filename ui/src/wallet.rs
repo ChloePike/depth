@@ -40,7 +40,7 @@ impl WalletView {
             }
             let Some((ws, notes, at)) = wallets.get(&ex) else {
                 if !loading.contains(&ex) { eng.load_wallets(ex, ui.ctx()); }
-                ui.horizontal(|ui| { icon_label(ui, ex, format!("{ex:?}"), false); ui.label(RichText::new(t("wal.loading")).color(DIM)); });
+                ui.horizontal(|ui| { icon_label(ui, ex, format!("{ex:?}"), false); ui.label(RichText::new(t("wal.loading")).color(dim())); });
                 continue;
             };
             // max(0): float dust can sum to -0.00
@@ -48,7 +48,7 @@ impl WalletView {
             ui.horizontal(|ui| {
                 icon_label(ui, ex, RichText::new(format!("{ex:?}")).strong(), false);
                 ui.label(RichText::new(format!("≈ {} USD", fmt_dp(total, 2))).font(mono(12.0)));
-                ui.label(RichText::new(format!("{} {}s", t("wal.updated"), (now_ms() - at) / 1000)).font(prop(10.5)).color(DIM));
+                ui.label(RichText::new(format!("{} {}s", t("wal.updated"), (now_ms() - at) / 1000)).font(prop(10.5)).color(dim()));
                 let busy = loading.contains(&ex);
                 ui.add_space(8.0);
                 if link(ui, t("wal.transfer")).clicked() { self.open(ex, ws); }
@@ -58,11 +58,11 @@ impl WalletView {
             });
             egui::Grid::new(("wallets", ex as u8)).spacing([18.0, 4.0]).show(ui, |ui| {
                 for w in ws {
-                    ui.label(RichText::new(acct_name(&w.id)).color(if trade::MARGIN_IDS.contains(&w.id.as_str()) { FG } else { MU }));
+                    ui.label(RichText::new(acct_name(&w.id)).color(if trade::MARGIN_IDS.contains(&w.id.as_str()) { fg() } else { mu() }));
                     ui.label(RichText::new(format!("{} USD", fmt_dp(w.usd.max(0.0), 2))).font(mono(11.5)));
                     // dust (under 1 cent) is not worth a slot
                     let coins = w.coins.iter().filter(|c| c.usd >= 0.01 || c.usd == 0.0 && c.qty >= 1e-4).take(5).map(|c| format!("{} {}", c.coin, fmt_qty(c.qty))).collect::<Vec<_>>().join("  ·  ");
-                    ui.label(RichText::new(coins).font(mono(11.0)).color(MU));
+                    ui.label(RichText::new(coins).font(mono(11.0)).color(mu()));
                     ui.end_row();
                 }
             });
@@ -122,29 +122,29 @@ impl WalletView {
             let free = coin.map_or(0.0, |c| c.free);
 
             egui::Grid::new("xfer").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                ui.label(RichText::new(t("wal.from")).color(MU));
+                ui.label(RichText::new(t("wal.from")).color(mu()));
                 egui::ComboBox::from_id_salt("xf_from").icon(chevron).width(200.0).selected_text(acct_name(&x.from)).show_ui(ui, |ui| {
                     for w in &sources { ui.selectable_value(&mut x.from, w.id.clone(), format!("{}   {} USD", acct_name(&w.id), fmt_dp(w.usd, 2))); }
                 });
                 ui.end_row();
-                ui.label(RichText::new(t("wal.to")).color(MU));
+                ui.label(RichText::new(t("wal.to")).color(mu()));
                 egui::ComboBox::from_id_salt("xf_to").icon(chevron).width(200.0).selected_text(acct_name(&x.to)).show_ui(ui, |ui| {
                     for d in &dests { ui.selectable_value(&mut x.to, d.to_string(), acct_name(d)); }
                 });
                 ui.end_row();
-                ui.label(RichText::new(t("wal.coin")).color(MU));
+                ui.label(RichText::new(t("wal.coin")).color(mu()));
                 egui::ComboBox::from_id_salt("xf_coin").icon(chevron).width(200.0).selected_text(&x.coin).show_ui(ui, |ui| {
                     for c in &coins { ui.selectable_value(&mut x.coin, c.coin.clone(), format!("{}   {}", c.coin, fmt_qty(c.free))); }
                 });
                 ui.end_row();
-                ui.label(RichText::new(t("wal.amount")).color(MU));
+                ui.label(RichText::new(t("wal.amount")).color(mu()));
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut x.amount).desired_width(130.0).font(mono(12.5)));
                     if link(ui, t("wal.max")).clicked() { x.amount = format!("{free}"); }
                 });
                 ui.end_row();
             });
-            ui.label(RichText::new(format!("{} {} {}", t("wal.free"), fmt_qty(free), x.coin)).font(prop(11.0)).color(DIM));
+            ui.label(RichText::new(format!("{} {} {}", t("wal.free"), fmt_qty(free), x.coin)).font(prop(11.0)).color(dim()));
             // multi-step or slow routes are spelled out before confirming
             let via_spot = x.ex == Exchange::Binance && matches!((x.from.as_str(), x.to.as_str()), ("FUNDING", "PM") | ("PM", "FUNDING") | ("EARN", "PM") | ("EARN", "USDM"));
             if x.from == "EARN" { ui.label(RichText::new(t("wal.note_redeem")).font(prop(11.0)).color(WARN)); }
@@ -170,13 +170,13 @@ impl WalletView {
             let before = auto;
             ui.checkbox(&mut auto.enabled, t("wal.auto_enable"));
             ui.horizontal(|ui| {
-                ui.label(RichText::new(t("wal.auto_below")).color(MU));
+                ui.label(RichText::new(t("wal.auto_below")).color(mu()));
                 ui.add(egui::DragValue::new(&mut auto.min).speed(10.0).range(0.0..=1e6).suffix(" USD"));
-                ui.label(RichText::new(t("wal.auto_to")).color(MU));
+                ui.label(RichText::new(t("wal.auto_to")).color(mu()));
                 ui.add(egui::DragValue::new(&mut auto.target).speed(10.0).range(0.0..=1e6).suffix(" USD"));
             });
             let src = if x.ex == Exchange::Bybit { t("wal.auto_src_bybit") } else { t("wal.auto_src_binance") };
-            ui.label(RichText::new(format!("{}  {src}", t("wal.auto_note"))).font(prop(10.5)).color(DIM));
+            ui.label(RichText::new(format!("{}  {src}", t("wal.auto_note"))).font(prop(10.5)).color(dim()));
             if auto.enabled && auto.target <= auto.min { ui.label(RichText::new(t("wal.auto_bad")).font(prop(10.5)).color(dn())); }
             if auto != before { eng.account.lock().unwrap().auto.insert(x.ex, auto); }
         });

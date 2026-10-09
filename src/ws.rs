@@ -140,7 +140,7 @@ static PAUSED: std::sync::Mutex<Option<std::collections::HashMap<String, i64>>> 
 
 /// Pauses are persisted so a restarted process (or the CLI tools) respects a ban too.
 fn pauses_path() -> Option<std::path::PathBuf> {
-    Some(std::path::PathBuf::from(std::env::var_os("HOME")?).join("Library/Caches/TerminalOne/rate-pauses.json"))
+    Some(crate::sys::cache_dir()?.join("rate-pauses.json"))
 }
 
 fn with_pauses<T>(f: impl FnOnce(&mut std::collections::HashMap<String, i64>) -> T) -> T {

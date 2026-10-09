@@ -653,8 +653,15 @@ enum OrderFieldID: Hashable { case price, qty, tp, sl, level(Int), wholeTp, whol
 // MARK: - number input helpers
 
 enum OrderNum {
+    /// "." decimal. Commas only as thousands groups ("1,234.5"): a decimal comma ("0,5") is refused,
+    /// never read as 5.
     static func parse(_ s: String) -> Double? {
-        Double(s.replacingOccurrences(of: ",", with: "").trimmingCharacters(in: .whitespaces)).flatMap { $0.isFinite ? $0 : nil }
+        var t = s.trimmingCharacters(in: .whitespaces)
+        if t.contains(",") {
+            guard t.wholeMatch(of: /[+-]?\d{1,3}(,\d{3})+(\.\d*)?/) != nil else { return nil }
+            t = t.replacingOccurrences(of: ",", with: "")
+        }
+        return Double(t).flatMap { $0.isFinite ? $0 : nil }
     }
     static func decimals(_ step: Double?) -> Int? {
         guard let s = step, s > 0 else { return nil }

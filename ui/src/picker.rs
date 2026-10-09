@@ -14,7 +14,7 @@ pub struct Picker {
 }
 
 fn favs_path() -> Option<PathBuf> {
-    Some(PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support/TerminalOne/favorites.txt"))
+    Some(terminal_one::sys::data_dir()?.join("favorites.txt"))
 }
 
 impl Default for Picker {
@@ -43,7 +43,7 @@ impl Picker {
         let mut chosen = None;
         let area = egui::Area::new(egui::Id::new("picker")).order(egui::Order::Foreground).fixed_pos(btn.rect.left_bottom() + egui::vec2(0.0, 6.0));
         let inner = area.show(ui.ctx(), |ui| {
-            egui::Frame::new().fill(PANEL2).stroke(egui::Stroke::new(1.0, LINE)).corner_radius(6).inner_margin(10).show(ui, |ui| {
+            egui::Frame::new().fill(panel2()).stroke(egui::Stroke::new(1.0, line())).corner_radius(6).inner_margin(10).show(ui, |ui| {
                 ui.set_width(460.0);
                 let q = ui.add(egui::TextEdit::singleline(&mut self.query).hint_text(t("pick.search")).desired_width(f32::INFINITY));
                 // focus once when opened; re-requesting every frame fights row clicks and forces
@@ -58,7 +58,7 @@ impl Picker {
                 let rows: Vec<&Ticker> = tickers.iter()
                     .filter(|x| query.is_empty() || x.base.contains(&query))
                     .filter(|x| !self.favs_only || self.favs.contains(&x.base)).collect();
-                if rows.is_empty() { ui.label(RichText::new(t("pick.empty")).color(DIM)); }
+                if rows.is_empty() { ui.label(RichText::new(t("pick.empty")).color(dim())); }
                 if q.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) { chosen = rows.first().map(|x| x.base.clone()); }
                 let mut toggle = None;
                 // virtualized: only the visible rows are laid out and painted
@@ -67,19 +67,19 @@ impl Picker {
                     for x in &rows[range] {
                         let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), egui::Sense::click());
                         let p = ui.painter();
-                        if resp.hovered() || x.base == base { p.rect_filled(rect, 3, HL); }
+                        if resp.hovered() || x.base == base { p.rect_filled(rect, 3, hl()); }
                         let y = rect.center().y;
                         let fav = self.favs.contains(&x.base);
                         let star = egui::Rect::from_center_size(egui::pos2(rect.left() + 10.0, y), egui::vec2(16.0, 16.0));
-                        p.text(star.center(), Align2::CENTER_CENTER, "★", prop(12.0), if fav { WARN } else { DIM });
+                        p.text(star.center(), Align2::CENTER_CENTER, "★", prop(12.0), if fav { WARN } else { dim() });
                         coin_icon(ui, &x.base, egui::Rect::from_center_size(egui::pos2(rect.left() + 32.0, y), egui::vec2(16.0, 16.0)));
                         let p = ui.painter();
-                        p.text(egui::pos2(rect.left() + 46.0, y), Align2::LEFT_CENTER, format!("{}USDT", x.base), prop(12.5), FG);
-                        p.text(egui::pos2(rect.left() + 250.0, y), Align2::RIGHT_CENTER, fmt_px(x.last), mono(11.5), FG);
+                        p.text(egui::pos2(rect.left() + 46.0, y), Align2::LEFT_CENTER, format!("{}USDT", x.base), prop(12.5), fg());
+                        p.text(egui::pos2(rect.left() + 250.0, y), Align2::RIGHT_CENTER, fmt_px(x.last), mono(11.5), fg());
                         p.text(egui::pos2(rect.left() + 330.0, y), Align2::RIGHT_CENTER, format!("{:+.2}%", x.chg_pct), mono(11.5), if x.chg_pct >= 0.0 { up() } else { dn() });
                         let v = x.quote_vol;
                         let vs = if v >= 1e9 { format!("{:.2}B", v / 1e9) } else { format!("{:.1}M", v / 1e6) };
-                        p.text(egui::pos2(rect.right() - 6.0, y), Align2::RIGHT_CENTER, vs, mono(11.0), MU);
+                        p.text(egui::pos2(rect.right() - 6.0, y), Align2::RIGHT_CENTER, vs, mono(11.0), mu());
                         if resp.clicked() {
                             if resp.interact_pointer_pos().is_some_and(|pt| star.contains(pt)) { toggle = Some(x.base.clone()); } else { chosen = Some(x.base.clone()); }
                         }

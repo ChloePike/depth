@@ -54,14 +54,9 @@ pub const KEY_VENUES: [Exchange; 8] = [Exchange::Bybit, Exchange::Binance, Excha
 
 fn kc_account(ex: Exchange, what: &str) -> String { format!("{}-{what}{}", venue(ex), if testnet() { "-testnet" } else { "" }) }
 
-/// Read keys from the macOS Keychain (service "terminal-one") with the `security` tool. Items are
-/// created by `security` too, so it is on their access list: no Keychain prompt, and no prompt
-/// again after every rebuild (an ad-hoc signed app reading them directly would trigger both).
+/// Read keys from the OS secret store (macOS Keychain, Windows Credential Manager, libsecret).
 pub fn keychain(ex: Exchange) -> Option<Keys> {
-    let get = |what: &str| -> Option<String> {
-        let out = std::process::Command::new("security").args(["find-generic-password", "-s", "terminal-one", "-a", &kc_account(ex, what), "-w"]).output().ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty())
-    };
+    let get = |what: &str| crate::sys::secret_get(&kc_account(ex, what));
     let extra = get("passphrase");
     if needs_extra(ex) && extra.is_none() { return None; }
     Some(Keys { key: get("key")?, secret: get("secret")?, extra })
@@ -81,24 +76,8 @@ pub fn save_keys(ex: Exchange, key: &str, secret: &str, extra: Option<&str>) -> 
     Ok(())
 }
 
-/// Write one item through `security -i`: the command (with the secret) goes over stdin, never
-/// into process arguments where `ps` could see it.
-fn kc_set(account: &str, value: &str) -> Result<()> {
-    use std::io::Write;
-    if value.contains(['\n', '\r', '"', '\\']) { bail!("unsupported character in the value"); }
-    let mut child = std::process::Command::new("security").arg("-i").stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn()?;
-    child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?
-        .write_all(format!("add-generic-password -U -s terminal-one -a \"{account}\" -w \"{value}\"\n").as_bytes())?;
-    let out = child.wait_with_output()?;
-    let err = String::from_utf8_lossy(&out.stderr);
-    if !out.status.success() || err.contains("rror") { bail!("Keychain: {}", err.trim()); }
-    Ok(())
-}
-
-fn kc_delete(account: &str) {
-    let _ = std::process::Command::new("security").args(["delete-generic-password", "-s", "terminal-one", "-a", account]).output();
-}
+fn kc_set(account: &str, value: &str) -> Result<()> { crate::sys::secret_set(account, value) }
+fn kc_delete(account: &str) { crate::sys::secret_delete(account) }
 
 /// Remove every Keychain item of `ex`.
 pub fn delete_keys(ex: Exchange) {

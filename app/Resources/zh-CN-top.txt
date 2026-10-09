@@ -93,3 +93,7 @@ favorites = 切换自选
 star = 收藏
 Recent = 最近
 No favorites yet: star a pair in All = 还没有自选：在「全部」里点星标添加
+Theme = 主题
+System = 跟随系统
+Dark = 深色
+Light = 浅色

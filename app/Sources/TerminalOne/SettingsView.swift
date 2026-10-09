@@ -114,17 +114,33 @@ struct SettingsNumber: View {
 // MARK: General
 
 struct SettingsGeneral: View {
+    static let tzs = [-600, -540, -480, -420, -360, -300, -240, -180, -120, -60, 0, 60, 120, 180, 210, 240, 270, 300, 330, 345, 360, 390, 420, 480, 525, 540, 570, 600, 660, 720]
     @Environment(Store.self) private var store
+    @State private var cacheBytes: Int64?
 
     var body: some View {
         Form {
             Section {
-                Picker(L("Language"), selection: Binding(get: { store.state.lang_zh }, set: { store.call("set_lang", ["zh": $0]) })) {
-                    Text("English").tag(false)
-                    Text(L("Simplified Chinese")).tag(true)
+                Picker(L("Language"), selection: Binding(get: { store.state.lang }, set: { store.call("set_lang", ["lang": $0]) })) {
+                    ForEach(store.state.langs, id: \.self) { l in Text(l[1]).tag(l[0]) }
                 }
             } footer: { SettingsFooter(L("Interface language. Numbers, symbols and codes are not translated.")) }
+            Section {
+                Picker(L("Time zone"), selection: SettingsIO.pref(\.tz_min)) {
+                    Text(L("System") + " (" + T1.tzLabel(.current) + ")").tag(Int?.none)
+                    ForEach(Self.tzs, id: \.self) { m in Text(T1.tzLabel(TimeZone(secondsFromGMT: m * 60) ?? .gmt)).tag(Int?.some(m)) }
+                }
+            } footer: { SettingsFooter(L("Chart axis, tables and the status bar clock.")) }
+            Section {
+                LabeledContent(L("Cache and logs")) {
+                    Text(cacheBytes.map { String(format: "%.1f MB", Double($0) / 1e6) } ?? "–").monospacedDigit().foregroundStyle(.secondary)
+                    Button(L("Clear Cache")) { URLCache.shared.removeAllCachedResponses(); cacheBytes = (store.call("clear_cache")?["bytes"] as? NSNumber)?.int64Value }
+                }
+            } header: { Text(L("Storage")) } footer: {
+                SettingsFooter(L("Chart history, coin logos and crash logs. History not viewed for 30 days is removed automatically."))
+            }
         }
+        .onAppear { cacheBytes = (store.call("cache_size")?["bytes"] as? NSNumber)?.int64Value }
     }
 }
 
@@ -139,6 +155,12 @@ struct SettingsAppearance: View {
         let p = store.state.prefs
         Form {
             Section {
+                Picker(L("Theme"), selection: SettingsIO.pref(\.theme)) {
+                    Text(L("System")).tag("system")
+                    Text(L("Dark")).tag("dark")
+                    Text(L("Light")).tag("light")
+                }
+                .pickerStyle(.segmented)
                 LabeledContent(L("Accent color")) {
                     HStack(spacing: 6) {
                         ForEach(Self.accents, id: \.0) { name, rgb in
@@ -180,10 +202,10 @@ struct SettingsAppearance: View {
                 Button(L("Restore Default Appearance")) {
                     let d = Prefs()
                     var q = store.state.prefs
-                    q.accent = d.accent; q.red_up = d.red_up; q.zoom = d.zoom; q.radius = d.radius
+                    q.theme = d.theme; q.accent = d.accent; q.red_up = d.red_up; q.zoom = d.zoom; q.radius = d.radius
                     SettingsIO.setPrefs(q)
                 }
-                .disabled(p.accent == Prefs().accent && !p.red_up && p.zoom == 1 && p.radius == Prefs().radius)
+                .disabled(p.theme == Prefs().theme && p.accent == Prefs().accent && !p.red_up && p.zoom == 1 && p.radius == Prefs().radius)
             }
         }
     }

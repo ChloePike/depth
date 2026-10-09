@@ -132,7 +132,7 @@ impl BookView {
         let bin = base_bin * GROUPS[self.group];
         if !native() { ui.horizontal(|ui| {
             let cur = self.src.map(|e| format!("{e:?}")).unwrap_or_else(|| format!("{} USD", t("src.agg")));
-            if self.src.is_none() { ui.label(RichText::new(t("book.aligned")).font(prop(10.5)).color(DIM)).on_hover_text(t("book.aligned_tip")); }
+            if self.src.is_none() { ui.label(RichText::new(t("book.aligned")).font(prop(10.5)).color(dim())).on_hover_text(t("book.aligned_tip")); }
             egui::ComboBox::from_id_salt("book_src").icon(chevron).selected_text(cur).width(120.0).show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.src, None, format!("{} USD", t("src.agg")));
                 let mut vs: Vec<Exchange> = a.venues.keys().filter(|(_, m)| *m == market).map(|(e, _)| *e).collect();
@@ -143,7 +143,7 @@ impl BookView {
                 egui::ComboBox::from_id_salt("book_group").icon(chevron).selected_text(fmt_dp(bin, step_dp(bin))).width(70.0).show_ui(ui, |ui| {
                     for (i, g) in GROUPS.iter().enumerate() { ui.selectable_value(&mut self.group, i, fmt_dp(base_bin * g, step_dp(base_bin * g))); }
                 });
-                ui.label(egui::RichText::new(t("book.group")).color(MU));
+                ui.label(egui::RichText::new(t("book.group")).color(mu()));
             });
         }); }
 
@@ -173,9 +173,9 @@ impl BookView {
         // header
         let cols = [rect.left() + 8.0, rect.left() + rect.width() * 0.52, rect.right() - 40.0];
         let hy = rect.top() + ROW / 2.0;
-        painter.text(pos2(cols[0], hy), Align2::LEFT_CENTER, t("book.price"), prop(11.0), DIM);
-        painter.text(pos2(cols[1], hy), Align2::RIGHT_CENTER, t("book.size"), prop(11.0), DIM);
-        painter.text(pos2(cols[2], hy), Align2::RIGHT_CENTER, t("book.total"), prop(11.0), DIM);
+        painter.text(pos2(cols[0], hy), Align2::LEFT_CENTER, t("book.price"), prop(11.0), dim());
+        painter.text(pos2(cols[1], hy), Align2::RIGHT_CENTER, t("book.size"), prop(11.0), dim());
+        painter.text(pos2(cols[2], hy), Align2::RIGHT_CENTER, t("book.total"), prop(11.0), dim());
 
         let quote = self.quote;
         let size = |l: &Level| if quote { l.qty * l.px } else { l.qty };
@@ -190,8 +190,8 @@ impl BookView {
             painter.rect_filled(Rect::from_min_max(pos2(r.right() - 36.0 - w, r.top() + 1.0), pos2(r.right() - 36.0, r.bottom() - 1.0)), 0, col.linear_multiply(0.12));
             painter.text(pos2(cols[0], r.center().y), Align2::LEFT_CENTER, fmt_dp(l.px, dp), mono(11.5), col);
             let f = |x: f64| if quote { fmt_big_book(x) } else { fmt_qty(x) };
-            painter.text(pos2(cols[1], r.center().y), Align2::RIGHT_CENTER, f(size(l)), mono(11.5), FG);
-            painter.text(pos2(cols[2], r.center().y), Align2::RIGHT_CENTER, f(c), mono(11.0), MU);
+            painter.text(pos2(cols[1], r.center().y), Align2::RIGHT_CENTER, f(size(l)), mono(11.5), fg());
+            painter.text(pos2(cols[2], r.center().y), Align2::RIGHT_CENTER, f(c), mono(11.0), mu());
             // per-venue split
             let (mut x, total) = (r.right() - 32.0, l.qty.max(1e-12));
             for (e, q) in &l.by {
@@ -210,11 +210,11 @@ impl BookView {
         }
         let my = top + n as f32 * ROW;
         let (bb, ba) = (bids.first().map(|l| l.px), asks.first().map(|l| l.px));
-        painter.rect_filled(Rect::from_min_size(pos2(rect.left(), my), vec2(rect.width(), ROW * 1.5)), 0, PANEL2);
-        painter.text(pos2(cols[0], my + ROW * 0.75), Align2::LEFT_CENTER, fmt_px(mid), mono(16.0), FG);
+        painter.rect_filled(Rect::from_min_size(pos2(rect.left(), my), vec2(rect.width(), ROW * 1.5)), 0, panel2());
+        painter.text(pos2(cols[0], my + ROW * 0.75), Align2::LEFT_CENTER, fmt_px(mid), display(16.0), fg());
         if let (Some(b), Some(k)) = (bb, ba) {
             painter.text(pos2(rect.right() - 8.0, my + ROW * 0.75), Align2::RIGHT_CENTER,
-                format!("{} {:.1}bp", t("book.spread"), (k / b - 1.0) * 1e4), mono(11.0), MU);
+                format!("{} {:.1}bp", t("book.spread"), (k / b - 1.0) * 1e4), mono(11.0), mu());
         }
         for (i, l) in bids.iter().enumerate() {
             let y = my + ROW * 1.5 + i as f32 * ROW;
@@ -225,7 +225,7 @@ impl BookView {
         if let Some(e) = self.src {
             for (i, (r, px)) in rows_at.iter().enumerate() {
                 let resp = ui.interact(*r, ui.id().with(("bkrow", i)), Sense::click());
-                if resp.hovered() { painter.rect_stroke(*r, 0, egui::Stroke::new(1.0, LINE), egui::StrokeKind::Inside); }
+                if resp.hovered() { painter.rect_stroke(*r, 0, egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside); }
                 if resp.clicked() { self.clicked = Some((e, *px)); }
             }
         }
@@ -261,8 +261,8 @@ impl BookView {
             let f = if x.qty >= big { mono(11.5) } else { mono(11.0) };
             if x.qty >= big { painter.rect_filled(Rect::from_min_size(pos2(rect.left(), y - ROW / 2.0), vec2(rect.width(), ROW)), 0, col.linear_multiply(0.08)); }
             painter.text(pos2(rect.left() + 8.0, y), Align2::LEFT_CENTER, fmt_px(x.px), f.clone(), col);
-            painter.text(pos2(rect.left() + rect.width() * 0.55, y), Align2::RIGHT_CENTER, fmt_qty(x.qty), f, if x.qty >= big { FG } else { MU });
-            painter.text(pos2(rect.right() - 22.0, y), Align2::RIGHT_CENTER, super::hms(x.ts), mono(10.5), DIM);
+            painter.text(pos2(rect.left() + rect.width() * 0.55, y), Align2::RIGHT_CENTER, fmt_qty(x.qty), f, if x.qty >= big { fg() } else { mu() });
+            painter.text(pos2(rect.right() - 22.0, y), Align2::RIGHT_CENTER, super::hms(x.ts), mono(10.5), dim());
             icon(&painter, x.ex, Rect::from_center_size(pos2(rect.right() - 11.0, y), vec2(12.0, 12.0)), false);
         }
     }

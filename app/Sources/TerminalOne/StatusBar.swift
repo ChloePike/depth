@@ -36,12 +36,11 @@ struct StatusBar: View {
             .fixedSize()
             Spacer(minLength: 8)
             TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                Text("UTC " + Self.clock.string(from: ctx.date)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                Text(T1.tzLabel(T1.tz) + " " + { Self.clock.timeZone = T1.tz; return Self.clock.string(from: ctx.date) }()).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
             Divider().frame(height: 12).padding(.horizontal, 6)
-            Picker(L("Language"), selection: Binding(get: { s.lang_zh }, set: { store.call("set_lang", ["zh": $0]) })) {
-                Text("English").tag(false)
-                Text(I18n.zh["Chinese"] ?? "Chinese").tag(true) // label comes from the translation file
+            Picker(L("Language"), selection: Binding(get: { s.lang }, set: { store.call("set_lang", ["lang": $0]) })) {
+                ForEach(s.langs, id: \.self) { l in Text(l[1]).tag(l[0]) }
             }
             .pickerStyle(.menu)
             .buttonStyle(.borderless)
@@ -75,7 +74,6 @@ struct StatusBar: View {
     private static let clock: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
-        f.timeZone = TimeZone(identifier: "UTC")
         return f
     }()
 }

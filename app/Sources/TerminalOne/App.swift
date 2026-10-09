@@ -9,7 +9,10 @@ struct TerminalOneApp: App {
         WindowGroup {
             RootView()
                 .frame(minWidth: 1100, minHeight: 700)
-                .preferredColorScheme(.dark)
+                .onChange(of: Store.shared.state.prefs.theme, initial: true) { _, t in
+                    // nil follows the system; SwiftUI's preferredColorScheme(nil) does not revert on macOS
+                    NSApp.appearance = t == "dark" ? NSAppearance(named: .darkAqua) : t == "light" ? NSAppearance(named: .aqua) : nil
+                }
         }
         .windowToolbarStyle(.unified)
         .defaultSize(width: 1680, height: 1020)
@@ -82,7 +85,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
         }
-        NSApp.appearance = NSAppearance(named: .darkAqua)
         // T1_UI_SHOT=<png> [T1_UI_SHOT_AFTER=<s>]: render the window's views (SwiftUI parts; the
         // Metal chart may come out blank) into a PNG and quit. No screen-recording permission.
         if let path = ProcessInfo.processInfo.environment["T1_UI_SHOT"] {

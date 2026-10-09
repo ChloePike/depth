@@ -8,10 +8,12 @@ repository = "https://github.com/ChloePike/depth"
 # C ABI for the SwiftUI host (app/): renders the egui terminal into an NSView through wgpu
 # (Metal) and forwards input. Header: ffi/t1.h.
 [lib]
-crate-type = ["staticlib"]
+# staticlib for the SwiftUI host, cdylib (t1_ffi.dll) for the WinUI 3 host
+crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
 t1-ui = { path = "../ui" }
+terminal-one = { path = ".." }
 eframe = "0.36.2"
 egui-wgpu = "0.36.2"
 wgpu = "30.0.1"

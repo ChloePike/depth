@@ -18,7 +18,7 @@ cp app/.build/release/TerminalOne "$APP/Contents/MacOS/TerminalOne"
 cp assets/icons/*.png "$APP/Contents/Resources/"
 # app icon (rendered by scripts/make-icon.swift, converted with iconutil)
 cp assets/appicon/Depth.icns "$APP/Contents/Resources/Depth.icns"
-cp app/Resources/zh-*.txt "$APP/Contents/Resources/" 2>/dev/null || true
+cp app/Resources/*.txt "$APP/Contents/Resources/" 2>/dev/null || true
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

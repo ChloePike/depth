@@ -28,10 +28,14 @@ pub struct T1View {
     shot: Option<(String, f64)>,
     /// T1_DUMP_STATE=<json path>: write one state snapshot after 15 s (contract sample)
     dump: Option<String>,
+    /// OS appearance, fed to egui for the "system" theme preference
+    system_theme: egui::Theme,
 }
 
 fn mods(m: u32) -> Modifiers {
-    Modifiers { shift: m & 1 != 0, ctrl: m & 2 != 0, alt: m & 4 != 0, mac_cmd: m & 8 != 0, command: m & 8 != 0 }
+    // the shortcut modifier is Cmd on macOS, Ctrl on Windows
+    let cmd = if cfg!(windows) { m & 2 != 0 } else { m & 8 != 0 };
+    Modifiers { shift: m & 1 != 0, ctrl: m & 2 != 0, alt: m & 4 != 0, mac_cmd: cfg!(target_os = "macos") && m & 8 != 0, command: cmd }
 }
 
 impl T1View {
@@ -58,6 +62,7 @@ impl T1View {
         input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, self.size_pts));
         input.time = Some(self.start.elapsed().as_secs_f64());
         input.focused = true;
+        input.system_theme = Some(self.system_theme);
         if let Some(vp) = input.viewports.get_mut(&egui::ViewportId::ROOT) { vp.native_pixels_per_point = Some(self.scale); }
         let app = &mut self.app;
         let out = self.ctx.run_ui(input, |ui| app.frame(ui));
@@ -130,18 +135,22 @@ fn save_png(device: &wgpu::Device, buf: &wgpu::Buffer, row: u32, w: u32, h: u32,
     if let Ok(mut wr) = enc.write_header() { let _ = wr.write_image_data(&px); }
 }
 
-/// Create a view rendering into `ns_view` (an NSView*; wgpu installs its CAMetalLayer).
-/// Returns null when no Metal device / surface could be created.
+/// Create a view rendering into `native`: an NSView* on macOS (wgpu installs its CAMetalLayer),
+/// a WinUI 3 SwapChainPanel (its IUnknown*) on Windows (DX12).
+/// Returns null when no GPU device / surface could be created.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn t1_view_new(ns_view: *mut c_void, w: f32, h: f32, scale: f32) -> *mut T1View {
+pub unsafe extern "C" fn t1_view_new(native: *mut c_void, w: f32, h: f32, scale: f32) -> *mut T1View {
     install_panic_log();
-    let Some(nv) = NonNull::new(ns_view) else { return std::ptr::null_mut() };
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::METAL, ..wgpu::InstanceDescriptor::new_without_display_handle() });
-    let target = wgpu::SurfaceTargetUnsafe::RawHandle {
+    let Some(nv) = NonNull::new(native) else { return std::ptr::null_mut() };
+    #[cfg(target_os = "macos")]
+    let (backends, target) = (wgpu::Backends::METAL, wgpu::SurfaceTargetUnsafe::RawHandle {
         raw_display_handle: Some(raw_window_handle::RawDisplayHandle::AppKit(raw_window_handle::AppKitDisplayHandle::new())),
         raw_window_handle: raw_window_handle::RawWindowHandle::AppKit(raw_window_handle::AppKitWindowHandle::new(nv)),
-    };
-    // SAFETY: the host keeps the NSView alive until t1_view_free
+    });
+    #[cfg(windows)]
+    let (backends, target) = (wgpu::Backends::DX12, wgpu::SurfaceTargetUnsafe::SwapChainPanel(nv.as_ptr()));
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends, ..wgpu::InstanceDescriptor::new_without_display_handle() });
+    // SAFETY: the host keeps the view / panel alive until t1_view_free
     let Ok(surface) = (unsafe { instance.create_surface_unsafe(target) }) else { return std::ptr::null_mut() };
     let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { compatible_surface: Some(&surface), power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })) else { return std::ptr::null_mut() };
     let Ok((device, queue)) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())) else { return std::ptr::null_mut() };
@@ -159,7 +168,7 @@ pub unsafe extern "C" fn t1_view_new(ns_view: *mut c_void, w: f32, h: f32, scale
     let mut v = Box::new(T1View {
         surface, device, queue, config, renderer, ctx, app, input: RawInput::default(), size_pts: Vec2::new(w, h), scale,
         pointer: Pos2::ZERO, next_frame: Instant::now(), dirty: true, start: Instant::now(), cursor: egui::CursorIcon::Default, copied: None,
-        dump: std::env::var("T1_DUMP_STATE").ok(),
+        dump: std::env::var("T1_DUMP_STATE").ok(), system_theme: egui::Theme::Dark,
         shot: std::env::var("T1_SHOT").ok().map(|p| (p, std::env::var("T1_SHOT_AFTER").ok().and_then(|s| s.parse().ok()).unwrap_or(20.0))),
     });
     v.resize(w, h, scale);
@@ -186,22 +195,16 @@ pub unsafe extern "C" fn t1_view_render(v: *mut T1View) -> i32 {
     }
 }
 
-/// Panics go to ~/Library/Logs/TerminalOne/panic.log (with location and backtrace): the app is
+/// Panics go to panic.log in `sys::log_dir()` (with location and backtrace): the app is
 /// launched from Finder, so stderr is gone.
 fn install_panic_log() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            if let Some(home) = std::env::var_os("HOME") {
-                let dir = std::path::Path::new(&home).join("Library/Logs/TerminalOne");
-                let _ = std::fs::create_dir_all(&dir);
-                let bt = std::backtrace::Backtrace::force_capture();
-                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                let line = format!("{ts} {info}\n{bt}\n");
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("panic.log")) { let _ = f.write_all(line.as_bytes()); }
-            }
+            let bt = std::backtrace::Backtrace::force_capture();
+            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            terminal_one::sys::append_log("panic.log", &format!("{ts} {info}\n{bt}\n"));
             prev(info);
         }));
     });
@@ -241,8 +244,8 @@ pub unsafe extern "C" fn t1_view_zoom(v: *mut T1View, factor: f32) { view!(v).pu
 pub unsafe extern "C" fn t1_view_key(v: *mut T1View, name: *const c_char, pressed: i32, m: u32) {
     let v = view!(v);
     let Some(key) = (unsafe { name.as_ref() }).and_then(|_| unsafe { CStr::from_ptr(name) }.to_str().ok()).and_then(Key::from_name) else { return };
-    // the host's Cmd+C / Cmd+X / Cmd+V arrive as keys; egui wants the semantic events
-    if pressed != 0 && m & 8 != 0 {
+    // the host's Cmd+C / Cmd+X (Ctrl on Windows) arrive as keys; egui wants the semantic events
+    if pressed != 0 && mods(m).command {
         match key { Key::C => return v.push(Event::Copy), Key::X => return v.push(Event::Cut), _ => {} }
     }
     v.push(Event::Key { key, physical_key: None, pressed: pressed != 0, repeat: false, modifiers: mods(m) });
@@ -264,6 +267,14 @@ pub unsafe extern "C" fn t1_view_paste(v: *mut T1View, text: *const c_char) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn t1_view_focus(v: *mut T1View, focused: i32) { view!(v).push(Event::WindowFocused(focused != 0)) }
+
+/// The view's effective appearance changed (dark != 0).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn t1_view_appearance(v: *mut T1View, dark: i32) {
+    let v = view!(v);
+    v.system_theme = if dark != 0 { egui::Theme::Dark } else { egui::Theme::Light };
+    v.dirty = true;
+}
 
 /// Cursor egui wants: 0 arrow, 1 pointing hand, 2 text, 3 resize horizontal, 4 resize vertical,
 /// 5 crosshair, 6 grab, 7 grabbing, 8 not allowed, 9 resize diagonal NW-SE, 10 NE-SW.
@@ -300,7 +311,7 @@ pub unsafe extern "C" fn t1_call(v: *mut T1View, req: *const c_char) -> *mut c_c
     if req.is_null() { return std::ptr::null_mut(); }
     let req = unsafe { CStr::from_ptr(req) }.to_string_lossy();
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| v.app.call_json(&v.ctx, &req)))
-        .unwrap_or_else(|_| r#"{"ok":false,"error":"internal error (see ~/Library/Logs/TerminalOne/panic.log)"}"#.to_string());
+        .unwrap_or_else(|_| r#"{"ok":false,"error":"internal error (see panic.log in the Depth logs folder)"}"#.to_string());
     // read-only queries polled at display rate must not force a chart redraw each time
     let read_only = ["\"book_levels\"", "\"venue_share\"", "\"tickers\""].iter().any(|op| req.contains(op));
     if !read_only { v.dirty = true; }

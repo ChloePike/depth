@@ -1,6 +1,6 @@
 //! Settings dialog (gear in the title bar): language, appearance, trading, about.
 //! `Prefs` persist in settings.json; `apply` pushes them into the palette, zoom and style.
-use super::{is_zh, set_zh, t, theme::*};
+use super::{lang, set_lang, t, theme::*, tz_label, LANGS};
 use eframe::egui::{self, Color32, RichText, Ui};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -9,6 +9,9 @@ use terminal_one::{trade, Exchange};
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Prefs {
+    pub theme: ThemePref,
+    /// display time zone, minutes from UTC; None follows the system
+    pub tz_min: Option<i32>,
     pub accent: [u8; 3],
     /// red for rising prices (East Asian convention) instead of green
     pub red_up: bool,
@@ -24,9 +27,13 @@ pub struct Prefs {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 5, confirm: true, fees: BTreeMap::new() }
+        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 5, confirm: true, fees: BTreeMap::new() }
     }
 }
+
+#[derive(Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePref { #[default] System, Dark, Light }
 
 // macOS dark-mode systemGreen / systemRed, so egui and SwiftUI share one red and green
 const GREEN: Color32 = Color32::from_rgb(0x30, 0xd1, 0x58);
@@ -48,6 +55,8 @@ impl Prefs {
         let [r, g, b] = self.accent;
         let (u, d) = if self.red_up { (RED, GREEN) } else { (GREEN, RED) };
         set_palette(Color32::from_rgb(r, g, b), u, d);
+        super::set_tz(self.tz_min);
+        ctx.set_theme(match self.theme { ThemePref::System => egui::ThemePreference::System, ThemePref::Dark => egui::ThemePreference::Dark, ThemePref::Light => egui::ThemePreference::Light });
         ctx.set_zoom_factor(self.zoom.clamp(0.85, 1.3));
         let rad = self.radius.min(12);
         ctx.all_styles_mut(|s| {
@@ -67,6 +76,8 @@ pub struct SettingsView {
     /// API key form: venue being edited and its three fields (never pre-filled with secrets)
     edit: Option<(Exchange, String, String, String)>,
     key_err: Option<String>,
+    /// bytes in the cache + log folders, measured once per visit of the About tab
+    cache: Option<u64>,
 }
 
 impl SettingsView {
@@ -78,7 +89,7 @@ impl SettingsView {
         let before = prefs.clone();
         let mut venue = None;
         const TABS: [&str; 5] = ["set.general", "set.appearance", "set.trading", "set.api", "set.about"];
-        let frame = egui::Frame::new().fill(panel()).corner_radius(12).stroke(egui::Stroke::new(1.0, LINE)).inner_margin(0);
+        let frame = egui::Frame::new().fill(panel()).corner_radius(12).stroke(egui::Stroke::new(1.0, line())).inner_margin(0);
         let m = egui::Modal::new(egui::Id::new("settings")).frame(frame).show(ctx, |ui| {
             ui.set_width(720.0);
             ui.set_height(500.0);
@@ -86,20 +97,20 @@ impl SettingsView {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                 // sidebar
                 let (side, _) = ui.allocate_exact_size(egui::vec2(180.0, 500.0), egui::Sense::hover());
-                ui.painter().rect_filled(side, egui::CornerRadius { nw: 12, sw: 12, ne: 0, se: 0 }, Color32::from_rgb(0x0e, 0x12, 0x17));
-                ui.painter().text(side.left_top() + egui::vec2(20.0, 26.0), egui::Align2::LEFT_CENTER, t("set.title"), prop(15.0), FG);
+                ui.painter().rect_filled(side, egui::CornerRadius { nw: 12, sw: 12, ne: 0, se: 0 }, label_bg());
+                ui.painter().text(side.left_top() + egui::vec2(20.0, 26.0), egui::Align2::LEFT_CENTER, t("set.title"), prop(15.0), fg());
                 for (i, k) in TABS.into_iter().enumerate() {
                     let r = egui::Rect::from_min_size(side.left_top() + egui::vec2(10.0, 52.0 + i as f32 * 32.0), egui::vec2(160.0, 28.0));
                     let resp = ui.interact(r, ui.id().with(("set_tab", i)), egui::Sense::click());
                     let on = self.tab == i as u8;
                     if on {
-                        ui.painter().rect_filled(r, 6, HL);
+                        ui.painter().rect_filled(r, 6, hl());
                         ui.painter().rect_filled(egui::Rect::from_min_size(r.left_top() + egui::vec2(0.0, 7.0), egui::vec2(3.0, 14.0)), 2, accent());
-                    } else if resp.hovered() { ui.painter().rect_filled(r, 6, HL.linear_multiply(0.5)); }
-                    ui.painter().text(r.left_center() + egui::vec2(14.0, 0.0), egui::Align2::LEFT_CENTER, t(k), prop(12.5), if on { FG } else { MU });
-                    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.tab = i as u8; self.keys = None; }
+                    } else if resp.hovered() { ui.painter().rect_filled(r, 6, hl().linear_multiply(0.5)); }
+                    ui.painter().text(r.left_center() + egui::vec2(14.0, 0.0), egui::Align2::LEFT_CENTER, t(k), prop(12.5), if on { fg() } else { mu() });
+                    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.tab = i as u8; self.keys = None; self.cache = None; }
                 }
-                ui.painter().vline(side.right(), side.y_range(), egui::Stroke::new(1.0, LINE));
+                ui.painter().vline(side.right(), side.y_range(), egui::Stroke::new(1.0, line()));
                 // content
                 ui.vertical(|ui| {
                     ui.set_width(540.0);
@@ -109,10 +120,10 @@ impl SettingsView {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 // close (x)
                                 let (r, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
-                                if resp.hovered() { ui.painter().rect_filled(r, 5, HL); }
+                                if resp.hovered() { ui.painter().rect_filled(r, 5, hl()); }
                                 let (c, d) = (r.center(), 5.0);
                                 for (a, b) in [(egui::vec2(-d, -d), egui::vec2(d, d)), (egui::vec2(-d, d), egui::vec2(d, -d))] {
-                                    ui.painter().line_segment([c + a, c + b], egui::Stroke::new(1.5, MU));
+                                    ui.painter().line_segment([c + a, c + b], egui::Stroke::new(1.5, mu()));
                                 }
                                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.open = false; }
                             });
@@ -120,12 +131,21 @@ impl SettingsView {
                         egui::ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(8.0, 2.0);
                             match self.tab {
-                                0 => general(ui),
+                                0 => general(ui, prefs),
                                 1 => appearance(ui, prefs),
                                 2 => venue = trading(ui, prefs, trade_ex),
                                 3 => self.api_keys(ui, eng),
                                 // Keychain lookups spawn `security`: once per visit, never per frame
-                                _ => about(ui, self.keys.get_or_insert_with(|| trade::TRADABLE.into_iter().map(|e| (e, trade::keychain(e).is_some())).collect())),
+                                _ => {
+                                    about(ui, self.keys.get_or_insert_with(|| trade::TRADABLE.into_iter().map(|e| (e, trade::keychain(e).is_some())).collect()));
+                                    let bytes = *self.cache.get_or_insert_with(terminal_one::sys::cache_bytes);
+                                    group(ui, t("set.storage"), |ui| {
+                                        setting_row(ui, t("set.cache"), t("set.cache_desc"), |ui| {
+                                            if ui.button(t("set.cache_clear")).clicked() { terminal_one::sys::clear_cache(); self.cache = None; }
+                                            ui.label(RichText::new(format!("{:.1} MB", bytes as f64 / 1e6)).font(mono(11.5)).color(mu()));
+                                        });
+                                    });
+                                }
                             }
                         });
                     });
@@ -143,7 +163,7 @@ impl SettingsView {
     /// never shows a stored secret, only the key's last characters.
     fn api_keys(&mut self, ui: &mut Ui, eng: &mut super::engine::Engine) {
         ui.add_space(4.0);
-        ui.label(RichText::new(t("set.api_note")).font(prop(11.0)).color(DIM));
+        ui.label(RichText::new(t("set.api_note")).font(prop(11.0)).color(dim()));
         let have: std::collections::HashMap<Exchange, String> = eng.account.lock().unwrap().keys.iter()
             .map(|(e, k)| (*e, k.key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect())).collect();
         let tests = eng.key_tests.lock().unwrap().clone();
@@ -186,11 +206,11 @@ impl SettingsView {
                         egui::Frame::new().fill(bg()).corner_radius(6).inner_margin(10).show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             for (label, v, secret) in [(kl, &mut *k, false), (sl, &mut *s, true)] {
-                                ui.label(RichText::new(label).font(prop(11.0)).color(DIM));
+                                ui.label(RichText::new(label).font(prop(11.0)).color(dim()));
                                 ui.add(egui::TextEdit::singleline(v).password(secret).font(mono(12.0)).desired_width(f32::INFINITY));
                             }
                             if let Some(xl) = xl {
-                                ui.label(RichText::new(xl).font(prop(11.0)).color(DIM));
+                                ui.label(RichText::new(xl).font(prop(11.0)).color(dim()));
                                 ui.add(egui::TextEdit::singleline(x).password(true).font(mono(12.0)).desired_width(f32::INFINITY));
                             }
                             ui.add_space(4.0);
@@ -224,17 +244,39 @@ impl SettingsView {
     }
 }
 
-fn general(ui: &mut Ui) {
+/// Offsets in use somewhere, minutes from UTC.
+const TZS: [i32; 30] = [-600, -540, -480, -420, -360, -300, -240, -180, -120, -60, 0, 60, 120, 180, 210, 240, 270, 300, 330, 345, 360, 390, 420, 480, 525, 540, 570, 600, 660, 720];
+
+fn general(ui: &mut Ui, p: &mut Prefs) {
     group(ui, t("set.language"), |ui| {
         setting_row(ui, t("set.language"), t("set.language_desc"), |ui| {
-            let mut sel = is_zh() as usize;
-            if segment(ui, &["English", t("set.lang_zh")], &mut sel) { set_zh(sel == 1); }
+            let mut l = lang();
+            egui::ComboBox::from_id_salt("set.lang").selected_text(LANGS[l].1).show_ui(ui, |ui| {
+                for (i, (_, name)) in LANGS.iter().enumerate() { ui.selectable_value(&mut l, i, *name); }
+            });
+            if l != lang() { set_lang(LANGS[l].0); }
+        });
+        row_sep(ui);
+        setting_row(ui, t("set.tz"), t("set.tz_desc"), |ui| {
+            let sys = terminal_one::sys::utc_offset_ms() / 60_000;
+            let name = |z: Option<i32>| z.map_or_else(|| format!("{} ({})", t("set.tz_system"), tz_label(sys)), |m| tz_label(m.into()));
+            egui::ComboBox::from_id_salt("set.tz").selected_text(name(p.tz_min)).height(320.0).show_ui(ui, |ui| {
+                ui.selectable_value(&mut p.tz_min, None, name(None));
+                for m in TZS { ui.selectable_value(&mut p.tz_min, Some(m), tz_label(m.into())); }
+            });
         });
     });
 }
 
 fn appearance(ui: &mut Ui, p: &mut Prefs) {
     group(ui, t("set.colors"), |ui| {
+        setting_row(ui, t("set.theme"), t("set.theme_desc"), |ui| {
+            let mut sel = p.theme as usize;
+            if segment(ui, &[t("set.theme_system"), t("set.theme_dark"), t("set.theme_light")], &mut sel) {
+                p.theme = [ThemePref::System, ThemePref::Dark, ThemePref::Light][sel];
+            }
+        });
+        row_sep(ui);
         setting_row(ui, t("set.accent"), t("set.accent_desc"), |ui| {
             ui.color_edit_button_srgb(&mut p.accent);
             ui.add_space(8.0);
@@ -242,7 +284,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
                 let col = Color32::from_rgb(c[0], c[1], c[2]);
                 let (r, resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
                 ui.painter().circle_filled(r.center(), 8.0, col);
-                if p.accent == *c { ui.painter().circle_stroke(r.center(), 10.5, egui::Stroke::new(1.5, FG)); }
+                if p.accent == *c { ui.painter().circle_stroke(r.center(), 10.5, egui::Stroke::new(1.5, fg())); }
                 if resp.on_hover_text(*name).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { p.accent = *c; }
             }
         });
@@ -299,17 +341,17 @@ fn trading(ui: &mut Ui, p: &mut Prefs, cur: Exchange) -> Option<Exchange> {
                 ui.label(RichText::new(&k).font(prop(12.5)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let b = num_field(ui, (&k, "m"), &mut mk, 3, "%");
-                    ui.label(RichText::new(t("set.maker")).font(prop(11.0)).color(DIM));
+                    ui.label(RichText::new(t("set.maker")).font(prop(11.0)).color(dim()));
                     ui.add_space(10.0);
                     let a = num_field(ui, (&k, "t"), &mut tk, 3, "%");
-                    ui.label(RichText::new(t("set.taker")).font(prop(11.0)).color(DIM));
+                    ui.label(RichText::new(t("set.taker")).font(prop(11.0)).color(dim()));
                     if a || b { p.fees.insert(k.clone(), (tk.clamp(-0.05, 0.2), mk.clamp(-0.05, 0.2))); }
                 });
             });
         }
     });
     ui.add_space(4.0);
-    ui.label(RichText::new(t("set.fees_note")).font(prop(10.5)).color(DIM));
+    ui.label(RichText::new(t("set.fees_note")).font(prop(10.5)).color(dim()));
     out
 }
 
@@ -323,19 +365,18 @@ fn about(ui: &mut Ui, keys: &[(Exchange, bool)]) {
                 icon(ui.painter(), ex, r, false);
                 ui.label(RichText::new(format!("{ex:?}")).font(prop(12.5)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(if has { t("set.key_ok") } else { t("set.key_missing") }).color(if has { up() } else { DIM }));
+                    ui.label(RichText::new(if has { t("set.key_ok") } else { t("set.key_missing") }).color(if has { up() } else { dim() }));
                 });
             });
         }
     });
     group(ui, t("set.paths"), |ui| {
-        let home = std::env::var("HOME").unwrap_or_default();
-        for (i, p) in ["Library/Application Support/TerminalOne", "Library/Caches/TerminalOne"].into_iter().enumerate() {
+        for (i, p) in [terminal_one::sys::data_dir(), terminal_one::sys::cache_dir()].into_iter().flatten().enumerate() {
             if i > 0 { row_sep(ui); }
-            ui.horizontal(|ui| { ui.set_min_height(28.0); ui.label(RichText::new(format!("{home}/{p}")).font(mono(10.5)).color(MU)); });
+            ui.horizontal(|ui| { ui.set_min_height(28.0); ui.label(RichText::new(p.display().to_string()).font(mono(10.5)).color(mu())); });
         }
     });
     group(ui, t("set.version"), |ui| {
-        ui.horizontal(|ui| { ui.set_min_height(28.0); ui.label(RichText::new(format!("Depth {}", env!("CARGO_PKG_VERSION"))).color(MU)); });
+        ui.horizontal(|ui| { ui.set_min_height(28.0); ui.label(RichText::new(format!("Depth {}", env!("CARGO_PKG_VERSION"))).color(mu())); });
     });
 }

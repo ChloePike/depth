@@ -21,23 +21,51 @@ use theme::*;
 
 const MODES: [(Market, &str); 4] = [(Market::Spot, "mode.spot"), (Market::Margin, "mode.margin"), (Market::Perp, "mode.perp"), (Market::Option, "mode.option")];
 
-/// UI language: English unless switched to Chinese (status bar, persisted in settings).
-static ZH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-pub fn set_zh(on: bool) { ZH.store(on, std::sync::atomic::Ordering::Relaxed); }
-pub fn is_zh() -> bool { ZH.load(std::sync::atomic::Ordering::Relaxed) }
+/// UI languages: (code, native name). Strings in assets/i18n/<code>.txt, English fallback.
+pub const LANGS: [(&str, &str); 11] = [
+    ("en", "English"),
+    ("zh-CN", "简体中文"),
+    ("zh-TW", "繁體中文"),
+    ("ja", "日本語"),
+    ("ko", "한국어"),
+    ("es", "Español"),
+    ("pt", "Português"),
+    ("fr", "Français"),
+    ("de", "Deutsch"),
+    ("ru", "Русский"),
+    ("vi", "Tiếng Việt"),
+];
+const LANG_FILES: [&str; 11] = [
+    include_str!("../../assets/i18n/en.txt"),
+    include_str!("../../assets/i18n/zh-CN.txt"),
+    include_str!("../../assets/i18n/zh-TW.txt"),
+    include_str!("../../assets/i18n/ja.txt"),
+    include_str!("../../assets/i18n/ko.txt"),
+    include_str!("../../assets/i18n/es.txt"),
+    include_str!("../../assets/i18n/pt.txt"),
+    include_str!("../../assets/i18n/fr.txt"),
+    include_str!("../../assets/i18n/de.txt"),
+    include_str!("../../assets/i18n/ru.txt"),
+    include_str!("../../assets/i18n/vi.txt"),
+];
+static LANG: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Index into LANGS; unknown codes fall back to English ("zh" is the old Simplified Chinese code).
+pub fn set_lang(code: &str) {
+    let code = if code == "zh" { "zh-CN" } else { code };
+    LANG.store(LANGS.iter().position(|(c, _)| *c == code).unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+}
+pub fn lang() -> usize { LANG.load(std::sync::atomic::Ordering::Relaxed) }
+pub fn lang_code() -> &'static str { LANGS[lang()].0 }
 
 fn strings(src: &'static str) -> HashMap<&'static str, &'static str> {
-    src.lines().filter(|l| !l.trim_start().starts_with('#')).filter_map(|l| l.split_once('=')).map(|(k, v)| (k.trim(), v.trim())).collect()
+    src.lines().filter(|l| !l.trim_start().starts_with('#')).filter_map(|l| l.split_once('=')).map(|(k, v)| (k.trim(), v.trim())).filter(|(_, v)| !v.is_empty()).collect()
 }
 
-/// UI string for `key` from assets/i18n/{en,zh-CN}.txt (the other language, then the key, if missing).
+/// UI string for `key` in the current language, else English, else the key.
 pub fn t(key: &'static str) -> &'static str {
-    static EN: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
-    static ZHM: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
-    let en = EN.get_or_init(|| strings(include_str!("../../assets/i18n/en.txt")));
-    let zh = ZHM.get_or_init(|| strings(include_str!("../../assets/i18n/zh-CN.txt")));
-    let (a, b) = if is_zh() { (zh, en) } else { (en, zh) };
-    a.get(key).or_else(|| b.get(key)).copied().unwrap_or(key)
+    static MAPS: OnceLock<Vec<HashMap<&'static str, &'static str>>> = OnceLock::new();
+    let m = MAPS.get_or_init(|| LANG_FILES.iter().map(|f| strings(f)).collect());
+    m[lang()].get(key).or_else(|| m[0].get(key)).copied().unwrap_or(key)
 }
 
 /// Local "M/D" for a timestamp (history tables).
@@ -72,15 +100,24 @@ pub fn fmt_qty(v: f64) -> String {
     if a >= 1e6 { format!("{:.2}M", v / 1e6) } else if a >= 1e4 { format!("{:.1}K", v / 1e3) } else if a >= 100.0 { format!("{v:.1}") } else { format!("{v:.3}") }
 }
 
-/// Local UTC offset in ms, read once from `date +%z` (std has no timezone API).
+/// Display time zone as minutes from UTC (Settings > General); i64::MIN follows the system.
+static TZ_MIN: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MIN);
+pub fn set_tz(min: Option<i32>) { TZ_MIN.store(min.map_or(i64::MIN, i64::from), std::sync::atomic::Ordering::Relaxed); }
+
+/// UTC offset of the chosen display time zone in ms (the system's, read once, by default).
 pub fn local_offset_ms() -> i64 {
     static O: OnceLock<i64> = OnceLock::new();
-    *O.get_or_init(|| {
-        let s = std::process::Command::new("date").arg("+%z").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-        let n: i64 = s.get(1..).and_then(|x| x.parse().ok()).unwrap_or(0);
-        let ms = (n / 100 * 60 + n % 100) * 60_000;
-        if s.starts_with('-') { -ms } else { ms }
-    })
+    match TZ_MIN.load(std::sync::atomic::Ordering::Relaxed) {
+        i64::MIN => *O.get_or_init(terminal_one::sys::utc_offset_ms),
+        m => m * 60_000,
+    }
+}
+
+/// "UTC", "UTC+8", "UTC+5:30" for an offset in minutes.
+pub fn tz_label(min: i64) -> String {
+    if min == 0 { return "UTC".into(); }
+    let (s, a) = (if min < 0 { '-' } else { '+' }, min.abs());
+    if a % 60 == 0 { format!("UTC{s}{}", a / 60) } else { format!("UTC{s}{}:{:02}", a / 60, a % 60) }
 }
 
 pub fn hms(ms: i64) -> String {
@@ -88,7 +125,7 @@ pub fn hms(ms: i64) -> String {
     format!("{:02}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60)
 }
 
-/// Persisted UI state: ~/Library/Application Support/TerminalOne/settings.json.
+/// Persisted UI state: settings.json in `sys::data_dir()`.
 /// Written when it changes (checked once a second); env overrides (T1_BASE, ...) win on load.
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
@@ -98,7 +135,7 @@ struct Settings { route: Option<terminal_one::route::Policy>, prefs: Option<sett
 struct SettingsRef<'a> { route: &'a terminal_one::route::Policy, prefs: &'a settings::Prefs, lang: &'static str, base: &'a str, mode: Market, chart: &'a chart::Chart, trade_ex: Exchange, off: Vec<Exchange>, auto: std::collections::BTreeMap<String, engine::AutoTopUp> }
 
 fn settings_path() -> Option<std::path::PathBuf> {
-    Some(std::path::PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support/TerminalOne/settings.json"))
+    Some(terminal_one::sys::data_dir()?.join("settings.json"))
 }
 
 pub struct App {
@@ -139,6 +176,8 @@ impl App {
     pub fn with_ctx(ctx: &egui::Context, hosted: bool) -> Self {
         let cc = Cc { egui_ctx: ctx.clone() };
         theme::set_native(hosted);
+        // history of symbols not viewed for a month, old coin logos
+        std::thread::spawn(|| terminal_one::sys::prune_cache(30));
         theme::install(&cc.egui_ctx);
         #[cfg(feature = "hotpatch")]
         {
@@ -148,7 +187,7 @@ impl App {
         let env = |k: &str| std::env::var(k).ok();
         let saved = settings_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
         let st: Settings = serde_json::from_str(&saved).unwrap_or_default();
-        set_zh(env("T1_LANG").or(st.lang.clone()).is_some_and(|l| l.starts_with("zh")));
+        set_lang(&env("T1_LANG").or(st.lang.clone()).unwrap_or_default());
         let prefs = st.prefs.clone().unwrap_or_default();
         prefs.apply(&cc.egui_ctx);
         let mode = env("T1_MODE").and_then(|m| Market::parse(&m)).or(st.mode).unwrap_or(Market::Perp);
@@ -200,18 +239,18 @@ impl App {
             ui.add_space(18.0);
             let book_market = match self.mode { Market::Margin | Market::Option => Market::Spot, m => m };
             let last = a.mid(book_market);
-            ui.label(RichText::new(last.map(fmt_px).unwrap_or("-".into())).font(mono(20.0)).color(FG));
+            ui.label(RichText::new(last.map(fmt_px).unwrap_or("-".into())).font(display(20.0)).color(fg()));
             let stat = |ui: &mut Ui, k: &'static str, v: String, col: Color32| {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.label(RichText::new(t(k)).font(prop(10.5)).color(DIM));
+                    ui.label(RichText::new(t(k)).font(prop(10.5)).color(dim()));
                     ui.label(RichText::new(v).font(mono(12.0)).color(col));
                 }).response
             };
-            let sc = |v: Option<f64>| match v { Some(x) if x > 0.0 => up(), Some(x) if x < 0.0 => dn(), _ => FG };
+            let sc = |v: Option<f64>| match v { Some(x) if x > 0.0 => up(), Some(x) if x < 0.0 => dn(), _ => fg() };
             if self.mode == Market::Perp {
                 let (oi, oi_usd) = a.oi_total();
-                stat(ui, "hdr.oi", format!("{} ({:.2}B$)", fmt_qty(oi), oi_usd / 1e9), FG);
+                stat(ui, "hdr.oi", format!("{} ({:.2}B$)", fmt_qty(oi), oi_usd / 1e9), fg());
                 let (fp, fs) = (a.funding_oi_weighted(), a.funding_settled_oi_weighted());
                 stat(ui, "hdr.funding_pred", fp.map(|f| format!("{:+.4}bp/h", f * 1e4)).unwrap_or("-".into()), sc(fp))
                     .on_hover_text(fp.map(|f| format!("{} {:+.2}%", t("hdr.apr"), f * 24.0 * 365.0 * 100.0)).unwrap_or_default());
@@ -232,8 +271,8 @@ impl App {
                 ui.add_space(6.0);
                 let (r, resp) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
                 let p = ui.painter();
-                if resp.hovered() { p.rect_filled(r, 5, HL); }
-                let col = if resp.hovered() { FG } else { MU };
+                if resp.hovered() { p.rect_filled(r, 5, hl()); }
+                let col = if resp.hovered() { fg() } else { mu() };
                 let c = r.center();
                 for k in 0..8 {
                     let a = k as f32 * std::f32::consts::FRAC_PI_4;
@@ -286,7 +325,7 @@ impl App {
                 let alive = last.is_some_and(|l| nowms - l < 5_000);
                 let on = !self.eng.off.contains(&e);
                 let lat = stats.latency(e);
-                let lat_col = match lat { Some(l) if l < 150.0 => up(), Some(l) if l < 400.0 => WARN, Some(_) => dn(), None => DIM };
+                let lat_col = match lat { Some(l) if l < 150.0 => up(), Some(l) if l < 400.0 => WARN, Some(_) => dn(), None => dim() };
                 let resp = status_venue(ui, e, on, alive, lat, lat_col)
                     .on_hover_text(format!("{e:?}: {}", if on { t("status.scope_on") } else { t("status.scope_off") }));
                 // switching a venue off disconnects it: the engine restarts without it
@@ -296,22 +335,26 @@ impl App {
                 }
             }
             ui.separator();
-            ui.label(RichText::new(format!("{:.0} {}", self.rate.2, t("status.msgs"))).font(mono(10.5)).color(MU));
+            ui.label(RichText::new(format!("{:.0} {}", self.rate.2, t("status.msgs"))).font(mono(10.5)).color(mu()));
             if let Some(mb) = stats.rss_mb {
-                ui.label(RichText::new(format!("{} {mb}MB", t("status.mem"))).font(mono(10.5)).color(if mb > 1500 { dn() } else if mb > 800 { WARN } else { DIM }));
+                ui.label(RichText::new(format!("{} {mb}MB", t("status.mem"))).font(mono(10.5)).color(if mb > 1500 { dn() } else if mb > 800 { WARN } else { dim() }));
             }
             let bl = stats.backlog;
-            ui.label(RichText::new(format!("{} {bl}", t("status.backlog"))).font(mono(10.5)).color(if bl > 10_000 { dn() } else if bl > 1_000 { WARN } else { DIM }));
+            ui.label(RichText::new(format!("{} {bl}", t("status.backlog"))).font(mono(10.5)).color(if bl > 10_000 { dn() } else if bl > 1_000 { WARN } else { dim() }));
             let h = if stats.hist_pending == 0 { t("status.history_done").to_string() } else { format!("{}/{}", stats.hist_total - stats.hist_pending, stats.hist_total) };
-            ui.label(RichText::new(format!("{} {h}", t("status.history"))).font(prop(10.5)).color(if stats.hist_pending == 0 { MU } else { WARN }));
+            ui.label(RichText::new(format!("{} {h}", t("status.history"))).font(prop(10.5)).color(if stats.hist_pending == 0 { mu() } else { WARN }));
             if !stats.hist_errors.is_empty() {
                 ui.label(RichText::new(format!("{} errors", stats.hist_errors.len())).font(mono(10.5)).color(dn())).on_hover_text(stats.hist_errors.join("\n"));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // language switch (rightmost, persisted)
-                if link(ui, t("lang.switch")).clicked() { set_zh(!is_zh()); }
+                let mut l = lang();
+                egui::ComboBox::from_id_salt("lang").selected_text(RichText::new(LANGS[l].1).font(prop(10.5)).color(mu())).show_ui(ui, |ui| {
+                    for (i, (_, name)) in LANGS.iter().enumerate() { ui.selectable_value(&mut l, i, *name); }
+                });
+                if l != lang() { set_lang(LANGS[l].0); }
                 ui.add_space(10.0);
-                ui.label(RichText::new(format!("UTC {}", { let s = now_ms() / 1000 % 86_400; format!("{:02}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60) })).font(mono(10.5)).color(MU));
+                ui.label(RichText::new(format!("{} {}", tz_label(local_offset_ms() / 60_000), hms(now_ms()))).font(mono(10.5)).color(mu()));
             });
         });
         restart
@@ -362,7 +405,7 @@ impl App {
         off.sort_by_key(|e| *e as u8);
         // sorted keys so an unchanged state serializes identically (no rewrite every second)
         let auto = self.eng.account.lock().unwrap().auto.iter().map(|(e, r)| (format!("{e:?}"), *r)).collect();
-        let s = SettingsRef { route: &self.route, prefs: &self.prefs, lang: if is_zh() { "zh" } else { "en" }, base: &self.eng.base, mode: self.mode, chart: &self.chart, trade_ex: self.trade.ex, off, auto };
+        let s = SettingsRef { route: &self.route, prefs: &self.prefs, lang: lang_code(), base: &self.eng.base, mode: self.mode, chart: &self.chart, trade_ex: self.trade.ex, off, auto };
         let Ok(json) = serde_json::to_string_pretty(&s) else { return };
         if json == self.saved.0 { return; }
         let Some(p) = settings_path() else { return };
@@ -372,6 +415,7 @@ impl App {
     }
 
     pub fn frame(&mut self, ui: &mut Ui) {
+        set_light(ui.ctx().theme() == egui::Theme::Light);
         // Frame cap: macOS stops vsync-throttling occluded / off-space windows, and then every
         // repaint request renders immediately, piling up GPU command buffers (GBs within
         // seconds). The cap bounds that regardless of vsync.
@@ -511,15 +555,15 @@ fn window_buttons(ui: &mut Ui, maximized: bool) {
 
 /// Status bar venue: logo (dim when excluded from the aggregate), name, push latency.
 fn status_venue(ui: &mut Ui, e: Exchange, on: bool, alive: bool, lat: Option<f64>, lat_col: Color32) -> egui::Response {
-    let name = ui.painter().layout_no_wrap(format!("{e:?}"), prop(10.5), if on { MU } else { DIM });
+    let name = ui.painter().layout_no_wrap(format!("{e:?}"), prop(10.5), if on { mu() } else { dim() });
     let ms = ui.painter().layout_no_wrap(lat.map(|l| format!("{l:.0}ms")).unwrap_or("-".into()), mono(10.0), if alive { lat_col } else { dn() });
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0 + name.size().x + 4.0 + ms.size().x, 18.0), egui::Sense::click());
-    if resp.hovered() { ui.painter().rect_filled(rect.expand(2.0), 3, HL); }
+    if resp.hovered() { ui.painter().rect_filled(rect.expand(2.0), 3, hl()); }
     icon(ui.painter(), e, egui::Rect::from_center_size(egui::pos2(rect.left() + 6.5, rect.center().y), egui::vec2(12.0, 12.0)), !on);
     let y = rect.center().y;
     let x = rect.left() + 17.0;
-    ui.painter().galley(egui::pos2(x, y - name.size().y / 2.0), name.clone(), MU);
-    ui.painter().galley(egui::pos2(x + name.size().x + 4.0, y - ms.size().y / 2.0), ms, MU);
+    ui.painter().galley(egui::pos2(x, y - name.size().y / 2.0), name.clone(), mu());
+    ui.painter().galley(egui::pos2(x + name.size().x + 4.0, y - ms.size().y / 2.0), ms, mu());
     resp
 }
 

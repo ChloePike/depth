@@ -60,9 +60,9 @@ fn input_box(ui: &mut Ui, label: &str, text: &mut String, unit: &str) -> egui::R
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover());
     let id = ui.id().with(("input", label));
     let focused = ui.memory(|m| m.has_focus(id));
-    ui.painter().rect(rect, 4, PANEL2, egui::Stroke::new(1.0, if focused { accent() } else { LINE }), egui::StrokeKind::Inside);
-    ui.painter().text(rect.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, label, prop(12.0), DIM);
-    let unit_w = ui.painter().text(rect.right_center() - egui::vec2(10.0, 0.0), egui::Align2::RIGHT_CENTER, unit, prop(11.5), MU).width();
+    ui.painter().rect(rect, 4, panel2(), egui::Stroke::new(1.0, if focused { accent() } else { line() }), egui::StrokeKind::Inside);
+    ui.painter().text(rect.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, label, prop(12.0), dim());
+    let unit_w = ui.painter().text(rect.right_center() - egui::vec2(10.0, 0.0), egui::Align2::RIGHT_CENTER, unit, prop(11.5), mu()).width();
     let edit = egui::Rect::from_min_max(egui::pos2(rect.left() + 56.0, rect.top() + 4.0), egui::pos2(rect.right() - unit_w - 18.0, rect.bottom() - 4.0));
     ui.put(edit, egui::TextEdit::singleline(text).id(id).frame(egui::Frame::NONE).font(mono(13.5)).horizontal_align(egui::Align::RIGHT).vertical_align(egui::Align::Center))
 }
@@ -72,7 +72,7 @@ fn size_slider(ui: &mut Ui, v: &mut f32) -> bool {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::click_and_drag());
     let track = egui::Rect::from_min_max(egui::pos2(rect.left() + 6.0, rect.center().y - 2.0), egui::pos2(rect.right() - 6.0, rect.center().y + 2.0));
     let p = ui.painter();
-    p.rect_filled(track, 2, HL);
+    p.rect_filled(track, 2, hl());
     let x = track.left() + track.width() * v.clamp(0.0, 1.0);
     p.rect_filled(egui::Rect::from_min_max(track.min, egui::pos2(x, track.max.y)), 2, accent());
     for q in 0..=4 {
@@ -80,9 +80,9 @@ fn size_slider(ui: &mut Ui, v: &mut f32) -> bool {
         let on = *v >= q as f32 / 4.0 - 1e-4;
         let c = egui::pos2(qx, track.center().y);
         p.add(egui::Shape::convex_polygon(vec![c + egui::vec2(0.0, -5.0), c + egui::vec2(5.0, 0.0), c + egui::vec2(0.0, 5.0), c + egui::vec2(-5.0, 0.0)],
-            if on { accent() } else { PANEL2 }, egui::Stroke::new(1.5, if on { accent() } else { DIM })));
+            if on { accent() } else { panel2() }, egui::Stroke::new(1.5, if on { accent() } else { dim() })));
     }
-    p.circle(egui::pos2(x, track.center().y), 7.0, FG, egui::Stroke::new(2.0, accent()));
+    p.circle(egui::pos2(x, track.center().y), 7.0, fg(), egui::Stroke::new(2.0, accent()));
     if let Some(pos) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
         let mut f = ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0);
         // snap to the notches when close
@@ -103,17 +103,17 @@ fn big_button(ui: &mut Ui, text: &str, fill: Color32, enabled: bool) -> bool {
 
 /// Small read-only chip (position mode, leverage).
 fn chip(ui: &mut Ui, text: &str, tip: &str) {
-    let g = ui.painter().layout_no_wrap(text.to_string(), prop(11.0), MU);
+    let g = ui.painter().layout_no_wrap(text.to_string(), prop(11.0), mu());
     let (r, resp) = ui.allocate_exact_size(g.size() + egui::vec2(12.0, 6.0), egui::Sense::hover());
-    ui.painter().rect(r, 3, PANEL2, egui::Stroke::new(1.0, LINE), egui::StrokeKind::Inside);
-    ui.painter().galley(r.center() - g.size() / 2.0, g, MU);
+    ui.painter().rect(r, 3, panel2(), egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside);
+    ui.painter().galley(r.center() - g.size() / 2.0, g, mu());
     if !tip.is_empty() { resp.on_hover_text(tip); }
 }
 
 /// "label ........ value" row.
 fn kv(ui: &mut Ui, k: &str, v: String, col: Color32) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(k).font(prop(11.0)).color(DIM));
+        ui.label(RichText::new(k).font(prop(11.0)).color(dim()));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label(RichText::new(v).font(mono(11.0)).color(col)); });
     });
 }
@@ -122,10 +122,10 @@ fn kv(ui: &mut Ui, k: &str, v: String, col: Color32) {
 struct Cell { s: String, col: Color32, mono: bool, ex: Option<Exchange> }
 impl Cell {
     fn t(s: String, col: Color32) -> Self { Cell { s, col, mono: false, ex: None } }
-    fn n(s: String) -> Self { Cell { s, col: FG, mono: true, ex: None } }
+    fn n(s: String) -> Self { Cell { s, col: fg(), mono: true, ex: None } }
     fn c(s: String, col: Color32) -> Self { Cell { s, col, mono: true, ex: None } }
     /// symbol with the coin logo and a small venue logo
-    fn sym(ex: Exchange, symbol: &str) -> Self { Cell { s: symbol.to_string(), col: FG, mono: false, ex: Some(ex) } }
+    fn sym(ex: Exchange, symbol: &str) -> Self { Cell { s: symbol.to_string(), col: fg(), mono: false, ex: Some(ex) } }
 }
 
 fn side_cell(side: Side, pos: Option<Side>) -> Cell {
@@ -138,20 +138,20 @@ fn side_cell(side: Side, pos: Option<Side>) -> Cell {
 /// edge as share of the width, right-aligned). With `action`, each row gets a small button at
 /// the far right; returns the clicked row.
 fn table(ui: &mut Ui, cols: &[(&'static str, f32, bool)], rows: Vec<Vec<Cell>>, action: Option<&str>) -> Option<usize> {
-    if rows.is_empty() { ui.add_space(10.0); ui.label(RichText::new(t("acc.empty")).color(DIM)); return None; }
+    if rows.is_empty() { ui.add_space(10.0); ui.label(RichText::new(t("acc.empty")).color(dim())); return None; }
     let w = ui.available_width();
     let (hdr, _) = ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::hover());
     let left = |i: usize| if i == 0 { hdr.left() + 8.0 } else { hdr.left() + cols[i - 1].1 * w + 8.0 };
     for (i, (k, edge, right)) in cols.iter().enumerate() {
         let (x, al) = if *right { (hdr.left() + edge * w - 8.0, egui::Align2::RIGHT_CENTER) } else { (left(i), egui::Align2::LEFT_CENTER) };
-        ui.painter().text(egui::pos2(x, hdr.center().y), al, t(k), prop(11.0), DIM);
+        ui.painter().text(egui::pos2(x, hdr.center().y), al, t(k), prop(11.0), dim());
     }
-    ui.painter().hline(hdr.x_range(), hdr.bottom(), egui::Stroke::new(1.0, LINE));
+    ui.painter().hline(hdr.x_range(), hdr.bottom(), egui::Stroke::new(1.0, line()));
     let mut hit = None;
     for (ri, row) in rows.iter().enumerate() {
         let (r, resp) = ui.allocate_exact_size(egui::vec2(w, 26.0), egui::Sense::hover());
         let p = ui.painter();
-        if resp.hovered() { p.rect_filled(r, 3, HL.linear_multiply(0.6)); }
+        if resp.hovered() { p.rect_filled(r, 3, hl().linear_multiply(0.6)); }
         for (i, c) in row.iter().enumerate().take(cols.len()) {
             let (_, edge, right) = cols[i];
             let f = if c.mono { mono(11.5) } else { prop(12.0) };
@@ -168,11 +168,11 @@ fn table(ui: &mut Ui, cols: &[(&'static str, f32, bool)], rows: Vec<Vec<Cell>>, 
         if let Some(a) = action {
             let b = egui::Rect::from_min_size(egui::pos2(r.right() - 60.0, r.center().y - 9.0), egui::vec2(52.0, 18.0));
             let br = ui.interact(b, ui.id().with(("row_act", ri)), egui::Sense::click());
-            p.rect(b, 4, if br.hovered() { HL } else { PANEL2 }, egui::Stroke::new(1.0, LINE), egui::StrokeKind::Inside);
-            p.text(b.center(), egui::Align2::CENTER_CENTER, a, prop(11.0), FG);
+            p.rect(b, 4, if br.hovered() { hl() } else { panel2() }, egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside);
+            p.text(b.center(), egui::Align2::CENTER_CENTER, a, prop(11.0), fg());
             if br.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { hit = Some(ri); }
         }
-        p.hline(r.x_range(), r.bottom(), egui::Stroke::new(1.0, LINE.linear_multiply(0.5)));
+        p.hline(r.x_range(), r.bottom(), egui::Stroke::new(1.0, line().linear_multiply(0.5)));
     }
     hit
 }
@@ -201,7 +201,7 @@ impl TradeView {
             let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
             icon(ui.painter(), self.ex, r, false);
             ui.label(RichText::new(format!("{:?}", self.ex)).strong().font(prop(13.0)));
-            ui.label(RichText::new(t("tr.fixed")).font(prop(10.5)).color(DIM));
+            ui.label(RichText::new(t("tr.fixed")).font(prop(10.5)).color(dim()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if link(ui, t("tr.change")).clicked() { self.open_settings = true; } });
         });
         ui.horizontal(|ui| {
@@ -211,16 +211,16 @@ impl TradeView {
             if let Some(l) = lev { chip(ui, &format!("{l:.0}x"), t("tr.lev_tip")); }
             let lat = |v: Option<f64>| v.map(|x| format!("{x:.0}ms")).unwrap_or("-".into());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(format!("{} {}  {} {}", t("tr.push"), lat(push_lat), t("tr.rtt"), lat(rtt))).font(mono(10.0)).color(DIM));
+                ui.label(RichText::new(format!("{} {}  {} {}", t("tr.push"), lat(push_lat), t("tr.rtt"), lat(rtt))).font(mono(10.0)).color(dim()));
             });
         });
         if !has_key {
             // the form stays usable for preview; only submitting needs keys
             egui::CollapsingHeader::new(RichText::new(t("tr.nokey_title")).color(WARN).font(prop(11.5))).id_salt(("nokey", self.ex as u8)).default_open(false).show(ui, |ui| {
-                ui.label(RichText::new(t("tr.nokey")).color(MU).font(prop(11.0)));
+                ui.label(RichText::new(t("tr.nokey")).color(mu()).font(prop(11.0)));
                 let mut hint = trade::keychain_hint(self.ex);
                 ui.add(egui::TextEdit::multiline(&mut hint).font(mono(10.0)).desired_rows(3).desired_width(ui.available_width()));
-                ui.label(RichText::new(t("tr.nokey2")).color(DIM).font(prop(10.5)));
+                ui.label(RichText::new(t("tr.nokey2")).color(dim()).font(prop(10.5)));
             });
         }
         if let Some(e) = &err { ui.label(RichText::new(e).color(dn()).font(prop(10.5))); }
@@ -240,12 +240,12 @@ impl TradeView {
 
         // available margin, with a shortcut to the transfer dialog
         ui.horizontal(|ui| {
-            ui.label(RichText::new(t("tr.avail")).font(prop(11.0)).color(DIM));
+            ui.label(RichText::new(t("tr.avail")).font(prop(11.0)).color(dim()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if has_key && ui.add(egui::Button::new(RichText::new(t("wal.transfer")).font(prop(11.0)).color(accent())).frame(false)).clicked() {
                     self.wallet.open_for(self.ex, eng, ui.ctx());
                 }
-                ui.label(RichText::new(bal.as_ref().map(|b| format!("{} USDT", fmt_dp(b.available, 2))).unwrap_or("-".into())).font(mono(11.5)).color(FG));
+                ui.label(RichText::new(bal.as_ref().map(|b| format!("{} USDT", fmt_dp(b.available, 2))).unwrap_or("-".into())).font(mono(11.5)).color(fg()));
             });
         });
 
@@ -282,8 +282,8 @@ impl TradeView {
                 });
                 if self.otype == OType::Limit {
                     let on = self.bbo_on;
-                    let b = egui::Button::new(RichText::new("BBO").font(prop(11.5)).color(if on { accent() } else { MU })).fill(if on { HL } else { PANEL2 })
-                        .stroke(egui::Stroke::new(1.0, if on { accent() } else { LINE })).corner_radius(4).min_size(egui::vec2(46.0, 28.0));
+                    let b = egui::Button::new(RichText::new("BBO").font(prop(11.5)).color(if on { accent() } else { mu() })).fill(if on { hl() } else { panel2() })
+                        .stroke(egui::Stroke::new(1.0, if on { accent() } else { line() })).corner_radius(4).min_size(egui::vec2(46.0, 28.0));
                     if ui.add(b).on_hover_text(t("tr.bbo_tip")).clicked() { self.bbo_on = !on; }
                 }
             });
@@ -291,7 +291,7 @@ impl TradeView {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     for (lab, v, col) in [(t("tr.bid"), b, up()), (t("tr.ask"), k, dn())] {
-                        let r = ui.add(egui::Button::new(RichText::new(format!("{lab} {}", fmt_px(v))).font(mono(10.5)).color(col)).fill(PANEL2).corner_radius(3));
+                        let r = ui.add(egui::Button::new(RichText::new(format!("{lab} {}", fmt_px(v))).font(mono(10.5)).color(col)).fill(panel2()).corner_radius(3));
                         if r.clicked() && !use_bbo { self.price = fmt_px(v).replace(',', ""); }
                     }
                 });
@@ -333,23 +333,23 @@ impl TradeView {
             for (i, side) in [(0, p1), (1, p2)] {
                 let can = if close { pos_long.iter().chain(pos_short.iter()).find(|p| p.side == side).map_or(0.0, |p| p.qty) } else { max_qty };
                 let cu = &mut c[i];
-                kv(cu, if close { t("tr.can_close") } else { t("tr.can_open") }, format!("{} {base}", fmt_qty(can)), MU);
-                if !close { kv(cu, t("tr.cost"), format!("{} USDT", fmt_dp(notional / lev_v, 2)), MU); }
+                kv(cu, if close { t("tr.can_close") } else { t("tr.can_open") }, format!("{} {base}", fmt_qty(can)), mu());
+                if !close { kv(cu, t("tr.cost"), format!("{} USDT", fmt_dp(notional / lev_v, 2)), mu()); }
             }
         });
-        kv(ui, t("tr.notional"), format!("{} USDT", fmt_dp(notional, 2)), MU);
-        kv(ui, t("tr.fee"), format!("≈ {:.2} USDT", fee), MU);
+        kv(ui, t("tr.notional"), format!("{} USDT", fmt_dp(notional, 2)), mu());
+        kv(ui, t("tr.fee"), format!("≈ {:.2} USDT", fee), mu());
         if lev.is_none() && has_key { ui.label(RichText::new(t("tr.lev_unknown")).font(prop(10.5)).color(WARN)); }
 
         // this symbol's positions on this venue
         for p in pos_long.iter().chain(pos_short.iter()) {
             ui.add_space(4.0);
-            egui::Frame::new().fill(PANEL2).corner_radius(4).inner_margin(8).show(ui, |ui| {
+            egui::Frame::new().fill(panel2()).corner_radius(4).inner_margin(8).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let (sc, sl) = if p.side == Side::Buy { (up(), t("tr.long_s")) } else { (dn(), t("tr.short_s")) };
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("{sl} {}", fmt_qty(p.qty))).font(mono(12.0)).color(sc).strong());
-                    if p.lev > 0.0 { ui.label(RichText::new(format!("{:.0}x", p.lev)).font(mono(10.5)).color(DIM)); }
+                    if p.lev > 0.0 { ui.label(RichText::new(format!("{:.0}x", p.lev)).font(mono(10.5)).color(dim())); }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if link(ui, t("acc.close_mkt")).clicked() {
                             self.confirm = Some(Pending { ex: p.ex, ref_px: p.mark, req: OrderReq { symbol: p.symbol.clone(), pos: p.side, close: true, kind: Kind::Market, qty: p.qty, client_id: None } });
@@ -359,8 +359,8 @@ impl TradeView {
                 });
                 ui.columns(3, |c| {
                     for (i, (k, v)) in [(t("acc.entry"), fmt_px(p.entry)), (t("acc.mark"), fmt_px(p.mark)), (t("acc.liq"), p.liq.map(fmt_px).unwrap_or("-".into()))].into_iter().enumerate() {
-                        c[i].label(RichText::new(k).font(prop(10.0)).color(DIM));
-                        c[i].label(RichText::new(v).font(mono(11.0)).color(if i == 2 { WARN } else { FG }));
+                        c[i].label(RichText::new(k).font(prop(10.0)).color(dim()));
+                        c[i].label(RichText::new(v).font(mono(11.0)).color(if i == 2 { WARN } else { fg() }));
                     }
                 });
             });
@@ -398,11 +398,11 @@ impl TradeView {
                 k => k.label(),
             };
             egui::Grid::new("cf").num_columns(2).show(ui, |ui| {
-                ui.label(RichText::new(t("tr.price")).color(MU)); ui.label(RichText::new(px).font(mono(12.0))); ui.end_row();
-                ui.label(RichText::new(t("tr.qty")).color(MU)); ui.label(RichText::new(format!("{}", p.req.qty)).font(mono(12.0))); ui.end_row();
-                ui.label(RichText::new(t("tr.notional")).color(MU)); ui.label(RichText::new(format!("{} USDT", fmt_dp(p.req.qty * p.ref_px, 2))).font(mono(12.0))); ui.end_row();
+                ui.label(RichText::new(t("tr.price")).color(mu())); ui.label(RichText::new(px).font(mono(12.0))); ui.end_row();
+                ui.label(RichText::new(t("tr.qty")).color(mu())); ui.label(RichText::new(format!("{}", p.req.qty)).font(mono(12.0))); ui.end_row();
+                ui.label(RichText::new(t("tr.notional")).color(mu())); ui.label(RichText::new(format!("{} USDT", fmt_dp(p.req.qty * p.ref_px, 2))).font(mono(12.0))); ui.end_row();
             });
-            ui.label(RichText::new(t("tr.rounding")).color(DIM).font(prop(10.5)));
+            ui.label(RichText::new(t("tr.rounding")).color(dim()).font(prop(10.5)));
             if !trade::VERIFIED.contains(&p.ex) {
                 ui.add_space(4.0);
                 ui.label(RichText::new(t("tr.untested_warn")).color(WARN).font(prop(11.0)));
@@ -432,7 +432,7 @@ impl TradeView {
             }
         };
         if a.chains.is_empty() {
-            ui.label(RichText::new(t("ins.loading")).color(DIM).font(prop(11.0)));
+            ui.label(RichText::new(t("ins.loading")).color(dim()).font(prop(11.0)));
             eng.wants_options.store(true, std::sync::atomic::Ordering::Relaxed);
             return;
         }
@@ -443,10 +443,10 @@ impl TradeView {
         let mut best = insure::best_per_contract(&all);
         best.retain(|q| q.floor_dist >= 0.02);
         best.sort_by(|x, y| x.cost_apr.total_cmp(&y.cost_apr));
-        ui.label(RichText::new(format!("{} {} {}  {}", if ip.side == Side::Buy { t("tr.long_s") } else { t("tr.short_s") }, fmt_qty(ip.qty), base, t("ins.hint"))).color(DIM).font(prop(10.5)));
+        ui.label(RichText::new(format!("{} {} {}  {}", if ip.side == Side::Buy { t("tr.long_s") } else { t("tr.short_s") }, fmt_qty(ip.qty), base, t("ins.hint"))).color(dim()).font(prop(10.5)));
         egui::Grid::new("ins").striped(true).spacing([8.0, 3.0]).show(ui, |ui| {
             // max loss lives in the hover so the table fits the 300px panel
-            for k in ["ins.venue", "ins.exp", "ins.floor", "ins.cost"] { ui.label(RichText::new(t(k)).color(DIM).font(prop(10.5))); }
+            for k in ["ins.venue", "ins.exp", "ins.floor", "ins.cost"] { ui.label(RichText::new(t(k)).color(dim()).font(prop(10.5))); }
             ui.end_row();
             for q in best.iter().take(6) {
                 ui.horizontal(|ui| { let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover()); icon(ui.painter(), q.ex, r, false); });
@@ -457,7 +457,7 @@ impl TradeView {
                 ui.end_row();
             }
         });
-        ui.label(RichText::new(t("ins.exec_note")).color(DIM).font(prop(10.0)));
+        ui.label(RichText::new(t("ins.exec_note")).color(dim()).font(prop(10.0)));
     }
 
     pub fn set_tab(&mut self, n: u8) { self.tab = n; }
@@ -482,23 +482,23 @@ impl TradeView {
         let (h, at) = hist;
         if !std::mem::replace(&mut self.hist_requested, true) && at.is_none() && !loading { eng.load_history(ui.ctx()); }
         ui.horizontal(|ui| {
-            ui.label(RichText::new(t("acc.hist_note")).font(prop(10.5)).color(DIM));
-            if let Some(at) = at { ui.label(RichText::new(format!("· {} {}s", t("wal.updated"), (now_ms() - at) / 1000)).font(prop(10.5)).color(DIM)); }
-            if loading { ui.label(RichText::new(t("wal.loading")).font(prop(10.5)).color(DIM)); }
+            ui.label(RichText::new(t("acc.hist_note")).font(prop(10.5)).color(dim()));
+            if let Some(at) = at { ui.label(RichText::new(format!("· {} {}s", t("wal.updated"), (now_ms() - at) / 1000)).font(prop(10.5)).color(dim())); }
+            if loading { ui.label(RichText::new(t("wal.loading")).font(prop(10.5)).color(dim())); }
             else if link(ui, t("wal.refresh")).clicked() { eng.load_history(ui.ctx()); }
         });
         let d = |ts: i64| format!("{} {}", super::chart_date(ts), super::hms(ts));
         match self.tab {
             2 => {
                 let rows = h.orders.iter().map(|o| vec![
-                    Cell::t(d(o.ts), MU), Cell::sym(o.ex, &o.symbol), side_cell(o.side, None), Cell::t(o.kind.clone(), FG), Cell::n(if o.price > 0.0 { fmt_px(o.price) } else { "-".into() }),
-                    Cell::n(if o.avg > 0.0 { fmt_px(o.avg) } else { "-".into() }), Cell::n(format!("{} / {}", fmt_qty(o.filled), fmt_qty(o.qty))), Cell::t(o.status.clone(), MU),
+                    Cell::t(d(o.ts), mu()), Cell::sym(o.ex, &o.symbol), side_cell(o.side, None), Cell::t(o.kind.clone(), fg()), Cell::n(if o.price > 0.0 { fmt_px(o.price) } else { "-".into() }),
+                    Cell::n(if o.avg > 0.0 { fmt_px(o.avg) } else { "-".into() }), Cell::n(format!("{} / {}", fmt_qty(o.filled), fmt_qty(o.qty))), Cell::t(o.status.clone(), mu()),
                 ]).collect();
                 table(ui, &[("acc.time", 0.11, false), ("acc.symbol", 0.28, false), ("acc.side", 0.36, false), ("acc.type", 0.46, false), ("tr.price", 0.58, true), ("acc.avg", 0.69, true), ("acc.filled", 0.84, true), ("acc.status", 0.97, true)], rows, None);
             }
             3 => {
                 let rows = h.fills.iter().map(|f| vec![
-                    Cell::t(d(f.ts), MU), Cell::sym(f.ex, &f.symbol), side_cell(f.side, None), Cell::n(fmt_px(f.price)), Cell::n(fmt_qty(f.qty)),
+                    Cell::t(d(f.ts), mu()), Cell::sym(f.ex, &f.symbol), side_cell(f.side, None), Cell::n(fmt_px(f.price)), Cell::n(fmt_qty(f.qty)),
                     Cell::n(fmt_dp(f.price * f.qty, 2)), Cell::n(format!("{:.4}", f.fee)),
                     f.realized.filter(|r| *r != 0.0).map(|r| Cell::c(format!("{r:+.2}"), if r >= 0.0 { up() } else { dn() })).unwrap_or(Cell::n("-".into())),
                 ]).collect();
@@ -506,8 +506,8 @@ impl TradeView {
             }
             _ => {
                 let rows = h.closed.iter().map(|c| vec![
-                    Cell::t(d(c.ts), MU), Cell::sym(c.ex, &c.symbol),
-                    match c.long { Some(l) => Cell::c(if l { t("tr.long_s") } else { t("tr.short_s") }.into(), if l { up() } else { dn() }), None => Cell::t("-".into(), DIM) },
+                    Cell::t(d(c.ts), mu()), Cell::sym(c.ex, &c.symbol),
+                    match c.long { Some(l) => Cell::c(if l { t("tr.long_s") } else { t("tr.short_s") }.into(), if l { up() } else { dn() }), None => Cell::t("-".into(), dim()) },
                     Cell::n(c.qty.map(fmt_qty).unwrap_or("-".into())), Cell::n(c.entry.map(fmt_px).unwrap_or("-".into())), Cell::n(c.exit.map(fmt_px).unwrap_or("-".into())),
                     Cell::c(format!("{:+.2}", c.pnl), if c.pnl >= 0.0 { up() } else { dn() }),
                 ]).collect();
@@ -520,16 +520,16 @@ impl TradeView {
     /// Positions as a painted table: two-line cells, numbers right-aligned, row hover,
     /// market close and limit close (prefills the order panel) per row.
     fn positions_table(&mut self, ui: &mut Ui, positions: &[Position], balances: &std::collections::HashMap<Exchange, trade::Balance>) {
-        if positions.is_empty() { ui.add_space(12.0); ui.label(RichText::new(t("acc.no_positions")).color(DIM)); return; }
+        if positions.is_empty() { ui.add_space(12.0); ui.label(RichText::new(t("acc.no_positions")).color(dim())); return; }
         // summary strip: totals across venues
         let upnl: f64 = positions.iter().map(|p| p.upnl).sum();
         let margin: f64 = positions.iter().map(|p| p.margin).sum();
         let value: f64 = positions.iter().map(|p| p.qty * p.mark).sum();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            for (k, v, c) in [(t("acc.total_upnl"), format!("{upnl:+.2} USDT"), if upnl >= 0.0 { up() } else { dn() }), (t("acc.total_margin"), format!("{} USDT", fmt_dp(margin, 2)), FG),
-                              (t("acc.total_value"), format!("{} USDT", fmt_dp(value, 0)), FG)] {
-                ui.label(RichText::new(k).font(prop(11.0)).color(DIM));
+            for (k, v, c) in [(t("acc.total_upnl"), format!("{upnl:+.2} USDT"), if upnl >= 0.0 { up() } else { dn() }), (t("acc.total_margin"), format!("{} USDT", fmt_dp(margin, 2)), fg()),
+                              (t("acc.total_value"), format!("{} USDT", fmt_dp(value, 0)), fg())] {
+                ui.label(RichText::new(k).font(prop(11.0)).color(dim()));
                 ui.label(RichText::new(v).font(mono(11.5)).color(c));
                 ui.add_space(12.0);
             }
@@ -543,13 +543,13 @@ impl TradeView {
         for (i, (k, _)) in COLS.iter().enumerate() {
             if k.is_empty() { continue; }
             let (pos, al) = if i == 0 { (egui::pos2(hdr.left() + 8.0, hdr.center().y), egui::Align2::LEFT_CENTER) } else { (egui::pos2(colx(i), hdr.center().y), egui::Align2::RIGHT_CENTER) };
-            p.text(pos, al, t(k), prop(11.0), DIM);
+            p.text(pos, al, t(k), prop(11.0), dim());
         }
-        p.hline(hdr.x_range(), hdr.bottom(), egui::Stroke::new(1.0, LINE));
+        p.hline(hdr.x_range(), hdr.bottom(), egui::Stroke::new(1.0, line()));
         for ps in positions {
             let (row, resp) = ui.allocate_exact_size(egui::vec2(w, 36.0), egui::Sense::hover());
             let p = ui.painter();
-            if resp.hovered() { p.rect_filled(row, 4, HL.linear_multiply(0.6)); }
+            if resp.hovered() { p.rect_filled(row, 4, hl().linear_multiply(0.6)); }
             let (y1, y2) = (row.center().y - 7.0, row.center().y + 8.0);
             let colx = |i: usize| row.left() + COLS[i].1 * w - 8.0;
             let num = |i: usize, y: f32, s: String, col: Color32, f: egui::FontId| { p.text(egui::pos2(colx(i), y), egui::Align2::RIGHT_CENTER, s, f, col); };
@@ -558,27 +558,27 @@ impl TradeView {
             let base = ps.symbol.strip_suffix("USDT").unwrap_or(&ps.symbol);
             // symbol: coin logo, name, side/leverage badge; venue underneath
             coin_icon(ui, base, egui::Rect::from_center_size(egui::pos2(row.left() + 18.0, row.center().y), egui::vec2(20.0, 20.0)));
-            let nr = p.text(egui::pos2(row.left() + 38.0, y1), egui::Align2::LEFT_CENTER, &ps.symbol, prop(12.5), FG);
+            let nr = p.text(egui::pos2(row.left() + 38.0, y1), egui::Align2::LEFT_CENTER, &ps.symbol, prop(12.5), fg());
             let badge = format!("{} {}", if long { t("tr.long_s") } else { t("tr.short_s") }, if ps.lev > 0.0 { format!("{:.0}x", ps.lev) } else { String::new() });
             let g = p.layout_no_wrap(badge, prop(10.5), sc);
             let br = egui::Rect::from_min_size(egui::pos2(nr.right() + 6.0, y1 - 8.0), g.size() + egui::vec2(10.0, 4.0));
             p.rect_filled(br, 3, sc.linear_multiply(0.15));
             p.galley(br.center() - g.size() / 2.0, g, sc);
             icon(p, ps.ex, egui::Rect::from_center_size(egui::pos2(row.left() + 44.0, y2), egui::vec2(11.0, 11.0)), false);
-            p.text(egui::pos2(row.left() + 53.0, y2), egui::Align2::LEFT_CENTER, format!("{:?} · Perp", ps.ex), prop(10.5), DIM);
+            p.text(egui::pos2(row.left() + 53.0, y2), egui::Align2::LEFT_CENTER, format!("{:?} · Perp", ps.ex), prop(10.5), dim());
             // numbers
-            num(1, y1, format!("{} {base}", fmt_qty(ps.qty)), FG, mono(12.0));
-            num(1, y2, format!("≈{} USDT", fmt_dp(ps.qty * ps.mark, 0)), DIM, mono(10.5));
-            num(2, row.center().y, fmt_px(ps.entry), FG, mono(12.0));
-            num(3, row.center().y, fmt_px(ps.mark), FG, mono(12.0));
+            num(1, y1, format!("{} {base}", fmt_qty(ps.qty)), fg(), mono(12.0));
+            num(1, y2, format!("≈{} USDT", fmt_dp(ps.qty * ps.mark, 0)), dim(), mono(10.5));
+            num(2, row.center().y, fmt_px(ps.entry), fg(), mono(12.0));
+            num(3, row.center().y, fmt_px(ps.mark), fg(), mono(12.0));
             let liq_txt = ps.liq.map(fmt_px).unwrap_or("—".into());
-            num(4, row.center().y, liq_txt, if ps.liq.is_some() { WARN } else { DIM }, mono(12.0));
+            num(4, row.center().y, liq_txt, if ps.liq.is_some() { WARN } else { dim() }, mono(12.0));
             let liq_rect = egui::Rect::from_min_max(egui::pos2(colx(3) + 8.0, row.top()), egui::pos2(colx(4) + 8.0, row.bottom()));
             if ps.liq.is_none() && balances.get(&ps.ex).is_some_and(|b| b.uni_mmr.is_some()) {
                 ui.interact(liq_rect, ui.id().with(("liq", &ps.symbol, long)), egui::Sense::hover()).on_hover_text(t("acc.liq_pm"));
             }
-            num(5, y1, fmt_dp(ps.margin, 2), FG, mono(12.0));
-            num(5, y2, "USDT".into(), DIM, prop(10.5));
+            num(5, y1, fmt_dp(ps.margin, 2), fg(), mono(12.0));
+            num(5, y2, "USDT".into(), dim(), prop(10.5));
             let pc = if ps.upnl >= 0.0 { up() } else { dn() };
             num(6, y1, format!("{:+.2}", ps.upnl), pc, mono(12.0));
             if ps.margin > 0.0 { num(6, y2, format!("{:+.2}%", ps.upnl / ps.margin * 100.0), pc, mono(10.5)); }
@@ -588,8 +588,8 @@ impl TradeView {
             let lm = egui::Rect::from_min_size(egui::pos2(ax - 50.0, row.center().y - 10.0), egui::vec2(50.0, 20.0));
             for (r, k, id) in [(mk, "acc.close_mkt_s", 0), (lm, "acc.close_lmt_s", 1)] {
                 let resp = ui.interact(r, ui.id().with(("act", &ps.symbol, long, id)), egui::Sense::click());
-                p.rect(r, 4, if resp.hovered() { HL } else { PANEL2 }, egui::Stroke::new(1.0, LINE), egui::StrokeKind::Inside);
-                p.text(r.center(), egui::Align2::CENTER_CENTER, t(k), prop(11.0), FG);
+                p.rect(r, 4, if resp.hovered() { hl() } else { panel2() }, egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside);
+                p.text(r.center(), egui::Align2::CENTER_CENTER, t(k), prop(11.0), fg());
                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                     if id == 0 {
                         self.confirm = Some(Pending { ex: ps.ex, ref_px: ps.mark, req: OrderReq { symbol: ps.symbol.clone(), pos: ps.side, close: true, kind: Kind::Market, qty: ps.qty, client_id: None } });
@@ -604,7 +604,7 @@ impl TradeView {
                     }
                 }
             }
-            p.hline(row.x_range(), row.bottom(), egui::Stroke::new(1.0, LINE.linear_multiply(0.6)));
+            p.hline(row.x_range(), row.bottom(), egui::Stroke::new(1.0, line().linear_multiply(0.6)));
         }
     }
 
@@ -628,7 +628,7 @@ impl TradeView {
                     self.tab = i as u8;
                 }
             }
-            if !any_key { ui.add_space(16.0); ui.label(RichText::new(t("acc.nokey")).font(prop(11.5)).color(DIM)); }
+            if !any_key { ui.add_space(16.0); ui.label(RichText::new(t("acc.nokey")).font(prop(11.5)).color(dim())); }
             // account-level risk: what actually triggers liquidation on unified accounts
             ui.add_space(24.0);
             let mut bs: Vec<_> = balances.iter().collect();
@@ -636,12 +636,12 @@ impl TradeView {
             for (ex, b) in bs {
                 if let Some(m) = b.uni_mmr {
                     let col = if m > 1.5 { up() } else if m > 1.2 { WARN } else { dn() };
-                    ui.label(RichText::new(format!("  {ex:?} uniMMR ")).font(prop(11.0)).color(DIM));
+                    ui.label(RichText::new(format!("  {ex:?} uniMMR ")).font(prop(11.0)).color(dim()));
                     ui.label(RichText::new(format!("{m:.2}")).font(mono(11.5)).color(col)).on_hover_text(t("acc.unimmr_tip"));
                 }
                 if let Some(r) = b.mm_rate {
                     let col = if r < 0.5 { up() } else if r < 0.8 { WARN } else { dn() };
-                    ui.label(RichText::new(format!("  {ex:?} {} ", t("acc.mmr"))).font(prop(11.0)).color(DIM));
+                    ui.label(RichText::new(format!("  {ex:?} {} ", t("acc.mmr"))).font(prop(11.0)).color(dim()));
                     ui.label(RichText::new(format!("{:.1}%", r * 100.0)).font(mono(11.5)).color(col)).on_hover_text(t("acc.mmr_tip"));
                 }
             }
@@ -651,7 +651,7 @@ impl TradeView {
             0 => self.positions_table(ui, &positions, &balances),
             1 => {
                 let rows: Vec<Vec<Cell>> = orders.iter().map(|o| vec![
-                    Cell::t(super::hms(o.ts), MU), Cell::sym(o.ex, &o.symbol), side_cell(o.side, o.pos), Cell::t(format!("{}{}", o.kind, if o.reduce_only { " · R" } else { "" }), FG),
+                    Cell::t(super::hms(o.ts), mu()), Cell::sym(o.ex, &o.symbol), side_cell(o.side, o.pos), Cell::t(format!("{}{}", o.kind, if o.reduce_only { " · R" } else { "" }), fg()),
                     Cell::n(fmt_px(o.price)), Cell::n(fmt_qty(o.qty)), Cell::n(fmt_qty(o.filled)),
                 ]).collect();
                 let cancel = table(ui, &[("acc.time", 0.08, false), ("acc.symbol", 0.26, false), ("acc.side", 0.36, false), ("acc.type", 0.48, false), ("tr.price", 0.62, true), ("acc.qty", 0.74, true), ("acc.filled", 0.86, true)], rows, Some(t("acc.cancel")));
@@ -660,7 +660,7 @@ impl TradeView {
             2..=4 => self.history_tab(ui, eng),
             5 => {
                 for (ts, msg, ok) in &log {
-                    ui.label(RichText::new(format!("{}  {msg}", hms(*ts))).font(mono(11.0)).color(if *ok { MU } else { dn() }));
+                    ui.label(RichText::new(format!("{}  {msg}", hms(*ts))).font(mono(11.0)).color(if *ok { mu() } else { dn() }));
                 }
             }
             6 => self.wallet.show(ui, eng),

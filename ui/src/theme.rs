@@ -5,26 +5,38 @@ use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, OnceLock};
 use terminal_one::Exchange;
 
-const BG_C: Color32 = Color32::from_rgb(0x16, 0x16, 0x17);
-const PANEL_C: Color32 = Color32::from_rgb(0x1e, 0x1e, 0x20);
-/// translucent white overlays: they read the same on the solid egui panel and on the native window
-pub const PANEL2: Color32 = Color32::from_rgba_premultiplied(13, 13, 13, 13);
-pub const HL: Color32 = Color32::from_rgba_premultiplied(23, 23, 23, 23);
-pub const LINE: Color32 = Color32::from_rgba_premultiplied(28, 28, 28, 28);
-pub const GRID: Color32 = Color32::from_rgba_premultiplied(14, 14, 14, 14);
-pub const FG: Color32 = Color32::from_rgb(0xe8, 0xe8, 0xe8);
-pub const MU: Color32 = Color32::from_rgb(0x9b, 0x9b, 0x9b);
-pub const DIM: Color32 = Color32::from_rgb(0x6e, 0x6e, 0x6e);
+static LIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Light palette in effect; set every frame from egui's resolved theme (Settings > Appearance:
+/// system / dark / light).
+pub fn set_light(on: bool) { LIGHT.store(on, Relaxed); }
+pub fn light() -> bool { LIGHT.load(Relaxed) }
+const fn pick(d: Color32, l: Color32, light: bool) -> Color32 { if light { l } else { d } }
+/// Translucent overlays (white on dark, black on light): they read the same on the solid egui
+/// panel and on the native window.
+const fn veil(a: u8, light: bool) -> Color32 { if light { Color32::from_rgba_premultiplied(0, 0, 0, a) } else { Color32::from_rgba_premultiplied(a, a, a, a) } }
+pub fn panel2() -> Color32 { veil(if light() { 8 } else { 13 }, light()) }
+pub fn hl() -> Color32 { veil(if light() { 14 } else { 23 }, light()) }
+pub fn line() -> Color32 { veil(if light() { 22 } else { 28 }, light()) }
+pub fn grid() -> Color32 { veil(if light() { 10 } else { 14 }, light()) }
+/// stronger hairline (selected segment, hovered widget)
+pub fn edge() -> Color32 { veil(if light() { 38 } else { 46 }, light()) }
+pub fn fg() -> Color32 { pick(Color32::from_rgb(0xe8, 0xe8, 0xe8), Color32::from_rgb(0x1d, 0x1d, 0x1f), light()) }
+pub fn mu() -> Color32 { pick(Color32::from_rgb(0x9b, 0x9b, 0x9b), Color32::from_rgb(0x6e, 0x6e, 0x73), light()) }
+pub fn dim() -> Color32 { pick(Color32::from_rgb(0x6e, 0x6e, 0x6e), Color32::from_rgb(0x9a, 0x9a, 0xa0), light()) }
 /// opaque fill for labels painted over the chart
-pub const LABEL_BG: Color32 = Color32::from_rgb(0x26, 0x26, 0x28);
+pub fn label_bg() -> Color32 { pick(Color32::from_rgb(0x26, 0x26, 0x28), Color32::from_rgb(0xe8, 0xe8, 0xed), light()) }
+/// off-state track of switches and sliders
+pub fn track() -> Color32 { pick(Color32::from_rgb(0x2a, 0x31, 0x3b), Color32::from_rgb(0xd1, 0xd1, 0xd6), light()) }
+fn bg_c() -> Color32 { pick(Color32::from_rgb(0x16, 0x16, 0x17), Color32::WHITE, light()) }
+fn panel_c() -> Color32 { pick(Color32::from_rgb(0x1e, 0x1e, 0x20), Color32::from_rgb(0xf5, 0xf5, 0xf7), light()) }
 
 static NATIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Hosted in the SwiftUI window: egui leaves its backgrounds transparent and the native window
 /// (with its wallpaper tinting) shows through.
 pub fn set_native(on: bool) { NATIVE.store(on, Relaxed); }
 pub fn native() -> bool { NATIVE.load(Relaxed) }
-pub fn bg() -> Color32 { if native() { Color32::TRANSPARENT } else { BG_C } }
-pub fn panel() -> Color32 { if native() { Color32::TRANSPARENT } else { PANEL_C } }
+pub fn bg() -> Color32 { if native() { Color32::TRANSPARENT } else { bg_c() } }
+pub fn panel() -> Color32 { if native() { Color32::TRANSPARENT } else { panel_c() } }
 /// User-adjustable colors (Settings > Appearance), packed 0xRRGGBB; read every frame.
 static ACCENT_C: AtomicU32 = AtomicU32::new(0x4c9eeb);
 static UP_C: AtomicU32 = AtomicU32::new(0x30d158);
@@ -106,7 +118,7 @@ pub fn icon(p: &Painter, e: Exchange, rect: Rect, dim: bool) {
             let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
             p.add(egui::epaint::RectShape::filled(rect, rect.width() / 2.0, tint).with_texture(t.id(), uv));
         }
-        None => { p.circle_filled(rect.center(), rect.width() / 2.0, if dim { DIM } else { ex_color(e) }); }
+        None => { p.circle_filled(rect.center(), rect.width() / 2.0, if dim { self::dim() } else { ex_color(e) }); }
     }
 }
 
@@ -123,7 +135,7 @@ fn coin_fetcher() -> &'static std::sync::mpsc::Sender<(String, egui::Context)> {
         let (tx, rx) = std::sync::mpsc::channel::<(String, egui::Context)>();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("coin icon runtime");
-            let dir = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Library/Caches/TerminalOne/coins"));
+            let dir = terminal_one::sys::cache_dir().map(|d| d.join("coins"));
             while let Ok((sym, ctx)) = rx.recv() {
                 let path = dir.as_ref().map(|d| d.join(format!("{sym}.png")));
                 let bytes = match path.as_ref().and_then(|p| std::fs::read(p).ok()) {
@@ -167,8 +179,8 @@ pub fn coin_icon(ui: &egui::Ui, sym: &str, rect: Rect) {
     match tex {
         Some(id) => { p.add(egui::epaint::RectShape::filled(rect, rect.width() / 2.0, Color32::WHITE).with_texture(id, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)))); }
         None => {
-            p.circle_filled(rect.center(), rect.width() / 2.0, HL);
-            p.text(rect.center(), egui::Align2::CENTER_CENTER, sym.chars().next().unwrap_or('?'), prop(rect.height() * 0.55), MU);
+            p.circle_filled(rect.center(), rect.width() / 2.0, hl());
+            p.text(rect.center(), egui::Align2::CENTER_CENTER, sym.chars().next().unwrap_or('?'), prop(rect.height() * 0.55), mu());
         }
     }
 }
@@ -188,7 +200,7 @@ pub fn chevron(ui: &egui::Ui, rect: Rect, _: &egui::style::WidgetVisuals, open: 
     let c = rect.center();
     let (w, h) = (3.5, 2.0);
     let pts = if open { [c + egui::vec2(-w, h), c + egui::vec2(0.0, -h), c + egui::vec2(w, h)] } else { [c + egui::vec2(-w, -h), c + egui::vec2(0.0, h), c + egui::vec2(w, -h)] };
-    ui.painter().add(egui::Shape::line(pts.to_vec(), egui::Stroke::new(1.4, MU)));
+    ui.painter().add(egui::Shape::line(pts.to_vec(), egui::Stroke::new(1.4, mu())));
 }
 
 /// Secondary action as accent text (no box); underlined on hover.
@@ -199,14 +211,14 @@ pub fn link(ui: &mut egui::Ui, text: &str) -> egui::Response {
 }
 
 // ---------------------------------------------------------------- controls
-// Painted controls with one look: inset fields on bg(), accent for "on", 1px LINE borders.
+// Painted controls with one look: inset fields on bg(), accent for "on", 1px line() borders.
 
 /// iOS-style switch; returns true when toggled.
 pub fn toggle(ui: &mut egui::Ui, on: &mut bool) -> bool {
     let (r, resp) = ui.allocate_exact_size(egui::vec2(34.0, 19.0), egui::Sense::click());
     let t = ui.ctx().animate_bool(resp.id, *on);
     let p = ui.painter();
-    let track = Color32::from_rgb(0x2a, 0x31, 0x3b).lerp_to_gamma(accent(), t);
+    let track = track().lerp_to_gamma(accent(), t);
     p.rect_filled(r, 10, track);
     let x = egui::lerp((r.left() + 9.5)..=(r.right() - 9.5), t);
     p.circle_filled(egui::pos2(x, r.center().y), 7.5, Color32::WHITE);
@@ -217,10 +229,10 @@ pub fn toggle(ui: &mut egui::Ui, on: &mut bool) -> bool {
 
 /// Segmented pill group sized to its labels; returns true when the selection changed.
 pub fn segment(ui: &mut egui::Ui, labels: &[&str], sel: &mut usize) -> bool {
-    let gal: Vec<_> = labels.iter().map(|l| ui.painter().layout_no_wrap(l.to_string(), prop(12.0), FG)).collect();
+    let gal: Vec<_> = labels.iter().map(|l| ui.painter().layout_no_wrap(l.to_string(), prop(12.0), fg())).collect();
     let w: f32 = gal.iter().map(|g| g.size().x + 22.0).sum::<f32>() + 4.0;
     let (r, _) = ui.allocate_exact_size(egui::vec2(w, 26.0), egui::Sense::hover());
-    ui.painter().rect(r, 7, bg(), egui::Stroke::new(1.0, LINE), egui::StrokeKind::Inside);
+    ui.painter().rect(r, 7, bg(), egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside);
     let mut x = r.left() + 2.0;
     let mut changed = false;
     for (i, g) in gal.into_iter().enumerate() {
@@ -228,9 +240,9 @@ pub fn segment(ui: &mut egui::Ui, labels: &[&str], sel: &mut usize) -> bool {
         x = cell.right();
         let resp = ui.interact(cell, ui.id().with(("seg", labels[i])), egui::Sense::click());
         let on = *sel == i;
-        if on { ui.painter().rect_filled(cell, 5, HL); ui.painter().rect_stroke(cell, 5, egui::Stroke::new(1.0, Color32::from_rgba_premultiplied(46, 46, 46, 46)), egui::StrokeKind::Inside); }
-        else if resp.hovered() { ui.painter().rect_filled(cell, 5, HL.linear_multiply(0.5)); }
-        let col = if on { FG } else { MU };
+        if on { ui.painter().rect_filled(cell, 5, hl()); ui.painter().rect_stroke(cell, 5, egui::Stroke::new(1.0, edge()), egui::StrokeKind::Inside); }
+        else if resp.hovered() { ui.painter().rect_filled(cell, 5, hl().linear_multiply(0.5)); }
+        let col = if on { fg() } else { mu() };
         let g = ui.painter().layout_no_wrap(labels[i].to_string(), prop(12.0), col);
         ui.painter().galley(cell.center() - g.size() / 2.0, g, col);
         if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !on { *sel = i; changed = true; }
@@ -245,7 +257,7 @@ pub fn slider(ui: &mut egui::Ui, v: &mut f32, lo: f32, hi: f32, step: f32, fmt: 
     let f = ((*v - lo) / (hi - lo)).clamp(0.0, 1.0);
     let x = track.left() + track.width() * f;
     let p = ui.painter();
-    p.rect_filled(track, 2, Color32::from_rgb(0x2a, 0x31, 0x3b));
+    p.rect_filled(track, 2, self::track());
     p.rect_filled(egui::Rect::from_min_max(track.min, egui::pos2(x, track.max.y)), 2, accent());
     p.circle(egui::pos2(x, track.center().y), 7.0, Color32::WHITE, egui::Stroke::new(2.0, accent()));
     let mut changed = false;
@@ -255,7 +267,7 @@ pub fn slider(ui: &mut egui::Ui, v: &mut f32, lo: f32, hi: f32, step: f32, fmt: 
         if nv != *v { *v = nv; changed = true; }
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-    ui.add_sized(egui::vec2(48.0, 20.0), egui::Label::new(egui::RichText::new(fmt(*v)).font(mono(11.5)).color(FG)));
+    ui.add_sized(egui::vec2(48.0, 20.0), egui::Label::new(egui::RichText::new(fmt(*v)).font(mono(11.5)).color(fg())));
     changed
 }
 
@@ -264,8 +276,8 @@ pub fn num_field(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, 
     let (r, _) = ui.allocate_exact_size(egui::vec2(88.0, 24.0), egui::Sense::hover());
     let eid = ui.id().with(("num", id));
     let focused = ui.memory(|m| m.has_focus(eid));
-    ui.painter().rect(r, 5, bg(), egui::Stroke::new(1.0, if focused { accent() } else { LINE }), egui::StrokeKind::Inside);
-    let sw = ui.painter().text(r.right_center() - egui::vec2(8.0, 0.0), egui::Align2::RIGHT_CENTER, suffix, prop(11.0), DIM).width();
+    ui.painter().rect(r, 5, bg(), egui::Stroke::new(1.0, if focused { accent() } else { line() }), egui::StrokeKind::Inside);
+    let sw = ui.painter().text(r.right_center() - egui::vec2(8.0, 0.0), egui::Align2::RIGHT_CENTER, suffix, prop(11.0), dim()).width();
     let mut text = ui.data_mut(|d| d.get_temp::<String>(eid)).filter(|_| focused).unwrap_or_else(|| format!("{:.*}", decimals, v));
     let resp = ui.put(egui::Rect::from_min_max(egui::pos2(r.left() + 6.0, r.top() + 2.0), egui::pos2(r.right() - sw - 12.0, r.bottom() - 2.0)),
         egui::TextEdit::singleline(&mut text).id(eid).frame(egui::Frame::NONE).font(mono(12.0)).horizontal_align(egui::Align::RIGHT).vertical_align(egui::Align::Center));
@@ -287,8 +299,8 @@ pub fn setting_row(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnO
         ui.vertical(|ui| {
             ui.set_max_width(text_w);
             ui.spacing_mut().item_spacing.y = 2.0;
-            ui.label(egui::RichText::new(title).font(prop(12.5)).color(FG));
-            if !desc.is_empty() { ui.add(egui::Label::new(egui::RichText::new(desc).font(prop(10.5)).color(DIM)).wrap()); }
+            ui.label(egui::RichText::new(title).font(prop(12.5)).color(fg()));
+            if !desc.is_empty() { ui.add(egui::Label::new(egui::RichText::new(desc).font(prop(10.5)).color(dim())).wrap()); }
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
     });
@@ -297,9 +309,9 @@ pub fn setting_row(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnO
 /// Rounded group card for settings rows; rows are separated by hairlines.
 pub fn group(ui: &mut egui::Ui, title: &str, rows: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(10.0);
-    ui.label(egui::RichText::new(title.to_uppercase()).font(prop(10.5)).color(DIM));
+    ui.label(egui::RichText::new(title.to_uppercase()).font(prop(10.5)).color(dim()));
     ui.add_space(3.0);
-    egui::Frame::new().fill(PANEL2).corner_radius(8).stroke(egui::Stroke::new(1.0, LINE)).inner_margin(egui::Margin::symmetric(12, 4)).show(ui, |ui| {
+    egui::Frame::new().fill(panel2()).corner_radius(8).stroke(egui::Stroke::new(1.0, line())).inner_margin(egui::Margin::symmetric(12, 4)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         rows(ui);
     });
@@ -308,23 +320,26 @@ pub fn group(ui: &mut egui::Ui, title: &str, rows: impl FnOnce(&mut egui::Ui)) {
 /// Hairline between rows of a group.
 pub fn row_sep(ui: &mut egui::Ui) {
     let r = ui.available_rect_before_wrap();
-    ui.painter().hline(r.x_range(), r.top(), egui::Stroke::new(1.0, LINE));
+    ui.painter().hline(r.x_range(), r.top(), egui::Stroke::new(1.0, line()));
     ui.add_space(1.0);
 }
 
 /// Text tab: muted when idle, bright with an accent underline when selected, no fill.
 /// The one toggle style used for modes, timeframes, panel tabs and expiries.
 pub fn tab(ui: &mut egui::Ui, text: &str, selected: bool, size: f32) -> egui::Response {
-    let g = ui.painter().layout_no_wrap(text.to_string(), prop(size), FG);
+    let g = ui.painter().layout_no_wrap(text.to_string(), prop(size), fg());
     let (rect, resp) = ui.allocate_exact_size(g.size() + egui::vec2(12.0, 7.0), egui::Sense::click());
-    let col = if selected || resp.hovered() { FG } else { MU };
+    let col = if selected || resp.hovered() { fg() } else { mu() };
     let g = ui.painter().layout_no_wrap(text.to_string(), prop(size), col);
     ui.painter().galley(rect.center() - g.size() / 2.0, g, col);
     if selected { ui.painter().hline(egui::Rangef::new(rect.left() + 5.0, rect.right() - 5.0), rect.bottom() - 1.0, egui::Stroke::new(2.0, accent())); }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Numbers: Inter with tabular figures (columns of prices line up).
 pub fn mono(size: f32) -> FontId { FontId::monospace(size) }
+/// Headline numbers and headings: Inter Display, tabular figures.
+pub fn display(size: f32) -> FontId { FontId::new(size, FontFamily::Name("display".into())) }
 pub fn prop(size: f32) -> FontId { FontId::proportional(size) }
 
 /// Memory-map a system font for the life of the process: only the glyph pages actually used
@@ -337,6 +352,7 @@ fn map_font(path: &std::path::Path) -> Option<&'static [u8]> {
 }
 
 /// First PingFang.ttc under the system asset store (path contains a content hash).
+#[cfg(target_os = "macos")]
 fn pingfang() -> Option<&'static [u8]> {
     let root = std::path::Path::new("/System/Library/AssetsV2");
     for d in std::fs::read_dir(root).ok()?.flatten() {
@@ -356,26 +372,46 @@ pub fn install(ctx: &egui::Context) {
         fonts.font_data.insert(name.into(), Arc::new(fd));
         for f in families { fonts.families.entry(f.clone()).or_default().push(name.into()); }
     };
-    // Order matters: the first font with a glyph wins. SF first, CJK as fallback.
-    let mut primary: Vec<String> = vec![];
+    // Bundled Inter (assets/fonts, OFL) on every OS: UI text, tabular-figure numbers, display
+    // numbers. Order matters (first font with the glyph wins): bundled face first, then system
+    // CJK / Hangul fallbacks (10-20 MB each, not bundled), then egui's built-ins.
+    add("inter", include_bytes!("../../assets/fonts/Inter-Regular.ttf"), 0, &[]);
+    add("inter-num", include_bytes!("../../assets/fonts/InterNum-Regular.ttf"), 0, &[]);
+    add("inter-display", include_bytes!("../../assets/fonts/InterDisplayNum-Medium.ttf"), 0, &[]);
     let sys = |p: &str| map_font(std::path::Path::new(p));
-    if let Some(b) = sys("/System/Library/Fonts/SFNS.ttf") { add("sf", b, 0, &[]); primary.push("sf".into()); }
-    let mut mono_first: Vec<String> = vec![];
-    if let Some(b) = sys("/System/Library/Fonts/SFNSMono.ttf") { add("sfmono", b, 0, &[]); mono_first.push("sfmono".into()); }
-    // PingFang SC Regular is face 3 of PingFang.ttc; Hiragino Sans GB is the fallback
-    let cjk = if let Some(b) = pingfang() { add("cjk", b, 3, &[]); true }
-        else if let Some(b) = sys("/System/Library/Fonts/Hiragino Sans GB.ttc") { add("cjk", b, 0, &[]); true } else { false };
-    let p = fonts.families.entry(FontFamily::Proportional).or_default();
-    for (i, n) in primary.iter().enumerate() { p.insert(i, n.clone()); }
-    if cjk { p.insert(primary.len(), "cjk".into()); }
-    let m = fonts.families.entry(FontFamily::Monospace).or_default();
-    for (i, n) in mono_first.iter().enumerate() { m.insert(i, n.clone()); }
-    if cjk { m.push("cjk".into()); }
+    #[cfg(target_os = "macos")]
+    // the system UI font first for symbols Inter lacks (▾ ✓ ⚠); PingFang SC Regular is face 3 of PingFang.ttc; Hiragino Sans GB if it is missing
+    let fall = [(sys("/System/Library/Fonts/SFNS.ttf"), 0), (pingfang(), 3), (sys("/System/Library/Fonts/Hiragino Sans GB.ttc"), 0), (sys("/System/Library/Fonts/AppleSDGothicNeo.ttc"), 0)];
+    #[cfg(windows)]
+    let fall = {
+        let dir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into()) + "\\Fonts\\";
+        // Segoe UI + Segoe UI Symbol for symbols Inter lacks; Microsoft YaHei, Yu Gothic, Malgun Gothic
+        [(sys(&(dir.clone() + "segoeui.ttf")), 0), (sys(&(dir.clone() + "seguisym.ttf")), 0), (sys(&(dir.clone() + "msyh.ttc")), 0), (sys(&(dir.clone() + "YuGothR.ttc")), 0), (sys(&(dir + "malgun.ttf")), 0)]
+    };
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let fall = [(sys("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"), 0), (sys("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"), 0)];
+    let fallbacks: Vec<String> = fall.into_iter().enumerate().filter_map(|(i, (b, face))| b.map(|b| { let n = format!("fb{i}"); add(&n, b, face, &[]); n })).collect();
+    // `mono()` is the numbers family: Inter with tabular figures, not a monospaced face
+    for (fam, first) in [(FontFamily::Proportional, "inter"), (FontFamily::Monospace, "inter-num"), (FontFamily::Name("display".into()), "inter-display")] {
+        let v = fonts.families.entry(fam).or_default();
+        for (i, n) in std::iter::once(first.to_string()).chain(fallbacks.iter().cloned()).enumerate() { v.insert(i, n); }
+    }
     ctx.set_fonts(fonts);
 
-    let mut style = (*ctx.global_style()).clone();
+    for t in [egui::Theme::Dark, egui::Theme::Light] {
+        let base = ctx.style_of(t);
+        set_light(t == egui::Theme::Light);
+        ctx.set_style_of(t, style(&base, t == egui::Theme::Light));
+    }
+    set_light(false);
+    load_icons(ctx);
+}
+
+/// Our style on top of egui's for one theme; palette functions must already answer for `light`.
+fn style(base: &egui::Style, light: bool) -> egui::Style {
+    let mut style = base.clone();
     style.text_styles = [
-        (TextStyle::Heading, prop(15.0)),
+        (TextStyle::Heading, display(15.0)),
         (TextStyle::Body, prop(12.5)),
         (TextStyle::Button, prop(12.5)),
         (TextStyle::Small, prop(11.0)),
@@ -389,15 +425,15 @@ pub fn install(ctx: &egui::Context) {
     style.spacing.scroll = egui::style::ScrollStyle::floating();
     style.animation_time = 0.12;
     let v = &mut style.visuals;
-    *v = egui::Visuals::dark();
-    v.override_text_color = Some(FG);
+    *v = if light { egui::Visuals::light() } else { egui::Visuals::dark() };
+    v.override_text_color = Some(fg());
     v.panel_fill = panel();
-    v.window_fill = PANEL2;
+    v.window_fill = panel2();
     v.extreme_bg_color = bg();
-    v.faint_bg_color = PANEL2;
+    v.faint_bg_color = panel2();
     v.selection.bg_fill = accent().gamma_multiply(0.35);
-    v.selection.stroke.color = FG;
-    v.window_stroke.color = LINE;
+    v.selection.stroke.color = fg();
+    v.window_stroke.color = line();
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
         w.corner_radius = 5.into();
         w.expansion = 0.0;
@@ -405,27 +441,23 @@ pub fn install(ctx: &egui::Context) {
     v.window_corner_radius = 10.into();
     v.menu_corner_radius = 8.into();
     // soft, wide shadows: popups and dialogs read as layers, not boxes
-    v.window_shadow = egui::Shadow { offset: [0, 8], blur: 28, spread: 0, color: Color32::from_black_alpha(140) };
-    v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(120) };
-    v.window_stroke = egui::Stroke::new(1.0, LINE);
-    v.widgets.open.weak_bg_fill = HL;
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, Color32::from_rgba_premultiplied(46, 46, 46, 46));
+    v.window_shadow = egui::Shadow { offset: [0, 8], blur: 28, spread: 0, color: Color32::from_black_alpha(if light { 40 } else { 140 }) };
+    v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(if light { 32 } else { 120 }) };
+    v.window_stroke = egui::Stroke::new(1.0, line());
+    v.widgets.open.weak_bg_fill = hl();
+    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, edge());
     v.widgets.active.bg_stroke = egui::Stroke::new(1.0, accent());
     v.striped = false;
-    v.widgets.noninteractive.bg_stroke.color = LINE;
-    v.widgets.noninteractive.fg_stroke.color = MU;
-    v.widgets.inactive.weak_bg_fill = PANEL2;
-    v.widgets.inactive.bg_fill = PANEL2;
-    // a hairline so checkboxes and fields stay visible on PANEL2 surfaces (dialogs)
-    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, LINE);
-    v.widgets.hovered.weak_bg_fill = HL;
-    v.widgets.hovered.bg_fill = HL;
-    v.widgets.active.weak_bg_fill = HL;
-    // always dark, whatever the system appearance (a light system theme would otherwise swap
-    // in egui's light widget visuals under our dark panels)
-    ctx.set_theme(egui::ThemePreference::Dark);
-    ctx.set_style_of(egui::Theme::Dark, style);
-    load_icons(ctx);
+    v.widgets.noninteractive.bg_stroke.color = line();
+    v.widgets.noninteractive.fg_stroke.color = mu();
+    v.widgets.inactive.weak_bg_fill = panel2();
+    v.widgets.inactive.bg_fill = panel2();
+    // a hairline so checkboxes and fields stay visible on panel2() surfaces (dialogs)
+    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, line());
+    v.widgets.hovered.weak_bg_fill = hl();
+    v.widgets.hovered.bg_fill = hl();
+    v.widgets.active.weak_bg_fill = hl();
+    style
 }
 
 #[cfg(test)]

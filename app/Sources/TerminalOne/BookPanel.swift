@@ -219,7 +219,7 @@ struct QuantPanel: View {
                     .frame(height: 6)
                     row(L("Bids / asks ±0.5%"), "$\(Fmt.big(q.book_bid_usd)) / $\(Fmt.big(q.book_ask_usd))", nil)
                 }
-                group(L("Carry"), L("Predicted funding, annualized; basis = perp over spot")) {
+                group(L("Carry"), L("Predicted funding, annualized; basis: perp over spot")) {
                     ForEach(q.carry.sorted { ($0.funding_apr ?? 0) > ($1.funding_apr ?? 0) }) { c in
                         HStack(spacing: 6) {
                             VenueIcon(ex: c.ex, size: 13)

@@ -289,12 +289,10 @@ impl Engine {
 
         let stats_m = self.stats.clone();
         rt.spawn(async move {
-            let pid = std::process::id().to_string();
             let mut tick = tokio::time::interval(Duration::from_secs(5));
             loop {
                 tick.tick().await;
-                let out = tokio::process::Command::new("ps").args(["-o", "rss=", "-p", &pid]).output().await;
-                let mb = out.ok().and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok()).map(|kb| kb / 1024);
+                let mb = tokio::task::spawn_blocking(terminal_one::sys::rss_mb).await.ok().flatten();
                 stats_m.lock().unwrap().rss_mb = mb;
             }
         });
@@ -865,8 +863,7 @@ impl Engine {
 }
 
 fn cache_path(ex: Exchange, sub: &Sub, tf: u32) -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(std::path::PathBuf::from(home).join("Library/Caches/TerminalOne/history")
+    Some(terminal_one::sys::cache_dir()?.join("history")
         .join(&sub.base).join(format!("{ex:?}-{:?}-{tf}m.json", sub.market)))
 }
 

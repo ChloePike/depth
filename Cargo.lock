@@ -4216,6 +4216,7 @@ dependencies = [
  "pollster 0.4.0",
  "raw-window-handle",
  "t1-ui",
+ "terminal-one",
  "wgpu",
 ]
 
@@ -4275,6 +4276,7 @@ dependencies = [
  "sha2",
  "sha3",
  "tokio",
+ "windows-sys 0.61.2",
  "yawc",
 ]
 
