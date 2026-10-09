@@ -346,6 +346,23 @@ impl Engine {
             }
         });
 
+        // live last / 24h change between REST refreshes: Binance futures leads `all_tickers`, so its
+        // all-market mini ticker (changed symbols, 1/s, no weight) updates the same rows in place
+        // ponytail: always on (~a few KB/s deflated); gate on the picker being open if bandwidth matters
+        let tickers = self.tickers.clone();
+        rt.spawn(terminal_one::ws::run(terminal_one::ws::Spec::new("binance tickers", "wss://fstream.binance.com/market/ws/!miniTicker@arr"), move |f| {
+            let terminal_one::ws::Frame::Text(s) = f else { return };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else { return };
+            let num = terminal_one::num;
+            let upd: HashMap<&str, &serde_json::Value> = v.as_array().into_iter().flatten()
+                .filter_map(|x| Some((x["s"].as_str()?.strip_suffix("USDT")?, x))).collect();
+            for t in tickers.lock().unwrap().iter_mut() {
+                let Some(x) = upd.get(t.base.as_str()) else { continue };
+                let (c, o) = (num(&x["c"]), num(&x["o"]));
+                if c > 0.0 && o > 0.0 { t.last = c; t.chg_pct = (c / o - 1.0) * 100.0; t.high = num(&x["h"]); t.low = num(&x["l"]); }
+            }
+        }));
+
         let agg = self.agg.clone();
         rt.spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(1));

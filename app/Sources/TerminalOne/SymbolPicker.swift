@@ -115,7 +115,7 @@ struct SymbolPicker: View {
             // refresh while open: last / change / volume move
             while !Task.isCancelled {
                 if let r = store.call("tickers", as: TickersReply.self) { tickers = r.tickers }
-                try? await Task.sleep(for: .seconds(3))
+                try? await Task.sleep(for: .seconds(1))
             }
         }
     }
