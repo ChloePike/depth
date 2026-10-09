@@ -99,6 +99,16 @@ Bug reports and feature requests: [open an issue](https://github.com/ChloePike/d
 Pull requests are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). Security problems: see [SECURITY.md](SECURITY.md),
 not a public issue.
 
+## Support
+
+If Depth is useful to you, donations are welcome:
+
+| Chain | Address |
+|---|---|
+| EVM (Ethereum, Arbitrum, Base, BSC, ...) | `0x26560E832f3a012c2Bacab54e813A32bD31CA50C` |
+| Solana | `AVtNTi7AJiax7m17jWMRvEYLR2Ab9WyqqrUmriLVHnoq` |
+| Bitcoin | `bc1qq23vdqqjd32dw0887n4t5h06sxsr9dsg5ar4hx` |
+
 ## License
 
 Licensed under the [GNU General Public License v3.0](LICENSE) or (at your option) any later version.
