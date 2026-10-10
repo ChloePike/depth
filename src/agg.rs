@@ -452,7 +452,7 @@ impl Agg {
                 let signed = if *side == Side::Buy { *qty } else { -*qty };
                 trades.push_back(Tick { ts, ex, market: mk, px: *px, qty: *qty, side: *side });
                 if trades.len() > TAPE_CAP { trades.pop_front(); }
-                // the cross-venue bar is in USD; the venue bar stays in native quote
+                // the cross-venue bar is in USDT; the venue bar stays in native quote
                 v.last = Some(*px);
                 v.cvd += signed;
                 let total = cvd.entry(mk).or_default();
@@ -535,7 +535,7 @@ impl Agg {
         v.fresh >= newest - STALE_MS
     }
 
-    /// Composite USD price for `market`: live venue mids weighted by each venue's volume over the
+    /// Composite USDT price for `market`: live venue mids weighted by each venue's volume over the
     /// last INDEX_MIN minutes. Stable across venues that sit a few bp apart, unlike a median.
     pub fn index_price(&self, market: Market) -> Option<f64> {
         let (mut num, mut den) = (0.0, 0.0);
@@ -544,7 +544,7 @@ impl Agg {
         for ((e, m), v) in self.venues.iter().filter(|((_, m), v)| *m == market && self.live(v, market)) {
             let Some(p) = v.mid() else { continue };
             let w = self.series.get(&(Some(*e), market)).map(|s| s.bars.iter().rev().take_while(|b| b.t > since).map(|b| b.vol).sum::<f64>()).unwrap_or(0.0).max(1e-9);
-            num += p * self.usd(*e, *m) * w;
+            num += p * self.usdt(*e, *m) * w;
             den += w;
         }
         (den > 0.0).then(|| num / den)
@@ -584,13 +584,17 @@ impl Agg {
     /// Set the USD value of one unit of `quote` (fed from a live USDT/USD book).
     pub fn set_fx(&mut self, quote: &'static str, usd: f64) { if usd.is_finite() && usd > 0.0 { self.fx.insert(quote, usd); } }
 
-    /// Multiplier that converts a venue's native prices to USD.
-    pub fn usd(&self, ex: Exchange, market: Market) -> f64 { self.fx.get(quote_of(ex, market)).copied().unwrap_or(1.0) }
+    /// Multiplier that converts a venue's native prices to USDT, the unit of every cross-venue view
+    /// (the UI quotes BASE/USDT and most volume is USDT, so the index lines up with USDT trades).
+    pub fn usdt(&self, ex: Exchange, market: Market) -> f64 { self.fx.get(quote_of(ex, market)).copied().unwrap_or(1.0) / self.usdt_usd() }
 
-    /// Median spot/margin mid across live venues, in USD.
+    /// USD value of one USDT (1.0 until the live USDT/USD rate arrives).
+    pub fn usdt_usd(&self) -> f64 { self.fx.get("USDT").copied().unwrap_or(1.0) }
+
+    /// Median spot/margin mid across live venues, in USDT.
     pub fn spot_mid(&self) -> Option<f64> {
         median(self.venues.iter().filter(|((_, m), v)| matches!(m, Market::Spot | Market::Margin) && self.live(v, *m))
-            .filter_map(|((e, m), v)| Some(v.mid()? * self.usd(*e, *m))).collect())
+            .filter_map(|((e, m), v)| Some(v.mid()? * self.usdt(*e, *m))).collect())
     }
 
     /// Perp mid vs spot mid in basis points (mid, not mark: history basis is close vs close, so
@@ -598,9 +602,9 @@ impl Agg {
     /// median spot. None while the perp book is stale.
     pub fn basis_bps(&self, ex: Exchange) -> Option<f64> {
         let pv = self.venues.get(&(ex, Market::Perp)).filter(|v| self.live(v, Market::Perp))?;
-        let perp = pv.mid().or(pv.mark)? * self.usd(ex, Market::Perp);
+        let perp = pv.mid().or(pv.mark)? * self.usdt(ex, Market::Perp);
         let spot = [Market::Spot, Market::Margin].iter()
-            .find_map(|m| Some(self.venues.get(&(ex, *m)).filter(|v| self.live(v, *m))?.mid()? * self.usd(ex, *m)))
+            .find_map(|m| Some(self.venues.get(&(ex, *m)).filter(|v| self.live(v, *m))?.mid()? * self.usdt(ex, *m)))
             .or_else(|| self.spot_mid())?;
         Some((perp / spot - 1.0) * 1e4)
     }
@@ -614,7 +618,7 @@ impl Agg {
     fn weighted(&self, f: impl Fn(&Venue) -> Option<f64>) -> Option<f64> {
         let (mut num, mut den) = (0.0, 0.0);
         for ((e, m), v) in self.venues.iter().filter(|((_, m), _)| *m == Market::Perp) {
-            if let (Some(x), Some(w)) = (f(v), v.oi_usd()) { let w = w * self.usd(*e, *m); num += x * w; den += w; }
+            if let (Some(x), Some(w)) = (f(v), v.oi_usd()) { let w = w * self.usdt(*e, *m); num += x * w; den += w; }
         }
         (den > 0.0).then(|| num / den)
     }
@@ -622,15 +626,15 @@ impl Agg {
     /// Total open interest in base units and USD across perp venues.
     pub fn oi_total(&self) -> (f64, f64) {
         self.venues.iter().filter(|((_, m), _)| *m == Market::Perp)
-            .fold((0.0, 0.0), |(b, u), ((e, m), v)| (b + v.oi.unwrap_or(0.0), u + v.oi_usd().unwrap_or(0.0) * self.usd(*e, *m)))
+            .fold((0.0, 0.0), |(b, u), ((e, m), v)| (b + v.oi.unwrap_or(0.0), u + v.oi_usd().unwrap_or(0.0) * self.usdt(*e, *m)))
     }
 
     pub fn cvd_total(&self, market: Market) -> f64 { self.cvd.get(&market).copied().unwrap_or(0.0) }
 
-    /// Cross-venue mid in USD: the composite index (see `index_price`).
+    /// Cross-venue mid in USDT: the composite index (see `index_price`).
     pub fn mid(&self, market: Market) -> Option<f64> { self.index_price(market) }
 
-    /// Aggregated book for `market` in USD: every venue's levels are converted with `usd()` before
+    /// Aggregated book for `market` in USDT: every venue's levels are converted with `usdt()` before
     /// merging (USDT/USD/USDC books otherwise cross by a few bp), then bids binned down and asks
     /// binned up, within `range` of mid.
     /// ponytail: USDC is taken as 1.0 USD unless `set_fx("USDC", ..)` is fed.
@@ -648,7 +652,7 @@ impl Agg {
         let mut bids: std::collections::BTreeMap<i64, Level> = Default::default();
         let mut asks: std::collections::BTreeMap<i64, Level> = Default::default();
         for ((ex, m), v) in self.venues.iter().filter(|((e, m), v)| *m == market && keep(*e) && self.live(v, market)) {
-            let mut k = self.usd(*ex, *m);
+            let mut k = self.usdt(*ex, *m);
             if align {
                 // a crossed or one-sided book has no meaningful mid: leave it out of the aligned view
                 let Some(vm) = v.book_mid() else { continue };
@@ -714,15 +718,15 @@ impl Agg {
     }
 
     /// Per-venue perp basis for bars that lack it (history): perp close vs the venue's own spot
-    /// close at the same minute, else the cross-venue spot close, both in USD.
+    /// close at the same minute, else the cross-venue spot close, both in USDT.
     fn fill_basis(&mut self) {
         let spot: HashMap<(Option<Exchange>, i64), f64> = self.series.iter()
             .filter(|((_, m), _)| *m == Market::Spot)
             .flat_map(|((e, m), s)| {
-                let k = e.map(|e| self.usd(e, *m)).unwrap_or(1.0);
+                let k = e.map(|e| self.usdt(e, *m)).unwrap_or(1.0);
                 s.bars.iter().map(move |b| ((*e, b.t), b.c * k))
             }).collect();
-        let fx: HashMap<Exchange, f64> = Exchange::ALL.iter().map(|e| (*e, self.usd(*e, Market::Perp))).collect();
+        let fx: HashMap<Exchange, f64> = Exchange::ALL.iter().map(|e| (*e, self.usdt(*e, Market::Perp))).collect();
         for ((e, m), s) in self.series.iter_mut() {
             let (Some(e), Market::Perp) = (e, m) else { continue };
             for b in s.bars.iter_mut().filter(|b| b.basis_bps.is_none() && b.c > 0.0) {
@@ -738,7 +742,7 @@ impl Agg {
     /// ponytail: live bars append trades in arrival order instead of the median; fine at 1m.
     pub fn rebuild_agg(&mut self, market: Market) {
         let venues: Vec<(f64, Vec<&Bar>)> = self.series.iter()
-            .filter_map(|((e, m), s)| Some((self.usd((*e)?, market), s.bars.iter().collect())).filter(|_| *m == market)).collect();
+            .filter_map(|((e, m), s)| Some((self.usdt((*e)?, market), s.bars.iter().collect())).filter(|_| *m == market)).collect();
         let out = combine(venues);
         if let Some(last) = out.last() { self.cvd.insert(market, last.cvd); }
         let s = self.series.entry((None, market)).or_default();
@@ -754,7 +758,7 @@ impl Agg {
 
     /// Derive basis and the cross-venue bars for timeframe `tf` from its venue bars.
     pub fn finish_history_tf(&mut self, tf: u32) {
-        let fx: HashMap<Exchange, f64> = Exchange::ALL.iter().map(|e| (*e, self.usd(*e, Market::Perp))).collect();
+        let fx: HashMap<Exchange, f64> = Exchange::ALL.iter().map(|e| (*e, self.usdt(*e, Market::Perp))).collect();
         let live_oi: HashMap<Exchange, f64> = self.venues.iter().filter(|((_, m), _)| *m == Market::Perp).filter_map(|((e, _), v)| Some((*e, v.oi?))).collect();
         let Some(set) = self.tf.get_mut(&tf) else { return };
         // same rule as the 1m series: no OI history -> flat at the live value, so no step
@@ -782,12 +786,12 @@ impl Agg {
         set.agg.insert(Market::Perp, perp);
     }
 
-    /// One venue's per-minute premium over the composite, in bp: its close (USD) against the
+    /// One venue's per-minute premium over the composite, in bp: its close (USDT) against the
     /// cross-venue close of the same minute.
     /// ponytail: converts with today's FX rate, fine while USDT/USD moves a few bp a day.
     pub fn premium_bps(&self, ex: Exchange, market: Market) -> Vec<(i64, f64)> {
         let (Some(v), Some(x)) = (self.series.get(&(Some(ex), market)), self.series.get(&(None, market))) else { return vec![] };
-        let k = self.usd(ex, market);
+        let k = self.usdt(ex, market);
         let idx: HashMap<i64, f64> = x.bars.iter().filter(|b| b.c > 0.0).map(|b| (b.t, b.c)).collect();
         // minutes with a trade only: a quiet venue's carried-forward close is not a price
         v.bars.iter().filter(|b| b.c > 0.0 && b.vol > 0.0).filter_map(|b| Some((b.t, (b.c * k / idx.get(&b.t)? - 1.0) * 1e4))).collect()
@@ -938,6 +942,9 @@ mod tests {
         assert!(crossed(&a));
         a.set_fx("USDT", 0.9995);
         assert!(!crossed(&a));
+        // the cross-venue unit is USDT: USDT venues pass through, USD venues are scaled up
+        assert_eq!(a.usdt(Exchange::Binance, Market::Perp), 1.0);
+        assert!((a.usdt(Exchange::Kraken, Market::Perp) - 1.0 / 0.9995).abs() < 1e-12);
     }
 
     #[test]

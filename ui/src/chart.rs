@@ -606,7 +606,7 @@ impl Chart {
                 pos2(fr.x(i0f + g.cols as f32 - 1.0) + self.bar_w / 2.0, y(g.lo as f64 * bin - bin / 2.0)));
             painter.with_clip_rect(main_plot).image(tex, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         };
-        // heatmap (cross-venue book, USD) behind candles
+        // heatmap (cross-venue book, USDT) behind candles
         if self.heat && self.src.is_none() {
             if let Some(h) = a.heat.get(&smarket) {
                 self.cache.update(h, self.tf, smarket);
@@ -914,14 +914,14 @@ impl Chart {
             }
         }
 
-        // mark price: the charted venue's, or the OI-weighted mark across perp venues (USD) on the aggregate
+        // mark price: the charted venue's, or the OI-weighted mark across perp venues (USDT) on the aggregate
         if self.mark && smarket == Market::Perp {
             let mark = match self.src {
                 Some(e) => a.venues.get(&(e, Market::Perp)).and_then(|v| v.mark),
                 None => {
                     let (mut num, mut den) = (0.0, 0.0);
                     for ((e, m), v) in a.venues.iter().filter(|((_, m), _)| *m == Market::Perp) {
-                        if let (Some(mk), Some(oi)) = (v.mark, v.oi) { let w = oi.max(1e-9); num += mk * a.usd(*e, *m) * w; den += w; }
+                        if let (Some(mk), Some(oi)) = (v.mark, v.oi) { let w = oi.max(1e-9); num += mk * a.usdt(*e, *m) * w; den += w; }
                     }
                     (den > 0.0).then(|| num / den)
                 }

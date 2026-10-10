@@ -274,13 +274,13 @@ impl App {
                 return Ok(self.book.native_levels(&self.eng.agg.lock().unwrap(), self.mode, &scope, n));
             }
             "venue_share" => {
-                // per venue: resting depth within +-1% of its own mid (USD) and traded volume over the window
+                // per venue: resting depth within +-1% of its own mid (USDT) and traded volume over the window
                 let a = self.eng.agg.lock().unwrap();
                 let m = match self.mode { Market::Margin | Market::Option => Market::Spot, m => m };
                 let mins = v["minutes"].as_u64().unwrap_or(60).clamp(1, 1440) as usize;
                 let mut rows: Vec<Value> = a.venues.iter().filter(|((_, vm), _)| *vm == m).filter_map(|((e, vm), ven)| {
                     let mid = ven.mid()?;
-                    let k = a.usd(*e, *vm);
+                    let k = a.usdt(*e, *vm);
                     let (lo, hi) = (mid * 0.99, mid * 1.01);
                     let bid: f64 = ven.book.bids().take_while(|(p, _)| *p >= lo).map(|(p, q)| p * q * k).sum();
                     let ask: f64 = ven.book.asks().take_while(|(p, _)| *p <= hi).map(|(p, q)| p * q * k).sum();

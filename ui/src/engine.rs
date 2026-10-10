@@ -310,13 +310,13 @@ impl Engine {
                     let bars = |m: Market| a.series.get(&(None, m)).map(|s| s.bars.iter().cloned().collect::<Vec<_>>()).unwrap_or_default();
                     let (perp, spot) = (bars(Market::Perp), bars(Market::Spot));
                     let trades: Vec<(i64, f64, bool)> = a.trades.iter().filter(|t| t.market == Market::Perp)
-                        .map(|t| (t.ts, t.px * t.qty * a.usd(t.ex, t.market), t.side == terminal_one::Side::Buy)).collect();
+                        .map(|t| (t.ts, t.px * t.qty * a.usdt(t.ex, t.market), t.side == terminal_one::Side::Buy)).collect();
                     let index = a.mid(Market::Perp);
                     let dislocation: Vec<(String, f64)> = a.venues.iter().filter(|((_, m), v)| *m == Market::Perp && a.live(v, *m))
                         .filter_map(|((e, m), v)| {
                             // measured against the venue's own normal premium (USD vs USDT perps sit a few bp apart
                             // all day), and only when that move is far outside its usual noise
-                            let now_bp = (v.mid()? * a.usd(*e, *m) / index? - 1.0) * 1e4;
+                            let now_bp = (v.mid()? * a.usdt(*e, *m) / index? - 1.0) * 1e4;
                             let hist: Vec<f64> = a.premium_bps(*e, *m).iter().rev().take(60).map(|x| x.1).collect();
                             let (med, sd) = terminal_one::quant::robust(&hist)?;
                             ((now_bp - med).abs() >= 5.0 * sd.max(1.0)).then(|| (format!("{e:?}"), now_bp - med))

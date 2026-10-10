@@ -9,7 +9,7 @@ fn bp(x: Option<f64>) -> String { x.map(|v| format!("{:+.4}", v * 1e4)).unwrap_o
 fn f(x: Option<f64>, d: usize) -> String { x.map(|v| format!("{v:.d$}")).unwrap_or("-".into()) }
 
 fn print(a: &Agg, base: &str) {
-    println!("\n==== {base} perps ====  (funding in bp per hour, basis in bp vs spot, USDT = {:.5} USD)", a.usd(Exchange::Binance, Market::Perp));
+    println!("\n==== {base} perps ====  (funding in bp per hour, basis in bp vs spot, USDT = {:.5} USD)", a.usdt_usd());
     println!("{:<12} {:>11} {:>10} {:>9} {:>12} {:>9} {:>10} {:>7}", "venue", "mark", "funding/h", "ann.%", "OI", "OI $M", "basis bp", "L/S");
     let mut perps: Vec<_> = a.venues.iter().filter(|((_, m), _)| *m == Market::Perp).collect();
     perps.sort_by(|x, y| y.1.oi_usd().unwrap_or(0.0).total_cmp(&x.1.oi_usd().unwrap_or(0.0)));
@@ -185,15 +185,15 @@ async fn main() {
             if cross_bp > 15.0 {
                 bad.push(format!("aggregated {market:?} book crossed by {cross_bp:.1} bp: bid {} > ask {}", b.px, k.px));
                 for ((e, m), v) in agg.venues.iter().filter(|((_, m), _)| *m == market) {
-                    let u = agg.usd(*e, *m);
+                    let u = agg.usdt(*e, *m);
                     if let (Some(bb), Some(ba)) = (v.book.best_bid(), v.book.best_ask()) {
-                        println!("  {e:?} {m:?} top in USD: {:.2} / {:.2}  (native {} / {}, book ts age {} ms)", bb.0 * u, ba.0 * u, bb.0, ba.0, now_ms() - v.ts);
+                        println!("  {e:?} {m:?} top in USDT: {:.2} / {:.2}  (native {} / {}, book ts age {} ms)", bb.0 * u, ba.0 * u, bb.0, ba.0, now_ms() - v.ts);
                     }
                 }
             }
         }
     }
-    if agg.usd(Exchange::Binance, Market::Perp) == 1.0 { bad.push("no USDT/USD rate received".into()); }
+    if agg.usdt_usd() == 1.0 { bad.push("no USDT/USD rate received".into()); }
     let perps = agg.venues.keys().filter(|(_, m)| *m == Market::Perp).count();
     if perps < 9 { bad.push(format!("only {perps} perp venues reported")); }
     if bad.is_empty() { println!("\nOK"); } else { for b in &bad { println!("FAIL {b}"); } std::process::exit(1); }
