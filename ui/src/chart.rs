@@ -2,8 +2,8 @@
 //! stacked sub-panes (volume, CVD, OI, funding predicted + settled, basis, long/short).
 use super::{fmt_px, t, theme::*};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Pos2, Rect, RichText, Sense, Stroke, Ui};
-use terminal_one::agg::{Agg, Bar, Heatmap};
-use terminal_one::{Exchange, Market};
+use depth::agg::{Agg, Bar, Heatmap};
+use depth::{Exchange, Market};
 
 const AXIS_W: f32 = 74.0;
 const TIME_H: f32 = 20.0;
@@ -213,7 +213,7 @@ pub fn resample(bars: &[Bar], tf: i64) -> Vec<Bar> {
     out
 }
 
-fn nice(x: f64) -> f64 { terminal_one::agg::nice(x.max(1e-12)) }
+fn nice(x: f64) -> f64 { depth::agg::nice(x.max(1e-12)) }
 
 /// Finite min/max of `vals`, widened to at least ±0.1% of its magnitude (a single bar's high and
 /// low can differ only by float noise), then padded by `pad` of the span.
@@ -451,7 +451,7 @@ impl LiqCache {
 /// aggregated (index) chart, the tightest venue half-spread around the index (the same top the
 /// mid-aligned aggregated book shows). Display only.
 fn bid_ask(a: &Agg, src: Option<Exchange>, m: Market, index: f64) -> Option<(f64, f64)> {
-    let top = |v: &terminal_one::agg::Venue| match (v.book.best_bid(), v.book.best_ask()) {
+    let top = |v: &depth::agg::Venue| match (v.book.best_bid(), v.book.best_ask()) {
         (Some(b), Some(k)) => Some((b.0, k.0)),
         _ => v.bbo.map(|[b, _, k, _]| (b, k)),
     }.filter(|(b, k)| *b > 0.0 && k > b);
@@ -748,7 +748,7 @@ impl Chart {
         }
         // expected move: EWMA volatility of 1m returns, widened with sqrt(time) over the next 30 bars
         if self.cone {
-            if let (Some(vm), Some(lb)) = (terminal_one::quant::vol_model(&raw), bars.last()) {
+            if let (Some(vm), Some(lb)) = (depth::quant::vol_model(&raw), bars.last()) {
                 let n = 30;
                 let x0 = fr.x((bars.len() - 1) as f32);
                 let at = |k: usize, d: f64| { let s = vm.sigma_1m * ((k as i64 * self.tf) as f64).sqrt(); pos2(fr.x((bars.len() - 1 + k) as f32), y(lb.c * (1.0 + d * s))) };
@@ -901,7 +901,7 @@ impl Chart {
         let lab = Rect::from_min_size(pos2(main.right() + 2.0, ly - 10.0), vec2(AXIS_W - 4.0, 34.0));
         painter.rect_filled(lab, 3, lc);
         painter.text(pos2(lab.left() + 6.0, ly), Align2::LEFT_CENTER, fmt_px(last.c), mono(11.5), Color32::WHITE);
-        let left_ms = last.t + self.tf * 60_000 - terminal_one::now_ms();
+        let left_ms = last.t + self.tf * 60_000 - depth::now_ms();
         painter.text(pos2(lab.left() + 6.0, ly + 15.0), Align2::LEFT_CENTER, countdown(left_ms), mono(10.5), Color32::from_white_alpha(210));
         if let (Some((bid, ask)), Some(bx)) = (ba, ba_rect) {
             let (ka, kb) = (t("tr.ask"), t("tr.bid"));
@@ -1362,7 +1362,7 @@ impl Prem { fn dev(&self) -> f64 { self.hover.map_or(0.0, |v| v - self.usual) } 
 fn premium_lines(a: &Agg, market: Market, vis: &[Bar], ms: i64, hk: Option<usize>) -> Vec<Prem> {
     let mut out: Vec<Prem> = a.venues.keys().filter(|(_, m)| *m == market).filter_map(|&(e, m)| {
         let p = a.premium_bps(e, m);
-        let (usual, sd) = terminal_one::quant::robust(&p.iter().map(|x| x.1).collect::<Vec<_>>())?;
+        let (usual, sd) = depth::quant::robust(&p.iter().map(|x| x.1).collect::<Vec<_>>())?;
         let map: std::collections::BTreeMap<i64, f64> = p.into_iter().collect();
         let vals: Vec<Option<f64>> = vis.iter().map(|b| {
             let (n, sum) = map.range(b.t..b.t + ms).fold((0usize, 0.0), |acc, (_, v)| (acc.0 + 1, acc.1 + v));

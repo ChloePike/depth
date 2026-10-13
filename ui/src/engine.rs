@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::collections::VecDeque;
-use terminal_one::trade::{self, Balance, Keys, Mode, OpenOrder, OrderReq, Position, Rules};
-use terminal_one::{agg::Agg, ex, now_ms, Event, Exchange, History, Market, Msg, Sub};
+use depth::trade::{self, Balance, Keys, Mode, OpenOrder, OrderReq, Position, Rules};
+use depth::{agg::Agg, ex, now_ms, Event, Exchange, History, Market, Msg, Sub};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 pub const HISTORY_MINUTES: usize = 1000;
@@ -106,7 +106,7 @@ async fn place_logged(account: &Arc<Mutex<Account>>, ex: Exchange, req: &OrderRe
     };
     let rtt = t0.elapsed().as_secs_f64() * 1e3;
     let mut a = account.lock().unwrap();
-    let what = format!("{ex:?} {} {} {} {} {}", req.symbol, if req.close { "close" } else { "open" }, if req.pos == terminal_one::Side::Buy { "long" } else { "short" }, req.qty, req.kind.label());
+    let what = format!("{ex:?} {} {} {} {} {}", req.symbol, if req.close { "close" } else { "open" }, if req.pos == depth::Side::Buy { "long" } else { "short" }, req.qty, req.kind.label());
     match res {
         Ok(id) => {
             let r = a.order_rtt.entry(ex).or_insert(rtt);
@@ -166,7 +166,7 @@ pub struct Engine {
     /// (venue, "BTCUSDT") -> funding, for every listed perp (positions in symbols not on screen)
     pub funding: Arc<Mutex<HashMap<(Exchange, String), VenueFunding>>>,
     /// detected signals for the current base (quant::detect every 5 s, per-kind cooldown)
-    pub signals: Arc<Mutex<terminal_one::quant::Feed>>,
+    pub signals: Arc<Mutex<depth::quant::Feed>>,
     /// private trading state (kept across base switches)
     pub account: Arc<Mutex<Account>>,
     /// set by the insurance panel: option chains are needed
@@ -292,7 +292,7 @@ impl Engine {
             let mut tick = tokio::time::interval(Duration::from_secs(5));
             loop {
                 tick.tick().await;
-                let mb = tokio::task::spawn_blocking(terminal_one::sys::rss_mb).await.ok().flatten();
+                let mb = tokio::task::spawn_blocking(depth::sys::rss_mb).await.ok().flatten();
                 stats_m.lock().unwrap().rss_mb = mb;
             }
         });
@@ -304,13 +304,13 @@ impl Engine {
             let mut tick = tokio::time::interval(Duration::from_secs(5));
             loop {
                 tick.tick().await;
-                let now = terminal_one::now_ms();
+                let now = depth::now_ms();
                 let found = {
                     let a = agg_s.lock().unwrap();
                     let bars = |m: Market| a.series.get(&(None, m)).map(|s| s.bars.iter().cloned().collect::<Vec<_>>()).unwrap_or_default();
                     let (perp, spot) = (bars(Market::Perp), bars(Market::Spot));
                     let trades: Vec<(i64, f64, bool)> = a.trades.iter().filter(|t| t.market == Market::Perp)
-                        .map(|t| (t.ts, t.px * t.qty * a.usdt(t.ex, t.market), t.side == terminal_one::Side::Buy)).collect();
+                        .map(|t| (t.ts, t.px * t.qty * a.usdt(t.ex, t.market), t.side == depth::Side::Buy)).collect();
                     let index = a.mid(Market::Perp);
                     let dislocation: Vec<(String, f64)> = a.venues.iter().filter(|((_, m), v)| *m == Market::Perp && a.live(v, *m))
                         .filter_map(|((e, m), v)| {
@@ -318,14 +318,14 @@ impl Engine {
                             // all day), and only when that move is far outside its usual noise
                             let now_bp = (v.mid()? * a.usdt(*e, *m) / index? - 1.0) * 1e4;
                             let hist: Vec<f64> = a.premium_bps(*e, *m).iter().rev().take(60).map(|x| x.1).collect();
-                            let (med, sd) = terminal_one::quant::robust(&hist)?;
+                            let (med, sd) = depth::quant::robust(&hist)?;
                             ((now_bp - med).abs() >= 5.0 * sd.max(1.0)).then(|| (format!("{e:?}"), now_bp - med))
                         }).collect();
-                    let input = terminal_one::quant::Input {
-                        perp: terminal_one::quant::complete(&perp, now), spot: terminal_one::quant::complete(&spot, now),
+                    let input = depth::quant::Input {
+                        perp: depth::quant::complete(&perp, now), spot: depth::quant::complete(&spot, now),
                         trades: &trades, dislocation: &dislocation, base: &base_s,
                     };
-                    terminal_one::quant::detect(&input, now)
+                    depth::quant::detect(&input, now)
                 };
                 let mut f = feed.lock().unwrap();
                 for sg in found { f.offer(sg, 600_000); }
@@ -348,10 +348,10 @@ impl Engine {
         // all-market mini ticker (changed symbols, 1/s, no weight) updates the same rows in place
         // ponytail: always on (~a few KB/s deflated); gate on the picker being open if bandwidth matters
         let tickers = self.tickers.clone();
-        rt.spawn(terminal_one::ws::run(terminal_one::ws::Spec::new("binance tickers", "wss://fstream.binance.com/market/ws/!miniTicker@arr"), move |f| {
-            let terminal_one::ws::Frame::Text(s) = f else { return };
+        rt.spawn(depth::ws::run(depth::ws::Spec::new("binance tickers", "wss://fstream.binance.com/market/ws/!miniTicker@arr"), move |f| {
+            let depth::ws::Frame::Text(s) = f else { return };
             let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else { return };
-            let num = terminal_one::num;
+            let num = depth::num;
             let upd: HashMap<&str, &serde_json::Value> = v.as_array().into_iter().flatten()
                 .filter_map(|x| Some((x["s"].as_str()?.strip_suffix("USDT")?, x))).collect();
             for t in tickers.lock().unwrap().iter_mut() {
@@ -511,7 +511,7 @@ impl Engine {
     /// Scaled (ladder) order: `n` limit orders from `from` to `to`, sizes tilted by `skew`.
     pub fn submit_scaled(&self, ex: Exchange, base: OrderReq, from: f64, to: f64, n: usize, skew: f64, post_only: bool, ctx: &eframe::egui::Context) -> Result<usize, String> {
         let rules = self.account.lock().unwrap().rules.get(&(ex, base.symbol.clone())).copied().ok_or("venue rules not loaded yet: try again in a second")?;
-        let legs = terminal_one::algo::scaled(base.qty, from, to, n, skew, rules.tick, rules.step);
+        let legs = depth::algo::scaled(base.qty, from, to, n, skew, rules.tick, rules.step);
         if legs.is_empty() { return Err("nothing to place: check size, prices and count".into()); }
         let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return Err("not connected".into()) };
         let count = legs.len();
@@ -538,15 +538,15 @@ impl Engine {
     pub fn start_twap(&self, ex: Exchange, base: OrderReq, minutes: f64, slices: usize, max_slip_bps: f64, limit: Option<f64>, ctx: &eframe::egui::Context) -> Result<u64, String> {
         if !(minutes > 0.0) || slices == 0 { return Err("duration and slices must be positive".into()); }
         let rules = self.account.lock().unwrap().rules.get(&(ex, base.symbol.clone())).copied().ok_or("venue rules not loaded yet: try again in a second")?;
-        let sizes = terminal_one::algo::twap_slices(base.qty, slices, rules.step);
+        let sizes = depth::algo::twap_slices(base.qty, slices, rules.step);
         if sizes.is_empty() || sizes.iter().any(|q| *q < rules.min_qty) { return Err(format!("each slice must be at least {} (try fewer slices)", rules.min_qty)); }
         let (Some(rt), account, agg, ctx) = (self.acct_rt.as_ref(), self.account.clone(), self.agg.clone(), ctx.clone()) else { return Err("not connected".into()) };
-        let id = terminal_one::now_ms() as u64;
+        let id = depth::now_ms() as u64;
         let gap = Duration::from_secs_f64(minutes * 60.0 / sizes.len() as f64);
-        let buy = base.side() == terminal_one::Side::Buy;
+        let buy = base.side() == depth::Side::Buy;
         account.lock().unwrap().algos.push(AlgoJob {
             id, ex, symbol: base.symbol.clone(), buy, close: base.close, total: base.qty, sent: 0.0, slices: sizes.len(), done: 0,
-            started_ms: terminal_one::now_ms(), end_ms: terminal_one::now_ms() + (minutes * 60_000.0) as i64, status: "running".into(), cancelled: false, venue_id: None,
+            started_ms: depth::now_ms(), end_ms: depth::now_ms() + (minutes * 60_000.0) as i64, status: "running".into(), cancelled: false, venue_id: None,
         });
         rt.spawn(async move {
             let mut i = 0;
@@ -555,10 +555,10 @@ impl Engine {
                 // the venue's own book; stale (pair switched away, venue down) means wait
                 let bbo = {
                     let a = agg.lock().unwrap();
-                    a.venues.get(&(ex, terminal_one::Market::Perp)).filter(|v| terminal_one::now_ms() - v.ts < 5_000)
+                    a.venues.get(&(ex, depth::Market::Perp)).filter(|v| depth::now_ms() - v.ts < 5_000)
                         .and_then(|v| match (v.book.best_bid(), v.book.best_ask()) { (Some(b), Some(k)) => Some((b.0, k.0)), _ => v.bbo.map(|[b, _, k, _]| (b, k)) })
                 };
-                let px = bbo.and_then(|(b, k)| terminal_one::algo::twap_price(buy, b, k, max_slip_bps, limit));
+                let px = bbo.and_then(|(b, k)| depth::algo::twap_price(buy, b, k, max_slip_bps, limit));
                 let Some(px) = px else {
                     set_status(&account, id, if bbo.is_none() { "waiting: no fresh book for this pair (keep it open)" } else { "waiting: price beyond your limit" });
                     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -585,10 +585,10 @@ impl Engine {
     /// Venue-run TWAP: placed once, then the venue slices it (keeps running with the app closed).
     pub fn start_native_twap(&self, ex: Exchange, base: OrderReq, minutes: u32, limit: Option<f64>, randomize: bool, ref_px: f64, ctx: &eframe::egui::Context) -> Result<u64, String> {
         let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return Err("not connected".into()) };
-        let id = terminal_one::now_ms() as u64;
-        let now = terminal_one::now_ms();
+        let id = depth::now_ms() as u64;
+        let now = depth::now_ms();
         account.lock().unwrap().algos.push(AlgoJob {
-            id, ex, symbol: base.symbol.clone(), buy: base.side() == terminal_one::Side::Buy, close: base.close, total: base.qty, sent: 0.0, slices: 0, done: 0,
+            id, ex, symbol: base.symbol.clone(), buy: base.side() == depth::Side::Buy, close: base.close, total: base.qty, sent: 0.0, slices: 0, done: 0,
             started_ms: now, end_ms: now + minutes as i64 * 60_000, status: "starting".into(), cancelled: false, venue_id: None,
         });
         rt.spawn(async move {
@@ -603,7 +603,7 @@ impl Engine {
                 _ => Err(anyhow::anyhow!("keys or venue rules not loaded")),
             };
             let mut a = account.lock().unwrap();
-            let what = format!("{ex:?} {} TWAP {} {} over {minutes} min", base.symbol, if base.side() == terminal_one::Side::Buy { "buy" } else { "sell" }, base.qty);
+            let what = format!("{ex:?} {} TWAP {} {} over {minutes} min", base.symbol, if base.side() == depth::Side::Buy { "buy" } else { "sell" }, base.qty);
             match res {
                 Ok(vid) => {
                     a.note(format!("OK {what} id {vid}"), true);
@@ -611,7 +611,7 @@ impl Engine {
                 }
                 Err(e) => {
                     a.note(format!("FAIL {what}: {e:#}"), false);
-                    if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) { j.status = format!("failed: {e:#}"); j.cancelled = true; j.end_ms = terminal_one::now_ms(); }
+                    if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) { j.status = format!("failed: {e:#}"); j.cancelled = true; j.end_ms = depth::now_ms(); }
                 }
             }
             ctx.request_repaint();
@@ -662,7 +662,7 @@ impl Engine {
                 let r = trade::cancel_twap(ex, &k, &symbol, &vid).await;
                 let mut a = account.lock().unwrap();
                 match r {
-                    Ok(()) => { a.note(format!("OK {ex:?} {symbol} TWAP {vid} cancelled"), true); if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) { j.status = "cancelled".into(); j.end_ms = terminal_one::now_ms(); } }
+                    Ok(()) => { a.note(format!("OK {ex:?} {symbol} TWAP {vid} cancelled"), true); if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) { j.status = "cancelled".into(); j.end_ms = depth::now_ms(); } }
                     Err(e) => { a.note(format!("FAIL cancel TWAP {vid}: {e:#}"), false); if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) { j.status = format!("cancel failed: {e:#}"); j.cancelled = false; } }
                 }
             });
@@ -713,7 +713,7 @@ impl Engine {
     /// Set / replace whole-position TP and/or SL (None leaves a side as is), or add one partial
     /// level (`partial = Some(qty)`); the result lands in the order log, the stream updates state.
     #[allow(clippy::too_many_arguments)]
-    pub fn set_tpsl(&self, ex: Exchange, symbol: String, pos: terminal_one::Side, tp: Option<f64>, sl: Option<f64>, partial: Option<f64>, trigger: trade::tpsl::Trigger, ctx: &eframe::egui::Context) {
+    pub fn set_tpsl(&self, ex: Exchange, symbol: String, pos: depth::Side, tp: Option<f64>, sl: Option<f64>, partial: Option<f64>, trigger: trade::tpsl::Trigger, ctx: &eframe::egui::Context) {
         let Some(rt) = self.acct_rt.as_ref() else { return };
         let (account, ctx) = (self.account.clone(), ctx.clone());
         rt.spawn(async move {
@@ -730,7 +730,7 @@ impl Engine {
                     }
                 },
             };
-            let what = format!("{ex:?} {symbol} {} TP {} SL {}{}", if pos == terminal_one::Side::Buy { "long" } else { "short" },
+            let what = format!("{ex:?} {symbol} {} TP {} SL {}{}", if pos == depth::Side::Buy { "long" } else { "short" },
                 tp.map(|x| x.to_string()).unwrap_or("-".into()), sl.map(|x| x.to_string()).unwrap_or("-".into()), partial.map(|q| format!(" size {q}")).unwrap_or_default());
             let mut a = account.lock().unwrap();
             match res { Ok(_) => a.note(format!("OK TP/SL {what}"), true), Err(e) => a.note(format!("FAIL TP/SL {what}: {e:#}"), false) }
@@ -863,7 +863,7 @@ impl Engine {
 }
 
 fn cache_path(ex: Exchange, sub: &Sub, tf: u32) -> Option<std::path::PathBuf> {
-    Some(terminal_one::sys::cache_dir()?.join("history")
+    Some(depth::sys::cache_dir()?.join("history")
         .join(&sub.base).join(format!("{ex:?}-{:?}-{tf}m.json", sub.market)))
 }
 
@@ -995,7 +995,7 @@ fn apply(a: &mut Account, ex: Exchange, ev: trade::AccEvent) -> bool {
             // equity change from this mark, applied below to the other cross positions' liquidation prices
             let mut moved = vec![];
             for (i, p) in a.positions.iter_mut().enumerate().filter(|(_, p)| p.ex == ex && p.symbol == symbol) {
-                let sign = if p.side == terminal_one::Side::Buy { 1.0 } else { -1.0 };
+                let sign = if p.side == depth::Side::Buy { 1.0 } else { -1.0 };
                 let upnl = (mark - p.entry) * p.qty * sign;
                 if p.cross == Some(true) { moved.push((i, upnl - p.upnl)); }
                 p.mark = mark;
@@ -1012,7 +1012,7 @@ fn apply(a: &mut Account, ex: Exchange, ev: trade::AccEvent) -> bool {
             for (i, d) in moved {
                 for (j, o) in a.positions.iter_mut().enumerate() {
                     if j == i || o.ex != ex || o.cross != Some(true) || o.qty <= 0.0 { continue }
-                    let sign = if o.side == terminal_one::Side::Buy { 1.0 } else { -1.0 };
+                    let sign = if o.side == depth::Side::Buy { 1.0 } else { -1.0 };
                     // at or below zero the venue shows none
                     o.liq = o.liq.map(|l| l - d * sign / o.qty).filter(|l| *l > 0.0);
                 }
@@ -1036,7 +1036,7 @@ fn apply(a: &mut Account, ex: Exchange, ev: trade::AccEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use terminal_one::Side;
+    use depth::Side;
     use trade::AccEvent as E;
 
     fn pos(side: Side, qty: f64) -> Position {
@@ -1099,7 +1099,7 @@ mod tests {
 /// Hyperliquid perps), merged by base: price and 24h change from the first venue that lists it,
 /// quote volume summed. A venue that fails is skipped.
 async fn all_tickers() -> (Vec<Ticker>, HashMap<(Exchange, String), VenueFunding>) {
-    use terminal_one::{num, ws};
+    use depth::{num, ws};
     let ok = |b: &str| !b.is_empty() && !b.contains('_') && !b.contains('-') && b.is_ascii();
     let hl_req = serde_json::json!({"type": "metaAndAssetCtxs"});
     let mut fund: HashMap<(Exchange, String), VenueFunding> = HashMap::new();
@@ -1168,7 +1168,7 @@ async fn all_tickers() -> (Vec<Ticker>, HashMap<(Exchange, String), VenueFunding
                 let (l, p) = (num(&c["markPx"]), num(&c["prevDayPx"]));
                 // Hyperliquid funds hourly
                 if let Some(b) = u["name"].as_str() {
-                    fund.insert((Exchange::Hyperliquid, format!("{b}USDT")), VenueFunding { rate: num(&c["funding"]), interval_h: 1.0, next_ms: (terminal_one::now_ms() / 3_600_000 + 1) * 3_600_000 });
+                    fund.insert((Exchange::Hyperliquid, format!("{b}USDT")), VenueFunding { rate: num(&c["funding"]), interval_h: 1.0, next_ms: (depth::now_ms() / 3_600_000 + 1) * 3_600_000 });
                     push(b, l, if p > 0.0 { (l / p - 1.0) * 100.0 } else { 0.0 }, num(&c["dayNtlVlm"]), 0.0, 0.0, num(&c["dayBaseVlm"]));
                 }
             }

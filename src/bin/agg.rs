@@ -3,7 +3,7 @@
 //! cross-venue view every 5s, then runs sanity checks. Non-zero exit if a check fails.
 //! ponytail: margin is not streamed here (same books as spot); run `probe <ex> margin` for borrow rates.
 use std::time::Duration;
-use terminal_one::{agg::Agg, *};
+use depth::{agg::Agg, *};
 
 fn bp(x: Option<f64>) -> String { x.map(|v| format!("{:+.4}", v * 1e4)).unwrap_or("-".into()) }
 fn f(x: Option<f64>, d: usize) -> String { x.map(|v| format!("{v:.d$}")).unwrap_or("-".into()) }

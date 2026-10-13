@@ -204,7 +204,7 @@ fn install_panic_log() {
         std::panic::set_hook(Box::new(move |info| {
             let bt = std::backtrace::Backtrace::force_capture();
             let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            terminal_one::sys::append_log("panic.log", &format!("{ts} {info}\n{bt}\n"));
+            depth::sys::append_log("panic.log", &format!("{ts} {info}\n{bt}\n"));
             prev(info);
         }));
     });

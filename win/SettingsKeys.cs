@@ -40,7 +40,7 @@ sealed class SettingsKeys
             if (editing == k.Ex) rows.Add(Form(k, rebuild));
         }
         var p = Ui.V(18,
-            SettingsUi.Section(null, L("Stored in the Windows Credential Manager (target \"terminal-one\"), never written to a file."), top),
+            SettingsUi.Section(null, L("Stored in the Windows Credential Manager (target \"depth\"), never written to a file."), top),
             SettingsUi.Section(L("Venues"), null, rows.ToArray()));
         if (error != null && editing == null)
         {

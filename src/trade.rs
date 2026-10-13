@@ -2,7 +2,7 @@
 //! OKX, Bitget, Gate, Kraken Futures, Hyperliquid and Lighter each in their own `trade/<venue>.rs`
 //! behind the same functions. Public API always uses unified symbols ("BTCUSDT") and base-unit
 //! sizes; each venue module maps to its native symbol / contracts.
-//! Keys live in the macOS Keychain (service "terminal-one", accounts "<venue>-key" /
+//! Keys live in the macOS Keychain (service "depth", accounts "<venue>-key" /
 //! "<venue>-secret"). `T1_TESTNET=1` switches both venues to their testnets.
 //!
 //! Prices and sizes are always sent as strings rounded to the instrument's tick / step, never as
@@ -98,8 +98,8 @@ pub fn key_fields(ex: Exchange) -> (&'static str, &'static str, Option<&'static 
 pub fn keychain_hint(ex: Exchange) -> String {
     let suffix = if testnet() { "-testnet" } else { "" };
     // a bare trailing -w makes `security` prompt, so the secret never lands in shell history
-    let mut s = format!("security add-generic-password -U -s terminal-one -a {v}-key{suffix} -w\nsecurity add-generic-password -U -s terminal-one -a {v}-secret{suffix} -w", v = venue(ex));
-    if needs_extra(ex) { s += &format!("\nsecurity add-generic-password -U -s terminal-one -a {}-passphrase{suffix} -w", venue(ex)); }
+    let mut s = format!("security add-generic-password -U -s depth -a {v}-key{suffix} -w\nsecurity add-generic-password -U -s depth -a {v}-secret{suffix} -w", v = venue(ex));
+    if needs_extra(ex) { s += &format!("\nsecurity add-generic-password -U -s depth -a {}-passphrase{suffix} -w", venue(ex)); }
     s
 }
 

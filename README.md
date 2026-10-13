@@ -50,7 +50,7 @@ troubleshooting) is in **[docs/GUIDE.md](docs/GUIDE.md)**.
 
 ## Security
 
-- API keys live in the macOS Keychain (service `terminal-one`), never in files or process arguments.
+- API keys live in the macOS Keychain (service `depth`), never in files or process arguments.
 - Use read-only keys first; never enable withdrawal permission.
 - Every order goes through a confirmation sheet (configurable); destructive actions ask twice.
 

@@ -3,7 +3,7 @@
 //! Exits non-zero if a required event kind is missing or a check fails.
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
-use terminal_one::*;
+use depth::*;
 
 #[tokio::main]
 async fn main() {

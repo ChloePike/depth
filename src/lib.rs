@@ -1,4 +1,4 @@
-//! Terminal One data layer: every exchange feed is normalized into `Msg` and sent over one channel.
+//! Depth data layer: every exchange feed is normalized into `Msg` and sent over one channel.
 pub mod agg;
 pub mod algo;
 pub mod ex;

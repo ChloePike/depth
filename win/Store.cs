@@ -113,11 +113,11 @@ sealed class Store
     public void SetRoute(RoutePolicy r) => Call("set_route", new JsonObject { ["route"] = JsonSerializer.SerializeToNode(r, Json.Opts) });
 }
 
-/// Host-only UI state (panel sizes, favorites, recent pairs): %APPDATA%\TerminalOne\windows-host.json,
+/// Host-only UI state (panel sizes, favorites, recent pairs): %APPDATA%\Depth\windows-host.json,
 /// next to the Rust settings. The macOS host keeps these in UserDefaults.
 static class HostPrefs
 {
-    static readonly string path = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TerminalOne", "windows-host.json");
+    static readonly string path = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Depth", "windows-host.json");
     static JsonObject? data;
 
     static JsonObject Data

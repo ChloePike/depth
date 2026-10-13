@@ -1,17 +1,17 @@
 // swift-tools-version:6.0
-// SwiftUI host for Terminal One. The Rust side (ffi/, a staticlib) is built first by
+// SwiftUI host for Depth. The Rust side (ffi/, a staticlib) is built first by
 // scripts/bundle.sh into ../target/main/release.
 import PackageDescription
 
 let package = Package(
-    name: "TerminalOne",
+    name: "Depth",
     platforms: [.macOS("26.0")],
     targets: [
         .systemLibrary(name: "CT1", path: "Sources/CT1"),
         .executableTarget(
-            name: "TerminalOne",
+            name: "Depth",
             dependencies: ["CT1"],
-            path: "Sources/TerminalOne",
+            path: "Sources/Depth",
             linkerSettings: [
                 .unsafeFlags(["-L../target/main/release"]),
                 .linkedFramework("Metal"), .linkedFramework("QuartzCore"), .linkedFramework("AppKit"),

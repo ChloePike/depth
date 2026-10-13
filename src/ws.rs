@@ -131,7 +131,7 @@ pub fn http() -> &'static reqwest::Client {
     static C: OnceLock<reqwest::Client> = OnceLock::new();
     C.get_or_init(|| reqwest::Client::builder().timeout(Duration::from_secs(10))
         // proxies drop idle connections silently; reusing one stalls a request until timeout
-        .pool_idle_timeout(Duration::from_secs(30)).tcp_keepalive(Duration::from_secs(15)).user_agent("terminal-one/0.1").build().unwrap())
+        .pool_idle_timeout(Duration::from_secs(30)).tcp_keepalive(Duration::from_secs(15)).user_agent("depth/0.1").build().unwrap())
 }
 
 /// Rate-limit pauses per host (epoch ms). While a host is paused no request leaves for it:

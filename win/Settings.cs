@@ -311,13 +311,13 @@ sealed class SettingsView : Grid
         var name = Ui.Text("Depth", 18, semibold: true);
         var head = Ui.V(3, name, Ui.Text($"{L("Version")} {ver}", 12, T1.Mu, num: true));
         head.Margin = new Thickness(0, 4, 0, 4);
-        string data = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TerminalOne");
-        string cache = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TerminalOne", "Cache");
+        string data = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Depth");
+        string cache = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Depth", "Cache");
         return Ui.V(18,
             SettingsUi.Section(null, L("Local multi-exchange trading terminal. Runs entirely on this PC: no relay, no server."), head),
             SettingsUi.Section(L("Data"), null,
                 PathRow(L("Settings"), data), PathRow(L("Cache"), cache),
-                SettingsUi.Row(L("API keys"), Ui.Text(L("Windows Credential Manager (terminal-one)"), 12, T1.Mu))));
+                SettingsUi.Row(L("API keys"), Ui.Text(L("Windows Credential Manager (depth)"), 12, T1.Mu))));
     }
 
     static FrameworkElement PathRow(string label, string path)

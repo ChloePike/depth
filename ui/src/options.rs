@@ -1,8 +1,8 @@
 //! Option view: venue + expiry selector, IV smile, ATM term structure across venues, T-chain.
 use super::{fmt_px, t, theme::*};
 use eframe::egui::{self, pos2, vec2, Align2, Rect, RichText, Sense, Stroke, Ui};
-use terminal_one::agg::{Agg, Opt};
-use terminal_one::{now_ms, Exchange};
+use depth::agg::{Agg, Opt};
+use depth::{now_ms, Exchange};
 
 #[derive(Default)]
 pub struct OptView { venue: Option<Exchange>, expiry: Option<i64> }

@@ -3,8 +3,8 @@
 use super::engine::Engine;
 use super::{fmt_dp, fmt_qty, t, theme::*};
 use eframe::egui::{self, RichText, Ui};
-use terminal_one::trade::{self, Wallet};
-use terminal_one::{now_ms, Exchange};
+use depth::trade::{self, Wallet};
+use depth::{now_ms, Exchange};
 
 struct Xfer { ex: Exchange, from: String, to: String, coin: String, amount: String }
 

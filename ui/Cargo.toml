@@ -8,7 +8,7 @@ repository = "https://github.com/ChloePike/depth"
 # The terminal's egui interface (chart, book, panels), shared by the eframe app (src/main.rs)
 # and the SwiftUI host (ffi/).
 [dependencies]
-terminal-one = { path = ".." }
+depth = { path = ".." }
 anyhow = "1.0.104"
 eframe = "0.36.2"
 memmap2 = "0.9.11"
@@ -20,9 +20,9 @@ dioxus-devtools = { version = "0.7.10", optional = true }
 tokio = { version = "1.53.2", features = ["full"] }
 
 [features]
-# Live code patching: `dx serve --hotpatch -p t1-ui --features hotpatch --bin terminal-one`
+# Live code patching: `dx serve --hotpatch -p t1-ui --features hotpatch --bin depth`
 hotpatch = ["dep:subsecond", "dep:dioxus-devtools"]
 
 [[bin]]
-name = "terminal-one"
+name = "depth"
 path = "src/main.rs"

@@ -2,8 +2,8 @@
 use super::{fmt_dp, fmt_px, fmt_qty, step_dp, t, theme::*};
 use eframe::egui::{self, pos2, vec2, Align2, Rect, RichText, Sense, Ui};
 use std::collections::HashSet;
-use terminal_one::agg::{Agg, Level};
-use terminal_one::{Exchange, Market, Side};
+use depth::agg::{Agg, Level};
+use depth::{Exchange, Market, Side};
 
 const ROW: f32 = 18.0;
 /// height of the native header laid over the book column (points)
@@ -48,7 +48,7 @@ impl BookView {
         let mut vs: Vec<String> = a.venues.keys().filter(|(_, m)| *m == market).map(|(e, _)| format!("{e:?}")).collect();
         vs.sort();
         let mid = match self.src { None => a.mid(market), Some(e) => a.venues.get(&(e, market)).and_then(|v| v.mid()) };
-        let groups: Vec<String> = mid.map(|m| { let b = terminal_one::agg::nice(m * 1e-5); GROUPS.iter().map(|g| fmt_dp(b * g, step_dp(b * g))).collect() }).unwrap_or_default();
+        let groups: Vec<String> = mid.map(|m| { let b = depth::agg::nice(m * 1e-5); GROUPS.iter().map(|g| fmt_dp(b * g, step_dp(b * g))).collect() }).unwrap_or_default();
         serde_json::json!({"trades": self.trades, "quote": self.quote, "src": self.src.map(|e| format!("{e:?}")), "venues": vs, "group": self.group, "groups": groups})
     }
 
@@ -66,9 +66,9 @@ impl BookView {
                 "big": x.qty >= big, "t": super::hms(x.ts), "ex": format!("{:?}", x.ex)})).collect::<Vec<_>>()});
         }
         let Some(mid) = (match self.src { None => a.mid(market), Some(e) => a.venues.get(&(e, market)).and_then(|v| v.mid()) }) else { return json!({}) };
-        let base_bin = terminal_one::agg::nice(mid * 1e-5);
+        let base_bin = depth::agg::nice(mid * 1e-5);
         let bin = base_bin * GROUPS[self.group.min(GROUPS.len() - 1)];
-        terminal_one::ex::hyperliquid::set_book_group(bin);
+        depth::ex::hyperliquid::set_book_group(bin);
         let (bids, asks) = match self.src {
             None => {
                 let (b, k) = a.book_where(market, bin, 0.03, true, |e| scope.contains(&e));
@@ -128,7 +128,7 @@ impl BookView {
             ui.label(t("chart.loading"));
             return;
         };
-        let base_bin = terminal_one::agg::nice(mid * 1e-5);
+        let base_bin = depth::agg::nice(mid * 1e-5);
         let bin = base_bin * GROUPS[self.group];
         if !native() { ui.horizontal(|ui| {
             let cur = self.src.map(|e| format!("{e:?}")).unwrap_or_else(|| format!("{} USD", t("src.agg")));

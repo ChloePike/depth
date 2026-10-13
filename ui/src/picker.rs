@@ -1,5 +1,5 @@
 //! Symbol picker: searchable list of USDT perpetuals (Binance futures 24h tickers, by volume),
-//! with favorites persisted under ~/Library/Application Support/TerminalOne/favorites.txt.
+//! with favorites persisted under ~/Library/Application Support/Depth/favorites.txt.
 use super::{fmt_px, t, theme::*};
 use crate::engine::Ticker;
 use eframe::egui::{self, Align2, RichText, Ui};
@@ -14,7 +14,7 @@ pub struct Picker {
 }
 
 fn favs_path() -> Option<PathBuf> {
-    Some(terminal_one::sys::data_dir()?.join("favorites.txt"))
+    Some(depth::sys::data_dir()?.join("favorites.txt"))
 }
 
 impl Default for Picker {

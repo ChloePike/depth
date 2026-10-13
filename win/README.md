@@ -28,7 +28,7 @@ next to `Depth.exe`. Unpackaged and Windows App SDK self-contained: the output f
   would show at 1 px = 1 DIP. `EguiPanel` lays the panel out `scale` times larger and shrinks it
   with a `1/scale` render transform (see the `ponytail:` comment there).
 - Host-only UI state (panel sizes, favorites, recent pairs) lives in
-  `%APPDATA%\TerminalOne\windows-host.json`; crashes of the host go to
-  `%LOCALAPPDATA%\TerminalOne\Cache\Logs\host-crash.log` (Rust panics: `panic.log` there).
+  `%APPDATA%\Depth\windows-host.json`; crashes of the host go to
+  `%LOCALAPPDATA%\Depth\Cache\Logs\host-crash.log` (Rust panics: `panic.log` there).
 - Shortcuts (macOS Cmd -> Ctrl): Ctrl+, settings, Ctrl+K pair, Ctrl+[ / Ctrl+] favorites,
   Ctrl+D star, Ctrl+1..4 market, Ctrl+Shift+1..6 interval, Ctrl+Shift+I order panel.

@@ -1,6 +1,6 @@
 //! Read-only account check: `account [BASE=BTC]`. Prints instrument rules for every tradable
 //! venue and, where Keychain keys exist, balance / positions / open orders. Never places orders.
-use terminal_one::trade;
+use depth::trade;
 
 #[tokio::main]
 async fn main() {
@@ -8,7 +8,7 @@ async fn main() {
     let sym = trade::symbol(&base);
     // `account BTC pm`: raw Portfolio Margin account fields (read-only, weight 20)
     if std::env::args().nth(2).as_deref() == Some("pm") {
-        if let Some(k) = trade::keychain(terminal_one::Exchange::Binance) {
+        if let Some(k) = trade::keychain(depth::Exchange::Binance) {
             match trade::pm_account(&k).await { Ok(v) => println!("{v:#}"), Err(e) => println!("FAIL {e:#}") }
         }
         return;

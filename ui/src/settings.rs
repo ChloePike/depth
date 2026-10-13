@@ -4,7 +4,7 @@ use super::{lang, set_lang, t, theme::*, tz_label, LANGS};
 use eframe::egui::{self, Color32, RichText, Ui};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
-use terminal_one::{trade, Exchange};
+use depth::{trade, Exchange};
 
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -138,10 +138,10 @@ impl SettingsView {
                                 // Keychain lookups spawn `security`: once per visit, never per frame
                                 _ => {
                                     about(ui, self.keys.get_or_insert_with(|| trade::TRADABLE.into_iter().map(|e| (e, trade::keychain(e).is_some())).collect()));
-                                    let bytes = *self.cache.get_or_insert_with(terminal_one::sys::cache_bytes);
+                                    let bytes = *self.cache.get_or_insert_with(depth::sys::cache_bytes);
                                     group(ui, t("set.storage"), |ui| {
                                         setting_row(ui, t("set.cache"), t("set.cache_desc"), |ui| {
-                                            if ui.button(t("set.cache_clear")).clicked() { terminal_one::sys::clear_cache(); self.cache = None; }
+                                            if ui.button(t("set.cache_clear")).clicked() { depth::sys::clear_cache(); self.cache = None; }
                                             ui.label(RichText::new(format!("{:.1} MB", bytes as f64 / 1e6)).font(mono(11.5)).color(mu()));
                                         });
                                     });
@@ -258,7 +258,7 @@ fn general(ui: &mut Ui, p: &mut Prefs) {
         });
         row_sep(ui);
         setting_row(ui, t("set.tz"), t("set.tz_desc"), |ui| {
-            let sys = terminal_one::sys::utc_offset_ms() / 60_000;
+            let sys = depth::sys::utc_offset_ms() / 60_000;
             let name = |z: Option<i32>| z.map_or_else(|| format!("{} ({})", t("set.tz_system"), tz_label(sys)), |m| tz_label(m.into()));
             egui::ComboBox::from_id_salt("set.tz").selected_text(name(p.tz_min)).height(320.0).show_ui(ui, |ui| {
                 ui.selectable_value(&mut p.tz_min, None, name(None));
@@ -371,7 +371,7 @@ fn about(ui: &mut Ui, keys: &[(Exchange, bool)]) {
         }
     });
     group(ui, t("set.paths"), |ui| {
-        for (i, p) in [terminal_one::sys::data_dir(), terminal_one::sys::cache_dir()].into_iter().flatten().enumerate() {
+        for (i, p) in [depth::sys::data_dir(), depth::sys::cache_dir()].into_iter().flatten().enumerate() {
             if i > 0 { row_sep(ui); }
             ui.horizontal(|ui| { ui.set_min_height(28.0); ui.label(RichText::new(p.display().to_string()).font(mono(10.5)).color(mu())); });
         }

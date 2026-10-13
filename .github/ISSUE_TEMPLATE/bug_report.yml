@@ -41,5 +41,5 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: Contents of ~/Library/Logs/TerminalOne/panic.log if it exists, or probe output (`cargo run --bin probe -- <exchange> <market> BTC`).
+      description: Contents of ~/Library/Logs/Depth/panic.log if it exists, or probe output (`cargo run --bin probe -- <exchange> <market> BTC`).
       render: text

@@ -3,7 +3,7 @@ use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, FontId,
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, OnceLock};
-use terminal_one::Exchange;
+use depth::Exchange;
 
 static LIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Light palette in effect; set every frame from egui's resolved theme (Settings > Appearance:
@@ -128,14 +128,14 @@ static COINS: std::sync::Mutex<Option<HashMap<String, Coin>>> = std::sync::Mutex
 static COIN_TX: OnceLock<std::sync::mpsc::Sender<(String, egui::Context)>> = OnceLock::new();
 
 /// Coin logos come from Binance's logo CDN on first use, are cached on disk
-/// (~/Library/Caches/TerminalOne/coins; an empty file marks "no logo"), and decode on one
+/// (~/Library/Caches/Depth/coins; an empty file marks "no logo"), and decode on one
 /// background thread. Never blocks the frame.
 fn coin_fetcher() -> &'static std::sync::mpsc::Sender<(String, egui::Context)> {
     COIN_TX.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::channel::<(String, egui::Context)>();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("coin icon runtime");
-            let dir = terminal_one::sys::cache_dir().map(|d| d.join("coins"));
+            let dir = depth::sys::cache_dir().map(|d| d.join("coins"));
             while let Ok((sym, ctx)) = rx.recv() {
                 let path = dir.as_ref().map(|d| d.join(format!("{sym}.png")));
                 let bytes = match path.as_ref().and_then(|p| std::fs::read(p).ok()) {
@@ -143,7 +143,7 @@ fn coin_fetcher() -> &'static std::sync::mpsc::Sender<(String, egui::Context)> {
                     None => {
                         let url = format!("https://bin.bnbstatic.com/static/assets/logos/{sym}.png");
                         let got = rt.block_on(async {
-                            let r = terminal_one::ws::http().get(&url).send().await.ok()?;
+                            let r = depth::ws::http().get(&url).send().await.ok()?;
                             if !r.status().is_success() { return Some(vec![]); }
                             r.bytes().await.ok().map(|b| b.to_vec())
                         });

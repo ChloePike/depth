@@ -1,6 +1,6 @@
 //! History check: `hist <exchange> <spot|margin|perp> <base> [quote=USDT] [minutes=1000]`.
 //! Fetches the startup REST history and validates it. Non-zero exit on failure.
-use terminal_one::*;
+use depth::*;
 
 #[tokio::main]
 async fn main() {

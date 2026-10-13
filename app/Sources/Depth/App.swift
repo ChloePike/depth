@@ -2,8 +2,17 @@ import AppKit
 import SwiftUI
 
 @main
-struct TerminalOneApp: App {
+struct DepthApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
+
+    init() {
+        // the app was called Terminal One (bundle id local.terminal-one): carry its defaults over once
+        let d = UserDefaults.standard
+        if !d.bool(forKey: "t1.migrated"), let old = d.persistentDomain(forName: "local.terminal-one") {
+            for (k, v) in old where d.object(forKey: k) == nil { d.set(v, forKey: k) }
+        }
+        d.set(true, forKey: "t1.migrated")
+    }
 
     var body: some Scene {
         WindowGroup {

@@ -575,7 +575,7 @@ mod zk {
     fn nonce(sk: &Scalar, msg: &Fp5) -> Scalar {
         use sha2::{Digest, Sha512};
         let mut h = Sha512::new();
-        h.update(b"terminal-one lighter schnorr nonce");
+        h.update(b"depth lighter schnorr nonce");
         h.update(scalar_le(*sk));
         h.update(scalar_le(*msg));
         let d = h.finalize();

@@ -15,8 +15,8 @@ use eframe::egui::{self, Color32, Frame, Margin, RichText, Ui};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
-use terminal_one::agg::Agg;
-use terminal_one::{now_ms, Exchange, Market};
+use depth::agg::Agg;
+use depth::{now_ms, Exchange, Market};
 use theme::*;
 
 const MODES: [(Market, &str); 4] = [(Market::Spot, "mode.spot"), (Market::Margin, "mode.margin"), (Market::Perp, "mode.perp"), (Market::Option, "mode.option")];
@@ -108,7 +108,7 @@ pub fn set_tz(min: Option<i32>) { TZ_MIN.store(min.map_or(i64::MIN, i64::from), 
 pub fn local_offset_ms() -> i64 {
     static O: OnceLock<i64> = OnceLock::new();
     match TZ_MIN.load(std::sync::atomic::Ordering::Relaxed) {
-        i64::MIN => *O.get_or_init(terminal_one::sys::utc_offset_ms),
+        i64::MIN => *O.get_or_init(depth::sys::utc_offset_ms),
         m => m * 60_000,
     }
 }
@@ -129,13 +129,13 @@ pub fn hms(ms: i64) -> String {
 /// Written when it changes (checked once a second); env overrides (T1_BASE, ...) win on load.
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
-struct Settings { route: Option<terminal_one::route::Policy>, prefs: Option<settings::Prefs>, lang: Option<String>, base: Option<String>, mode: Option<Market>, chart: Option<chart::Chart>, trade_ex: Option<Exchange>, off: Option<Vec<Exchange>>, auto: Option<HashMap<Exchange, engine::AutoTopUp>> }
+struct Settings { route: Option<depth::route::Policy>, prefs: Option<settings::Prefs>, lang: Option<String>, base: Option<String>, mode: Option<Market>, chart: Option<chart::Chart>, trade_ex: Option<Exchange>, off: Option<Vec<Exchange>>, auto: Option<HashMap<Exchange, engine::AutoTopUp>> }
 
 #[derive(serde::Serialize)]
-struct SettingsRef<'a> { route: &'a terminal_one::route::Policy, prefs: &'a settings::Prefs, lang: &'static str, base: &'a str, mode: Market, chart: &'a chart::Chart, trade_ex: Exchange, off: Vec<Exchange>, auto: std::collections::BTreeMap<String, engine::AutoTopUp> }
+struct SettingsRef<'a> { route: &'a depth::route::Policy, prefs: &'a settings::Prefs, lang: &'static str, base: &'a str, mode: Market, chart: &'a chart::Chart, trade_ex: Exchange, off: Vec<Exchange>, auto: std::collections::BTreeMap<String, engine::AutoTopUp> }
 
 fn settings_path() -> Option<std::path::PathBuf> {
-    Some(terminal_one::sys::data_dir()?.join("settings.json"))
+    Some(depth::sys::data_dir()?.join("settings.json"))
 }
 
 pub struct App {
@@ -160,7 +160,7 @@ pub struct App {
     /// drag, resize edges) and paces frames with its display link (no frame-cap sleep)
     hosted: bool,
     /// order routing policy (Settings > Trading), persisted
-    route: terminal_one::route::Policy,
+    route: depth::route::Policy,
     /// actions from the native panels, applied at the next frame
     pending_base: Option<String>,
     pending_mode: Option<Market>,
@@ -177,7 +177,7 @@ impl App {
         let cc = Cc { egui_ctx: ctx.clone() };
         theme::set_native(hosted);
         // history of symbols not viewed for a month, old coin logos
-        std::thread::spawn(|| terminal_one::sys::prune_cache(30));
+        std::thread::spawn(|| depth::sys::prune_cache(30));
         theme::install(&cc.egui_ctx);
         #[cfg(feature = "hotpatch")]
         {
@@ -200,7 +200,7 @@ impl App {
         if matches!(mode, Market::Margin | Market::Option) { eng.ensure(mode); }
         let mut chart = st.chart.unwrap_or_default();
         let mut trade = trade::TradeView::default();
-        if let Some(ex) = st.trade_ex.filter(|e| terminal_one::trade::TRADABLE.contains(e)) { trade.ex = ex; }
+        if let Some(ex) = st.trade_ex.filter(|e| depth::trade::TRADABLE.contains(e)) { trade.ex = ex; }
         // T1_ACC_TAB=<n>: open the account strip on tab n (screenshots)
         if let Some(n) = env("T1_ACC_TAB").and_then(|s| s.parse().ok()) { trade.set_tab(n); }
         let mut picker = picker::Picker::default();
@@ -476,21 +476,21 @@ impl App {
             }
             // positions and resting orders of the traded symbol, drawn on the chart
             {
-                let sym = terminal_one::trade::symbol(&self.eng.base);
+                let sym = depth::trade::symbol(&self.eng.base);
                 let acc = self.eng.account.lock().unwrap();
                 let mut lines: Vec<chart::ChartLine> = acc.positions.iter().filter(|p| p.symbol == sym).map(|p| chart::ChartLine {
-                    price: p.entry, col: if p.side == terminal_one::Side::Buy { up() } else { dn() },
-                    tag: format!("{:?} {} {}", p.ex, if p.side == terminal_one::Side::Buy { t("tr.long_s") } else { t("tr.short_s") }, fmt_qty(p.qty)),
+                    price: p.entry, col: if p.side == depth::Side::Buy { up() } else { dn() },
+                    tag: format!("{:?} {} {}", p.ex, if p.side == depth::Side::Buy { t("tr.long_s") } else { t("tr.short_s") }, fmt_qty(p.qty)),
                     sub: format!("{:+.2}", p.upnl),
                 }).collect();
                 lines.extend(acc.orders.iter().filter(|o| o.symbol == sym && o.price > 0.0).map(|o| chart::ChartLine {
-                    price: o.price, col: if o.side == terminal_one::Side::Buy { up() } else { dn() }.linear_multiply(0.75),
-                    tag: format!("{:?} {}", o.ex, o.kind), sub: format!("{} {}", if o.side == terminal_one::Side::Buy { t("tr.buy") } else { t("tr.sell") }, fmt_qty(o.qty - o.filled)),
+                    price: o.price, col: if o.side == depth::Side::Buy { up() } else { dn() }.linear_multiply(0.75),
+                    tag: format!("{:?} {}", o.ex, o.kind), sub: format!("{} {}", if o.side == depth::Side::Buy { t("tr.buy") } else { t("tr.sell") }, fmt_qty(o.qty - o.filled)),
                 }));
                 // liquidation price of each position (none on Binance Portfolio Margin: account-level uniMMR)
                 lines.extend(acc.positions.iter().filter(|p| p.symbol == sym).filter_map(|p| p.liq.filter(|l| *l > 0.0).map(|l| chart::ChartLine {
                     price: l, col: theme::WARN,
-                    tag: format!("{:?} Liq.", p.ex), sub: format!("{} {}", if p.side == terminal_one::Side::Buy { t("tr.long_s") } else { t("tr.short_s") }, fmt_qty(p.qty)),
+                    tag: format!("{:?} Liq.", p.ex), sub: format!("{} {}", if p.side == depth::Side::Buy { t("tr.long_s") } else { t("tr.short_s") }, fmt_qty(p.qty)),
                 })));
                 // take-profit / stop-loss triggers
                 lines.extend(acc.tpsl.iter().filter(|x| x.symbol == sym).map(|x| chart::ChartLine {

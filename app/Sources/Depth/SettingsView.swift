@@ -333,9 +333,9 @@ struct SettingsAbout: View {
                 .padding(.vertical, 4)
             } footer: { SettingsFooter(L("Local multi-exchange trading terminal. Runs entirely on this Mac: no relay, no server.")) }
             Section {
-                pathRow(L("Settings"), "\(home)/Library/Application Support/TerminalOne")
-                pathRow(L("Cache"), "\(home)/Library/Caches/TerminalOne")
-                LabeledContent(L("API keys"), value: L("macOS Keychain (terminal-one)"))
+                pathRow(L("Settings"), "\(home)/Library/Application Support/Depth")
+                pathRow(L("Cache"), "\(home)/Library/Caches/Depth")
+                LabeledContent(L("API keys"), value: L("macOS Keychain (depth)"))
             } header: { Text(L("Data")) }
         }
     }

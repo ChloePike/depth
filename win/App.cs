@@ -44,14 +44,14 @@ sealed class App : Application, IXamlMetadataProvider
     public XmlnsDefinition[] GetXmlnsDefinitions() => meta.GetXmlnsDefinitions();
 }
 
-/// %LOCALAPPDATA%\TerminalOne\Cache\Logs (sys::log_dir on the Rust side).
+/// %LOCALAPPDATA%\Depth\Cache\Logs (sys::log_dir on the Rust side).
 static class Log
 {
     public static void Write(string file, string msg)
     {
         try
         {
-            var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TerminalOne", "Cache", "Logs");
+            var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Depth", "Cache", "Logs");
             Directory.CreateDirectory(dir);
             File.AppendAllText(System.IO.Path.Combine(dir, file), $"{DateTimeOffset.UtcNow.ToUnixTimeSeconds()} {msg}\n");
         }

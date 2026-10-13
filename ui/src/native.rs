@@ -5,8 +5,8 @@ use super::App;
 use eframe::egui;
 use serde_json::{json, Value};
 use std::time::Instant;
-use terminal_one::trade::{self, Kind, OrderReq, Tif};
-use terminal_one::{now_ms, route, Exchange, Market, Side};
+use depth::trade::{self, Kind, OrderReq, Tif};
+use depth::{now_ms, route, Exchange, Market, Side};
 
 fn ex_name(e: Exchange) -> String { format!("{e:?}") }
 fn parse_ex(v: &Value) -> Option<Exchange> { Exchange::parse(v.as_str()?) }
@@ -154,18 +154,18 @@ impl App {
         let quant = {
             let ag = self.eng.agg.lock().unwrap();
             let m = match self.mode { Market::Margin | Market::Option => Market::Spot, m => m };
-            let bars: Vec<terminal_one::agg::Bar> = ag.series.get(&(None, m)).map(|s| s.bars.iter().cloned().collect()).unwrap_or_default();
-            let vm = terminal_one::quant::vol_model(&bars);
+            let bars: Vec<depth::agg::Bar> = ag.series.get(&(None, m)).map(|s| s.bars.iter().cloned().collect()).unwrap_or_default();
+            let vm = depth::quant::vol_model(&bars);
             let mid = ag.mid(m).unwrap_or(0.0);
-            let (b, k) = ag.book_where(m, terminal_one::agg::nice(mid.max(1e-9) * 1e-4), 0.005, true, |_| true);
-            let usd = |ls: &[terminal_one::agg::Level]| ls.iter().map(|l| l.qty * l.px).sum::<f64>();
+            let (b, k) = ag.book_where(m, depth::agg::nice(mid.max(1e-9) * 1e-4), 0.005, true, |_| true);
+            let usd = |ls: &[depth::agg::Level]| ls.iter().map(|l| l.qty * l.px).sum::<f64>();
             let carry: Vec<Value> = ag.venues.iter().filter(|((_, vm2), _)| *vm2 == Market::Perp).map(|((e, _), v)| json!({
                 "ex": ex_name(*e), "funding_apr": v.funding_h.map(|f| f * 24.0 * 365.0 * 100.0), "basis_bps": ag.basis_bps(*e),
             })).collect();
             json!({
                 "vol": vm.map(|v| json!({"sigma_1h": v.sigma_1h, "sigma_24h": v.sigma_24h, "percentile": v.percentile,
                     "range_1h": [mid * (1.0 - v.sigma_1h), mid * (1.0 + v.sigma_1h)], "range_24h": [mid * (1.0 - v.sigma_24h), mid * (1.0 + v.sigma_24h)]})),
-                "pressure": terminal_one::quant::pressure(usd(&b), usd(&k), &bars, 5),
+                "pressure": depth::quant::pressure(usd(&b), usd(&k), &bars, 5),
                 "book_bid_usd": usd(&b), "book_ask_usd": usd(&k), "carry": carry,
             })
         };
@@ -209,8 +209,8 @@ impl App {
                 self.pending_restart = true;
             }
             "set_trade_venue" => { let e = exv()?; if !trade::TRADABLE.contains(&e) { return Err("not tradable".into()); } self.trade.ex = e; self.route.fixed = e; }
-            "cache_size" => return Ok(json!({"bytes": terminal_one::sys::cache_bytes()})),
-            "clear_cache" => return Ok(json!({"freed": terminal_one::sys::clear_cache(), "bytes": terminal_one::sys::cache_bytes()})),
+            "cache_size" => return Ok(json!({"bytes": depth::sys::cache_bytes()})),
+            "clear_cache" => return Ok(json!({"freed": depth::sys::clear_cache(), "bytes": depth::sys::cache_bytes()})),
             "set_lang" => super::set_lang(v["lang"].as_str().unwrap_or("en")),
             "set_prefs" => { self.prefs = serde_json::from_value(v["prefs"].clone()).map_err(|e| e.to_string())?; self.prefs.apply(ctx); }
             "set_route" => { self.route = serde_json::from_value(v["route"].clone()).map_err(|e| e.to_string())?; }
@@ -290,21 +290,21 @@ impl App {
                     // premium over the composite now, and this venue's normal premium (last hour's median)
                     let prem = a.mid(*vm).map(|ix| (mid * k / ix - 1.0) * 1e4);
                     let hist: Vec<f64> = a.premium_bps(*e, *vm).iter().rev().take(60).map(|x| x.1).collect();
-                    let norm = terminal_one::quant::robust(&hist).map(|x| x.0);
+                    let norm = depth::quant::robust(&hist).map(|x| x.0);
                     let top = ven.bbo.map(|b| (b[0], b[2])).or_else(|| Some((ven.book.best_bid()?.0, ven.book.best_ask()?.0)));
                     Some(json!({"ex": ex_name(*e), "color": format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b()),
                         "bid_usd": bid, "ask_usd": ask, "vol_usd": vol, "buy_usd": buy, "sell_usd": sell,
-                        "quote": terminal_one::agg::quote_of(*e, *vm), "bid": top.map(|t| t.0), "ask": top.map(|t| t.1),
+                        "quote": depth::agg::quote_of(*e, *vm), "bid": top.map(|t| t.0), "ask": top.map(|t| t.1),
                         "prem_bps": prem, "norm_bps": norm, "stale": !a.live(ven, *vm)}))
                 }).collect();
                 rows.sort_by(|x, y| y["vol_usd"].as_f64().unwrap_or(0.0).total_cmp(&x["vol_usd"].as_f64().unwrap_or(0.0)));
                 // executable cross: same quote only, fresh books only, net of both taker fees
-                let tops: Vec<terminal_one::quant::Top> = rows.iter().filter(|r| r["stale"] == false).filter_map(|r| {
+                let tops: Vec<depth::quant::Top> = rows.iter().filter(|r| r["stale"] == false).filter_map(|r| {
                     let ex = r["ex"].as_str()?;
-                    Some(terminal_one::quant::Top { ex, quote: r["quote"].as_str()?, bid: r["bid"].as_f64()?, ask: r["ask"].as_f64()?,
+                    Some(depth::quant::Top { ex, quote: r["quote"].as_str()?, bid: r["bid"].as_f64()?, ask: r["ask"].as_f64()?,
                         taker: Exchange::parse(ex).map(|e| super::settings::fee(e).0).unwrap_or(0.0005) })
                 }).collect();
-                let arb = terminal_one::quant::best_cross(&tops).map(|(i, j, gross, net)| json!({
+                let arb = depth::quant::best_cross(&tops).map(|(i, j, gross, net)| json!({
                     "buy": tops[i].ex, "sell": tops[j].ex, "ask": tops[i].ask, "bid": tops[j].bid, "quote": tops[i].quote, "gross_bps": gross, "net_bps": net}));
                 return Ok(json!({"rows": rows, "minutes": mins, "arb": arb}));
             }

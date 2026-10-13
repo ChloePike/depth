@@ -5,48 +5,74 @@ use std::path::PathBuf;
 
 fn env(k: &str) -> Option<PathBuf> { std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from) }
 
-/// Settings, favorites. macOS ~/Library/Application Support/TerminalOne, Windows
-/// %APPDATA%\TerminalOne, Linux $XDG_CONFIG_HOME/terminal-one.
+/// Settings, favorites. macOS ~/Library/Application Support/Depth, Windows
+/// %APPDATA%\Depth, Linux $XDG_CONFIG_HOME/depth.
 pub fn data_dir() -> Option<PathBuf> {
-    if cfg!(target_os = "macos") { env("HOME").map(|h| h.join("Library/Application Support/TerminalOne")) }
-    else if cfg!(windows) { env("APPDATA").map(|d| d.join("TerminalOne")) }
-    else { env("XDG_CONFIG_HOME").or_else(|| env("HOME").map(|h| h.join(".config"))).map(|d| d.join("terminal-one")) }
+    migrate();
+    if cfg!(target_os = "macos") { env("HOME").map(|h| h.join("Library/Application Support/Depth")) }
+    else if cfg!(windows) { env("APPDATA").map(|d| d.join("Depth")) }
+    else { env("XDG_CONFIG_HOME").or_else(|| env("HOME").map(|h| h.join(".config"))).map(|d| d.join("depth")) }
 }
 
-/// History, coin logos, rate-limit pauses. macOS ~/Library/Caches/TerminalOne, Windows
-/// %LOCALAPPDATA%\TerminalOne\Cache, Linux $XDG_CACHE_HOME/terminal-one.
+/// History, coin logos, rate-limit pauses. macOS ~/Library/Caches/Depth, Windows
+/// %LOCALAPPDATA%\Depth\Cache, Linux $XDG_CACHE_HOME/depth.
 pub fn cache_dir() -> Option<PathBuf> {
-    if cfg!(target_os = "macos") { env("HOME").map(|h| h.join("Library/Caches/TerminalOne")) }
-    else if cfg!(windows) { env("LOCALAPPDATA").map(|d| d.join("TerminalOne").join("Cache")) }
-    else { env("XDG_CACHE_HOME").or_else(|| env("HOME").map(|h| h.join(".cache"))).map(|d| d.join("terminal-one")) }
+    migrate();
+    if cfg!(target_os = "macos") { env("HOME").map(|h| h.join("Library/Caches/Depth")) }
+    else if cfg!(windows) { env("LOCALAPPDATA").map(|d| d.join("Depth").join("Cache")) }
+    else { env("XDG_CACHE_HOME").or_else(|| env("HOME").map(|h| h.join(".cache"))).map(|d| d.join("depth")) }
 }
 
-/// Crash logs. macOS ~/Library/Logs/TerminalOne, elsewhere a Logs folder next to the cache.
+/// Crash logs. macOS ~/Library/Logs/Depth, elsewhere a Logs folder next to the cache.
 pub fn log_dir() -> Option<PathBuf> {
-    if cfg!(target_os = "macos") { env("HOME").map(|h| h.join("Library/Logs/TerminalOne")) }
+    migrate();
+    if cfg!(target_os = "macos") { env("HOME").map(|h| h.join("Library/Logs/Depth")) }
     else { cache_dir().map(|d| d.join("Logs")) }
 }
 
+/// The app was called Terminal One: move its folders to the new names once (only if the new one
+/// does not exist yet). Logs on macOS live in their own folder; elsewhere they are inside the cache.
+fn migrate() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let pairs: Vec<(Option<PathBuf>, &str, &str)> = if cfg!(target_os = "macos") {
+            let h = env("HOME");
+            vec![(h.clone(), "Library/Application Support/TerminalOne", "Library/Application Support/Depth"),
+                 (h.clone(), "Library/Caches/TerminalOne", "Library/Caches/Depth"), (h, "Library/Logs/TerminalOne", "Library/Logs/Depth")]
+        } else if cfg!(windows) {
+            vec![(env("APPDATA"), "TerminalOne", "Depth"), (env("LOCALAPPDATA"), "TerminalOne", "Depth")]
+        } else {
+            vec![(env("XDG_CONFIG_HOME").or_else(|| env("HOME").map(|h| h.join(".config"))), "terminal-one", "depth"),
+                 (env("XDG_CACHE_HOME").or_else(|| env("HOME").map(|h| h.join(".cache"))), "terminal-one", "depth")]
+        };
+        for (base, old, new) in pairs {
+            let Some(b) = base else { continue };
+            if b.join(old).exists() && !b.join(new).exists() { let _ = std::fs::rename(b.join(old), b.join(new)); }
+        }
+    });
+}
+
 // ---------------------------------------------------------------- secret store
-// One item per (service "terminal-one", account). macOS: Keychain through the `security` tool
+// One item per (service "depth", account). Items of the old service "terminal-one" are moved
+// over on first read; set/delete clear the old item so a removed key cannot come back from it. macOS: Keychain through the `security` tool
 // (items it creates have it on their access list: no prompt after every ad-hoc rebuild).
-// Windows: Credential Manager, target "terminal-one:<account>". Linux: libsecret's `secret-tool`.
+// Windows: Credential Manager, target "depth:<account>". Linux: libsecret's `secret-tool`.
 
 #[cfg(target_os = "macos")]
-pub fn secret_get(account: &str) -> Option<String> {
-    let out = std::process::Command::new("security").args(["find-generic-password", "-s", "terminal-one", "-a", account, "-w"]).output().ok()?;
+fn get(svc: &str, account: &str) -> Option<String> {
+    let out = std::process::Command::new("security").args(["find-generic-password", "-s", svc, "-a", account, "-w"]).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty())
 }
 
 /// The command (with the secret) goes over stdin, never into process arguments where `ps` sees it.
 #[cfg(target_os = "macos")]
-pub fn secret_set(account: &str, value: &str) -> Result<()> {
+fn set(svc: &str, account: &str, value: &str) -> Result<()> {
     use std::io::Write;
     if value.contains(['\n', '\r', '"', '\\']) { bail!("unsupported character in the value"); }
     let mut child = std::process::Command::new("security").arg("-i").stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn()?;
     child.stdin.take().ok_or_else(|| anyhow::anyhow!("no stdin"))?
-        .write_all(format!("add-generic-password -U -s terminal-one -a \"{account}\" -w \"{value}\"\n").as_bytes())?;
+        .write_all(format!("add-generic-password -U -s {svc} -a \"{account}\" -w \"{value}\"\n").as_bytes())?;
     let out = child.wait_with_output()?;
     let err = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() || err.contains("rror") { bail!("Keychain: {}", err.trim()); }
@@ -54,17 +80,17 @@ pub fn secret_set(account: &str, value: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn secret_delete(account: &str) {
-    let _ = std::process::Command::new("security").args(["delete-generic-password", "-s", "terminal-one", "-a", account]).output();
+fn del(svc: &str, account: &str) {
+    let _ = std::process::Command::new("security").args(["delete-generic-password", "-s", svc, "-a", account]).output();
 }
 
 #[cfg(windows)]
 fn wide(s: &str) -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() }
 
 #[cfg(windows)]
-pub fn secret_get(account: &str) -> Option<String> {
+fn get(svc: &str, account: &str) -> Option<String> {
     use windows_sys::Win32::Security::Credentials::{CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC};
-    let target = wide(&format!("terminal-one:{account}"));
+    let target = wide(&format!("{svc}:{account}"));
     let mut p: *mut CREDENTIALW = std::ptr::null_mut();
     // SAFETY: target is NUL-terminated; on success p points to a CREDENTIALW we free once.
     unsafe {
@@ -77,9 +103,9 @@ pub fn secret_get(account: &str) -> Option<String> {
 }
 
 #[cfg(windows)]
-pub fn secret_set(account: &str, value: &str) -> Result<()> {
+fn set(svc: &str, account: &str, value: &str) -> Result<()> {
     use windows_sys::Win32::Security::Credentials::{CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC};
-    let mut target = wide(&format!("terminal-one:{account}"));
+    let mut target = wide(&format!("{svc}:{account}"));
     let mut user = wide(account);
     let mut blob = value.as_bytes().to_vec();
     // SAFETY: every pointer outlives the call; zeroed fields are valid "absent" values.
@@ -98,25 +124,25 @@ pub fn secret_set(account: &str, value: &str) -> Result<()> {
 }
 
 #[cfg(windows)]
-pub fn secret_delete(account: &str) {
+fn del(svc: &str, account: &str) {
     use windows_sys::Win32::Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC};
-    let target = wide(&format!("terminal-one:{account}"));
+    let target = wide(&format!("{svc}:{account}"));
     // SAFETY: NUL-terminated target
     unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) };
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
-pub fn secret_get(account: &str) -> Option<String> {
-    let out = std::process::Command::new("secret-tool").args(["lookup", "service", "terminal-one", "account", account]).output().ok()?;
+fn get(svc: &str, account: &str) -> Option<String> {
+    let out = std::process::Command::new("secret-tool").args(["lookup", "service", svc, "account", account]).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty())
 }
 
 /// `secret-tool store` reads the secret from stdin.
 #[cfg(not(any(target_os = "macos", windows)))]
-pub fn secret_set(account: &str, value: &str) -> Result<()> {
+fn set(svc: &str, account: &str, value: &str) -> Result<()> {
     use std::io::Write;
     let mut child = std::process::Command::new("secret-tool")
-        .args(["store", "--label", &format!("terminal-one {account}"), "service", "terminal-one", "account", account])
+        .args(["store", "--label", &format!("{svc} {account}"), "service", svc, "account", account])
         .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn()
         .map_err(|e| anyhow::anyhow!("secret-tool (libsecret) not available: {e}"))?;
     child.stdin.take().ok_or_else(|| anyhow::anyhow!("no stdin"))?.write_all(value.as_bytes())?;
@@ -126,8 +152,29 @@ pub fn secret_set(account: &str, value: &str) -> Result<()> {
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
+fn del(svc: &str, account: &str) {
+    let _ = std::process::Command::new("secret-tool").args(["clear", "service", svc, "account", account]).output();
+}
+
+const OLD_SERVICE: &str = "terminal-one";
+
+pub fn secret_get(account: &str) -> Option<String> {
+    get("depth", account).or_else(|| {
+        let v = get(OLD_SERVICE, account)?;
+        if set("depth", account, &v).is_ok() { del(OLD_SERVICE, account); }
+        Some(v)
+    })
+}
+
+pub fn secret_set(account: &str, value: &str) -> Result<()> {
+    set("depth", account, value)?;
+    del(OLD_SERVICE, account);
+    Ok(())
+}
+
 pub fn secret_delete(account: &str) {
-    let _ = std::process::Command::new("secret-tool").args(["clear", "service", "terminal-one", "account", account]).output();
+    del("depth", account);
+    del(OLD_SERVICE, account);
 }
 
 // ---------------------------------------------------------------- clock, memory

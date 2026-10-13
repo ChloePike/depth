@@ -20,7 +20,7 @@ struct SettingsKeys: View {
                 } icon: { Image(systemName: "exclamationmark.shield.fill").foregroundStyle(Color.orange) }
                 .font(uiFont(11.5)).foregroundStyle(Color.primary)
             } footer: {
-                Text(L("Stored in the macOS Keychain (service \"terminal-one\"), never written to a file."))
+                Text(L("Stored in the macOS Keychain (service \"depth\"), never written to a file."))
                     .font(uiFont(11)).foregroundStyle(Color.t1Dim)
             }
             Section(L("Venues")) {

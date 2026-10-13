@@ -139,9 +139,9 @@ API Keys · About.
 | *Rate limited, paused until …* | Depth paused requests to that host after a rate-limit answer and resumes by itself. Don't restart repeatedly. |
 | Account data missing | Settings → API Keys → *Test*. Check the key's permissions and IP restriction. |
 | Heatmap empty on 4H / 1D | It is recorded live since launch; use 1m or wait. |
-| Something crashed or froze | Attach `~/Library/Logs/TerminalOne/panic.log` to a [bug report](https://github.com/ChloePike/depth/issues/new/choose) (remove anything personal). |
+| Something crashed or froze | Attach `~/Library/Logs/Depth/panic.log` to a [bug report](https://github.com/ChloePike/depth/issues/new/choose) (remove anything personal). |
 
-**Where data lives**: settings `~/Library/Application Support/TerminalOne/`, caches
-`~/Library/Caches/TerminalOne/`, logs `~/Library/Logs/TerminalOne/`, keys in the Keychain under
-`terminal-one`. To uninstall, delete the app and those folders, and remove the `terminal-one` items in
+**Where data lives**: settings `~/Library/Application Support/Depth/`, caches
+`~/Library/Caches/Depth/`, logs `~/Library/Logs/Depth/`, keys in the Keychain under
+`depth`. To uninstall, delete the app and those folders, and remove the `depth` items in
 Keychain Access.

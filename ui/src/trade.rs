@@ -3,10 +3,10 @@
 use super::engine::Engine;
 use super::{fmt_dp, fmt_px, fmt_qty, hms, t, theme::*};
 use eframe::egui::{self, Color32, RichText, Ui};
-use terminal_one::agg::Agg;
-use terminal_one::insure::{self, Filter, Position as InsPos};
-use terminal_one::trade::{self, bbo_levels, Kind, OrderReq, Position, Tif};
-use terminal_one::{now_ms, Exchange, Market, Side};
+use depth::agg::Agg;
+use depth::insure::{self, Filter, Position as InsPos};
+use depth::trade::{self, bbo_levels, Kind, OrderReq, Position, Tif};
+use depth::{now_ms, Exchange, Market, Side};
 
 
 #[derive(PartialEq, Clone, Copy)]
