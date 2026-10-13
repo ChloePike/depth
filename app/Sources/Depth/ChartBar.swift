@@ -56,6 +56,7 @@ struct ChartBar: View {
             Section(L("Overlays")) {
                 Toggle(L("Moving averages"), isOn: Binding(get: { c.ma }, set: { chart(["ma": $0]) }))
                 Button(L("Moving average settings…")) { maSettings = true }
+                Toggle(L("Bollinger bands"), isOn: Binding(get: { c.bb }, set: { chart(["bb": $0]) }))
                 Toggle(L("Book heatmap"), isOn: Binding(get: { c.heat }, set: { chart(["heat": $0]) }))
                 if c.perp { Toggle(L("Liquidation map"), isOn: Binding(get: { c.liqmap }, set: { chart(["liqmap": $0]) })) }
             }

@@ -77,3 +77,4 @@ Moving average settings… = Настройки скользящих средн�
 Magnet crosshair = Магнит перекрестия
 Fibonacci retracement = Коррекция Фибоначчи
 Rectangle = Прямоугольник
+Bollinger bands = Полосы Боллинджера

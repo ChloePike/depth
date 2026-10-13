@@ -77,3 +77,4 @@ Moving average settings… = Ajustes de medias móviles…
 Magnet crosshair = Cursor magnético
 Fibonacci retracement = Retroceso de Fibonacci
 Rectangle = Rectángulo
+Bollinger bands = Bandas de Bollinger

@@ -77,3 +77,4 @@ Moving average settings… = 이동평균선 설정…
 Magnet crosshair = 십자선 자석
 Fibonacci retracement = 피보나치 되돌림
 Rectangle = 사각형
+Bollinger bands = 볼린저 밴드

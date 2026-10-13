@@ -77,3 +77,4 @@ Moving average settings… = Einstellungen gleitender Durchschnitte…
 Magnet crosshair = Fadenkreuz-Magnet
 Fibonacci retracement = Fibonacci-Retracement
 Rectangle = Rechteck
+Bollinger bands = Bollinger-Bänder

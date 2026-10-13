@@ -77,3 +77,4 @@ Moving average settings… = 移動平均線の設定…
 Magnet crosshair = クロスヘアのマグネット
 Fibonacci retracement = フィボナッチ・リトレースメント
 Rectangle = 長方形
+Bollinger bands = ボリンジャーバンド

@@ -169,7 +169,7 @@ final class EguiNSView: NSView {
             s.withCString { t1_view_paste(h, $0) }
             return true
         }
-        if ["c", "x", "a"].contains(e.charactersIgnoringModifiers ?? "") { key(e, true); key(e, false); return true }
+        if ["c", "x", "a", "z"].contains(e.charactersIgnoringModifiers?.lowercased() ?? "") { key(e, true); key(e, false); return true }
         return super.performKeyEquivalent(with: e)
     }
 }

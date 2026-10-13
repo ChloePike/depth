@@ -77,3 +77,4 @@ Moving average settings… = 均线设置…
 Magnet crosshair = 十字线吸附
 Fibonacci retracement = 斐波那契回撤
 Rectangle = 矩形
+Bollinger bands = 布林带

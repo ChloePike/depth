@@ -77,3 +77,4 @@ Moving average settings… = Cài đặt đường trung bình…
 Magnet crosshair = Nam châm con trỏ
 Fibonacci retracement = Thoái lui Fibonacci
 Rectangle = Hình chữ nhật
+Bollinger bands = Dải Bollinger

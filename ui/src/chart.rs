@@ -1,6 +1,6 @@
 //! Candle chart painted with egui: heatmap background, candles, liquidation bubbles, and
 //! stacked sub-panes (volume, CVD, OI, funding predicted + settled, basis, long/short).
-use super::{fmt_px, t, theme::*};
+use super::{fmt_dp, fmt_px, t, theme::*};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Pos2, Rect, RichText, Sense, Stroke, Ui};
 use depth::agg::{Agg, Bar, Heatmap};
 use depth::{Exchange, Market};
@@ -59,7 +59,7 @@ fn stitch(hist: &[Bar], live: Vec<Bar>, first_live_1m: i64, tf: i64) -> Vec<Bar>
 }
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-enum Pane { Vol, Cvd, Oi, Funding, Basis, Ls, Premium, Ofi, BookFlow }
+enum Pane { Vol, Cvd, Oi, Funding, Basis, Ls, Premium, Ofi, BookFlow, Rsi, Macd }
 
 impl Pane {
     fn key(self) -> &'static str {
@@ -67,6 +67,7 @@ impl Pane {
             Pane::Vol => "chart.vol", Pane::Cvd => "chart.cvd", Pane::Oi => "chart.oi",
             Pane::Funding => "chart.funding", Pane::Basis => "chart.basis", Pane::Ls => "chart.ls",
             Pane::Premium => "chart.premium", Pane::Ofi => "chart.ofi", Pane::BookFlow => "chart.bookflow",
+            Pane::Rsi => "chart.rsi", Pane::Macd => "chart.macd",
         }
     }
     fn perp_only(self) -> bool { matches!(self, Pane::Oi | Pane::Funding | Pane::Basis | Pane::Ls) }
@@ -126,6 +127,38 @@ fn ema(vals: &[f64], n: usize) -> Vec<Option<f64>> {
     }).collect()
 }
 
+/// RSI with Wilder smoothing, seeded with the plain average of the first n changes (TradingView's ta.rsi).
+fn rsi(vals: &[f64], n: usize) -> Vec<Option<f64>> {
+    let (mut up, mut dn) = (0.0, 0.0);
+    let k = n as f64;
+    (0..vals.len()).map(|i| {
+        if i == 0 { return None; }
+        let d = vals[i] - vals[i - 1];
+        let (u, w) = (d.max(0.0), (-d).max(0.0));
+        if i <= n { up += u / k; dn += w / k; } else { up = (up * (k - 1.0) + u) / k; dn = (dn * (k - 1.0) + w) / k; }
+        (i >= n).then(|| if dn == 0.0 { 100.0 } else { 100.0 - 100.0 / (1.0 + up / dn) })
+    }).collect()
+}
+
+/// MACD line, signal and histogram (fast, slow, signal EMAs); the signal starts once the MACD has n values.
+fn macd(vals: &[f64], fast: usize, slow: usize, sig: usize) -> Vec<Option<(f64, f64, f64)>> {
+    let (f, s) = (ema(vals, fast), ema(vals, slow));
+    let line: Vec<Option<f64>> = f.iter().zip(&s).map(|(a, b)| Some((*a)? - (*b)?)).collect();
+    let start = line.iter().position(Option::is_some).unwrap_or(vals.len());
+    let defined: Vec<f64> = line[start..].iter().map(|v| v.unwrap_or(0.0)).collect();
+    let sg = ema(&defined, sig);
+    (0..vals.len()).map(|i| { let m = line[i]?; let g = sg[i.checked_sub(start)?]?; Some((m, g, m - g)) }).collect()
+}
+
+/// Bollinger bands: (middle SMA, half width = k population standard deviations).
+fn bollinger(vals: &[f64], n: usize, k: f64) -> Vec<Option<(f64, f64)>> {
+    (0..vals.len()).map(|i| {
+        let w = vals.get((i + 1).checked_sub(n)?..=i)?;
+        let m = w.iter().sum::<f64>() / n as f64;
+        Some((m, k * (w.iter().map(|v| (v - m).powi(2)).sum::<f64>() / n as f64).sqrt()))
+    }).collect()
+}
+
 /// Fibonacci retracement levels drawn between a drawing's two points (0 at the second point).
 const FIB: [f64; 7] = [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0];
 
@@ -158,8 +191,17 @@ fn dashed(painter: &egui::Painter, x0: f32, x1: f32, y: f32, col: Color32) {
 }
 
 /// A user drawing anchored in (bar time ms, price), so it survives timeframe changes.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct Drawing { tool: Tool, a: (i64, f64), b: (i64, f64) }
+/// `col` 0xRRGGBB (0 = the accent), `dash` 0 solid / 1 dashed / 2 dotted.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Drawing { tool: Tool, a: (i64, f64), b: (i64, f64), #[serde(default)] col: u32, #[serde(default)] dash: u8 }
+
+impl Drawing {
+    fn new(tool: Tool, a: (i64, f64), b: (i64, f64)) -> Self { Drawing { tool, a, b, col: 0, dash: 0 } }
+    fn color(&self) -> Color32 { if self.col == 0 { accent() } else { rgb(self.col) } }
+}
+
+/// Swatches of the drawing context menu (TradingView's default palette row).
+const DRAW_COLORS: [u32; 8] = [0x2962ff, 0x089981, 0xf23645, 0xff9800, 0xffeb3b, 0x9c27b0, 0x00bcd4, 0x787b86];
 
 /// Persisted in settings.json (see ui::Settings); runtime-only fields are skipped.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -189,6 +231,8 @@ pub struct Chart {
     breakouts: bool,
     /// session VWAP with sigma bands
     vwap: bool,
+    /// Bollinger bands (20, 2) on the close
+    bb: bool,
     /// overlay defaults generation: settings from before 2 get the calmer defaults once
     #[serde(default)]
     style: u32,
@@ -216,14 +260,20 @@ pub struct Chart {
     #[serde(skip)] drag: Option<(usize, u8)>,
     /// pan velocity after a drag is released (bars per second), decaying
     #[serde(skip)] fling: f32,
+    /// drawing edits: the last committed list (base, drawings), undo and redo stacks of earlier ones
+    #[serde(skip)] committed: Option<(String, Vec<Drawing>)>,
+    #[serde(skip)] undo: Vec<Vec<Drawing>>,
+    #[serde(skip)] redo: Vec<Vec<Drawing>>,
+    /// drawing whose context menu (color, line style, delete) is open
+    #[serde(skip)] menu: Option<usize>,
 }
 
 impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: None, hot: None, drag: None, fling: 0.0, ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
-            panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false)],
+            drawings: Default::default(), tool: None, pending: None, hot: None, drag: None, fling: 0.0, committed: None, undo: vec![], redo: vec![], menu: None, ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false)],
         }
     }
 }
@@ -538,7 +588,7 @@ impl Chart {
         // one-time move to the calmer defaults (fewer overlays on by default); each stays a toggle
         if self.style < 2 { self.ma = false; self.walls = false; self.cone = false; self.style = 2; }
         // panes added after a layout was saved
-        for p in [Pane::Premium, Pane::Ofi, Pane::BookFlow] { if !self.panes.iter().any(|x| x.0 == p) { self.panes.push((p, false)); } }
+        for p in [Pane::Premium, Pane::Ofi, Pane::BookFlow, Pane::Rsi, Pane::Macd] { if !self.panes.iter().any(|x| x.0 == p) { self.panes.push((p, false)); } }
         let smarket = if market == Market::Margin { Market::Spot } else { market };
         // hosted: the native toolbar above the chart drives these through native_set
         if !native() { self.toolbar(ui, a, smarket, base); }
@@ -915,6 +965,18 @@ impl Chart {
             let pts: Vec<Pos2> = (i0..=i1).filter_map(|i| Some(pos2(fr.x(i as f32), y(m[i]?)))).collect();
             if pts.len() > 1 { painter.with_clip_rect(main_plot).add(egui::Shape::line(pts, Stroke::new(1.2, col))); }
         }
+        if self.bb {
+            let bb = bollinger(&closes, 20, 2.0);
+            let pts = |f: &dyn Fn(f64, f64) -> f64| -> Vec<Pos2> { (i0..=i1).filter_map(|i| { let (m, w) = bb[i]?; Some(pos2(fr.x(i as f32), y(f(m, w)))) }).collect() };
+            let (up_, mid, lo_) = (pts(&|m, w| m + w), pts(&|m, _| m), pts(&|m, w| m - w));
+            let clip = painter.with_clip_rect(main_plot);
+            let band = rgb(0x2962ff);
+            // fill as one quad per bar step: a single concave polygon would tessellate wrongly
+            for k in 1..up_.len().min(lo_.len()) {
+                clip.add(egui::Shape::convex_polygon(vec![up_[k - 1], up_[k], lo_[k], lo_[k - 1]], band.gamma_multiply(0.04), Stroke::NONE));
+            }
+            for (p, c) in [(up_, band), (lo_, band), (mid, rgb(0xff6d00))] { if p.len() > 1 { clip.add(egui::Shape::line(p, Stroke::new(1.0, c))); } }
+        }
 
         // highest high / lowest low of the visible range, Binance-style arrow labels
         let hi_k = (0..vis.len()).max_by(|x, z| vis[*x].h.total_cmp(&vis[*z].h));
@@ -1025,7 +1087,7 @@ impl Chart {
         let hover = resp.hover_pos().filter(|p| p.x < main.right());
         let hi_idx = hover.map(|p| fr.idx(p.x).round().clamp(i0 as f32, i1 as f32) as usize).unwrap_or(bars.len() - 1);
         let prem = if panes.contains(&Pane::Premium) { premium_lines(a, smarket, vis, self.tf * 60_000, hi_idx.checked_sub(i0)) } else { vec![] };
-        let pane_scales: Vec<(Pane, Rect, Option<(f64, f64)>)> = pane_rects.iter().map(|(p, r)| (*p, *r, self.draw_pane(&painter, *p, *r, vis, i0, &fr, &bars[hi_idx], &prem))).collect();
+        let pane_scales: Vec<(Pane, Rect, Option<(f64, f64)>)> = pane_rects.iter().map(|(p, r)| (*p, *r, self.draw_pane(&painter, *p, *r, &bars, i0, i1, &fr, hi_idx, &prem))).collect();
 
         // time axis
         let ty = top + TIME_H / 2.0;
@@ -1124,7 +1186,8 @@ impl Chart {
 
     #[allow(clippy::too_many_arguments)]
     /// Returns the value range the pane was drawn with (for the crosshair), None when it drew nothing.
-    fn draw_pane(&self, painter: &egui::Painter, p: Pane, r: Rect, vis: &[Bar], i0: usize, fr: &Frame, hb: &Bar, prem: &[Prem]) -> Option<(f64, f64)> {
+    fn draw_pane(&self, painter: &egui::Painter, p: Pane, r: Rect, bars: &[Bar], i0: usize, i1: usize, fr: &Frame, hi: usize, prem: &[Prem]) -> Option<(f64, f64)> {
+        let (vis, hb) = (&bars[i0..=i1], &bars[hi]);
         // the top 18px hold the legend, so lines never run through it
         let inner = Rect::from_min_max(pos2(r.left(), r.top() + 18.0), pos2(r.right(), r.bottom() - 4.0));
         let label = |s: String, col: Color32, x: f32| painter.text(pos2(x, r.top() + 9.0), Align2::LEFT_CENTER, s, mono(10.5), col).right() + 10.0;
@@ -1243,6 +1306,47 @@ impl Chart {
                 }
                 axis(lo, hi, &fmt_big);
             }
+            // oscillators run over every loaded bar so the left edge is warmed up
+            Pane::Rsi => {
+                let closes: Vec<f64> = bars.iter().map(|b| b.c).collect();
+                let v = rsi(&closes, 14);
+                let (lo, hi_) = (0.0, 100.0);
+                let (y70, y30) = (y_of(70.0, lo, hi_, inner), y_of(30.0, lo, hi_, inner));
+                painter.rect_filled(Rect::from_x_y_ranges(r.left()..=r.right(), y70..=y30), 0, PURPLE.gamma_multiply(0.07));
+                for yy in [y70, y30, y_of(50.0, lo, hi_, inner)] { painter.hline(r.left()..=r.right(), yy, Stroke::new(1.0, super::theme::line())); }
+                line((i0..=i1).filter_map(|i| Some((i - i0, v[i]?))).collect(), lo, hi_, PURPLE, false);
+                if let Some(x) = v[hi] { label(format!("14  {x:.2}"), PURPLE, lx); }
+                axis(lo, hi_, &|x| format!("{x:.0}"));
+            }
+            Pane::Macd => {
+                let closes: Vec<f64> = bars.iter().map(|b| b.c).collect();
+                let m = macd(&closes, 12, 26, 9);
+                let seen: Vec<(f64, f64, f64)> = m[i0..=i1].iter().flatten().copied().collect();
+                if seen.is_empty() { return None; }
+                let max = seen.iter().fold(0.0f64, |a, (l, s, h)| a.max(l.abs()).max(s.abs()).max(h.abs())).max(1e-12);
+                let (lo, hi_) = (-max * 1.08, max * 1.08);
+                let zy = y_of(0.0, lo, hi_, inner);
+                painter.hline(r.left()..=r.right(), zy, Stroke::new(1.0, super::theme::line()));
+                let bw = (self.bar_w * 0.7).max(1.0);
+                // histogram: bright while growing away from zero, faded while shrinking (TradingView)
+                for i in i0..=i1 {
+                    let Some((_, _, h)) = m[i] else { continue };
+                    let prev = i.checked_sub(1).and_then(|j| m[j]).map_or(h, |x| x.2);
+                    let col = if h >= 0.0 { up() } else { dn() }.gamma_multiply(if h.abs() >= prev.abs() { 0.8 } else { 0.4 });
+                    let (x, yh) = (fr.x(i as f32), y_of(h, lo, hi_, inner));
+                    painter.rect_filled(Rect::from_min_max(pos2(x - bw / 2.0, zy.min(yh)), pos2(x + bw / 2.0, zy.max(yh))), 0, col);
+                }
+                line((i0..=i1).filter_map(|i| Some((i - i0, m[i]?.0))).collect(), lo, hi_, rgb(0x2962ff), false);
+                line((i0..=i1).filter_map(|i| Some((i - i0, m[i]?.1))).collect(), lo, hi_, rgb(0xff6d00), false);
+                if let Some((l, s, h)) = m[hi] {
+                    let f = |v: f64| fmt_dp(v, (3.0 - max.log10().floor()).clamp(0.0, 8.0) as usize);
+                    lx = label("12 26 9".into(), mu(), lx);
+                    lx = label(f(h), if h >= 0.0 { up() } else { dn() }, lx);
+                    lx = label(f(l), rgb(0x2962ff), lx);
+                    label(f(s), rgb(0xff6d00), lx);
+                }
+                axis(lo, hi_, &|v| fmt_dp(v, (3.0 - max.log10().floor()).clamp(0.0, 8.0) as usize));
+            }
             Pane::Funding => {
                 let pred: Vec<(usize, f64)> = vis.iter().enumerate().filter_map(|(k, b)| Some((k, b.funding_h? * 1e4))).collect();
                 let sett: Vec<(usize, f64)> = vis.iter().enumerate().filter_map(|(k, b)| Some((k, b.funding_settled? * 1e4))).collect();
@@ -1260,6 +1364,34 @@ impl Chart {
         scale.get()
     }
 
+    /// Records each finished drawing edit (a whole drag is one step) and applies Cmd+Z / Cmd+Shift+Z.
+    fn undo_redo(&mut self, ui: &Ui, base: &str) {
+        let cur = self.drawings.get(base).cloned().unwrap_or_default();
+        match &self.committed {
+            Some((b, prev)) if b == base => {
+                if *prev != cur && self.drag.is_none() {
+                    self.undo.push(prev.clone());
+                    if self.undo.len() > 100 { self.undo.remove(0); }
+                    self.redo.clear();
+                    self.committed = Some((base.to_string(), cur.clone()));
+                }
+            }
+            // another symbol: its history starts fresh
+            _ => { self.undo.clear(); self.redo.clear(); self.committed = Some((base.to_string(), cur.clone())); }
+        }
+        let (undo, redo) = ui.input(|i| {
+            let z = i.modifiers.command && i.key_pressed(egui::Key::Z);
+            (z && !i.modifiers.shift, z && i.modifiers.shift)
+        });
+        let (from, to) = if undo { (&mut self.undo, &mut self.redo) } else if redo { (&mut self.redo, &mut self.undo) } else { return };
+        let Some(prev) = from.pop() else { return };
+        to.push(cur);
+        self.drawings.insert(base.to_string(), prev.clone());
+        self.committed = Some((base.to_string(), prev));
+        self.hot = None;
+        self.menu = None;
+    }
+
     /// Place, draw, edit and delete drawings. Click places points for the armed tool; drag a
     /// handle to move that point or the drawing's body to move all of it; right-click or Delete
     /// removes the drawing under the pointer; Escape disarms.
@@ -1270,7 +1402,8 @@ impl Chart {
         let y = |v: f64| ps.y(v);
         let to_screen = |(t, p): (i64, f64)| pos2(fr.x(idx_of(bars, t, ms)), y(p));
         let to_point = |p: Pos2| (time_of(bars, fr.idx(p.x), ms), ps.v(p.y));
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) { self.tool = None; self.pending = None; }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) { self.tool = None; self.pending = None; self.menu = None; }
+        self.undo_redo(ui, base);
 
         let list = self.drawings.entry(base.to_string()).or_default();
         let ptr = resp.hover_pos().filter(|p| plot.contains(*p));
@@ -1313,28 +1446,56 @@ impl Chart {
         if let (Some(tool), true, Some(p)) = (self.tool, resp.clicked(), resp.interact_pointer_pos().filter(|p| plot.contains(*p))) {
             let pt = to_point(p);
             match (tool, self.pending) {
-                (Tool::HLine, _) => { list.push(Drawing { tool, a: pt, b: pt }); self.tool = None; }
+                (Tool::HLine, _) => { list.push(Drawing::new(tool, pt, pt)); self.tool = None; }
                 (_, None) => self.pending = Some(pt),
-                (_, Some(a)) => { list.push(Drawing { tool, a, b: pt }); self.tool = None; self.pending = None; }
+                (_, Some(a)) => { list.push(Drawing::new(tool, a, pt)); self.tool = None; self.pending = None; }
             }
         } else if let (Some((i, _)), None) = (hot, self.drag) {
-            if resp.secondary_clicked() || ui.input(|x| x.key_pressed(egui::Key::Delete) || x.key_pressed(egui::Key::Backspace)) {
+            if resp.secondary_clicked() { self.menu = Some(i); }
+            if ui.input(|x| x.key_pressed(egui::Key::Delete) || x.key_pressed(egui::Key::Backspace)) {
                 list.remove(i);
                 self.hot = None;
                 return;
             }
         }
+        if let Some(i) = self.menu.filter(|i| *i < list.len()) {
+            let shown = resp.context_menu(|ui| {
+                ui.set_min_width(170.0);
+                let d = &mut list[i];
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for c in DRAW_COLORS {
+                        let (r, sw) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
+                        ui.painter().rect_filled(r.shrink(1.0), 3, rgb(c));
+                        if d.color() == rgb(c) { ui.painter().rect_stroke(r, 3, Stroke::new(1.5, fg()), egui::StrokeKind::Inside); }
+                        if sw.clicked() { d.col = c; }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    for (k, lab) in [(0u8, "draw.solid"), (1, "draw.dashed"), (2, "draw.dotted")] {
+                        if ui.selectable_label(d.dash == k, t(lab)).clicked() { d.dash = k; }
+                    }
+                });
+                ui.separator();
+                if ui.button(t("draw.delete")).clicked() { list.remove(i); ui.close(); }
+            });
+            if shown.is_none() { self.menu = None; }
+        } else { self.menu = None; }
 
         let clip = painter.with_clip_rect(plot);
         let draw = |d: &Drawing, emph: bool, alpha: f32| {
-            let col = accent().linear_multiply(alpha);
+            let col = d.color().linear_multiply(alpha);
             let s = Stroke::new(if emph { 2.0 } else { 1.2 }, col);
+            let seg = |p0: Pos2, p1: Pos2, s: Stroke| match d.dash {
+                0 => { clip.line_segment([p0, p1], s); }
+                k => { let (on, off) = if k == 1 { (6.0, 4.0) } else { (1.5, 3.0) }; clip.extend(egui::Shape::dashed_line(&[p0, p1], s, on, off)); }
+            };
             let (a, b) = (to_screen(d.a), to_screen(d.b));
             match d.tool {
                 Tool::Rect => {
                     let r = Rect::from_two_pos(a, b);
                     clip.rect_filled(r, 0, col.linear_multiply(0.12));
-                    clip.rect_stroke(r, 0, s, egui::StrokeKind::Middle);
+                    for (p0, p1) in segs(d) { seg(p0, p1, s); }
                 }
                 Tool::Fib => {
                     let (x0, x1) = (a.x.min(b.x), a.x.max(b.x));
@@ -1345,20 +1506,20 @@ impl Chart {
                     }
                     for f in FIB {
                         let yy = y(px(f));
-                        clip.hline(x0..=x1, yy, Stroke::new(s.width, fib_col(f).linear_multiply(alpha)));
+                        seg(pos2(x0, yy), pos2(x1, yy), Stroke::new(s.width, fib_col(f).linear_multiply(alpha)));
                         clip.text(pos2(x0 + 3.0, yy - 1.0), Align2::LEFT_BOTTOM, format!("{f} ({})", fmt_px(px(f))), mono(10.0), fib_col(f).linear_multiply(alpha));
                     }
                     clip.extend(egui::Shape::dashed_line(&[a, b], Stroke::new(1.0, mu().linear_multiply(0.6 * alpha)), 4.0, 4.0));
                 }
-                _ => for (p0, p1) in segs(d) { clip.line_segment([p0, p1], s); },
+                _ => for (p0, p1) in segs(d) { seg(p0, p1, s); },
             }
             if d.tool == Tool::HLine {
                 let lab = Rect::from_min_size(pos2(main.right() + 1.0, a.y - 9.0), vec2(AXIS_W - 2.0, 18.0));
-                painter.rect_filled(lab, 2, accent());
+                painter.rect_filled(lab, 2, d.color());
                 painter.text(lab.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, fmt_px(d.a.1), mono(11.0), Color32::BLACK);
             } else if emph {
                 // handles show on hover: hollow, as in TradingView
-                for p in [a, b] { clip.circle(p, 4.0, panel2(), Stroke::new(1.5, accent())); }
+                for p in [a, b] { clip.circle(p, 4.0, panel2(), Stroke::new(1.5, d.color())); }
             }
         };
         for (i, d) in list.iter().enumerate() { draw(d, hot.is_some_and(|h| h.0 == i), 1.0); }
@@ -1366,8 +1527,8 @@ impl Chart {
         if let (Some(tool), Some(p)) = (self.tool, ptr) {
             let pt = to_point(p);
             match (tool, self.pending) {
-                (Tool::HLine, _) => draw(&Drawing { tool, a: pt, b: pt }, false, 0.6),
-                (_, Some(a)) => draw(&Drawing { tool, a, b: pt }, false, 0.6),
+                (Tool::HLine, _) => draw(&Drawing::new(tool, pt, pt), false, 0.6),
+                (_, Some(a)) => draw(&Drawing::new(tool, a, pt), false, 0.6),
                 _ => {}
             }
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -1395,7 +1556,7 @@ impl Chart {
             "src": self.src.map(|e| format!("{e:?}")), "venues": venues,
             "panes": self.panes.iter().filter(|(p, _)| !p.perp_only() || market == Market::Perp)
                 .map(|(p, on)| serde_json::json!({"key": p.key(), "label": t(p.key()), "on": on})).collect::<Vec<_>>(),
-            "ma": self.ma, "heat": self.heat, "liqmap": self.liqmap, "sr": self.sr, "walls": self.walls, "mark": self.mark, "breakouts": self.breakouts, "vwap": self.vwap, "cone": self.cone, "perp": market == Market::Perp,
+            "ma": self.ma, "heat": self.heat, "liqmap": self.liqmap, "sr": self.sr, "walls": self.walls, "mark": self.mark, "breakouts": self.breakouts, "vwap": self.vwap, "bb": self.bb, "cone": self.cone, "perp": market == Market::Perp,
             "mas": self.mas.iter().map(|m| serde_json::json!({"n": m.n, "col": format!("#{:06x}", m.col), "ema": m.ema, "on": m.on})).collect::<Vec<_>>(), "magnet": self.magnet,
             "tool": tool, "drawings": self.drawings.get(base).map_or(0, |v| v.len()), "panned": self.right.abs() > 0.5 || self.bar_w != 7.0,
         })
@@ -1416,6 +1577,7 @@ impl Chart {
         if let Some(b) = v["breakouts"].as_bool() { self.breakouts = b; }
         if let Some(b) = v["vwap"].as_bool() { self.vwap = b; }
         if let Some(b) = v["cone"].as_bool() { self.cone = b; }
+        if let Some(b) = v["bb"].as_bool() { self.bb = b; }
         if let Some(b) = v["magnet"].as_bool() { self.magnet = b; }
         // {ma_line: i, n?, col?: "#rrggbb", ema?, on?}
         if let Some(m) = v["ma_line"].as_u64().and_then(|i| self.mas.get_mut(i as usize)) {
@@ -1476,6 +1638,7 @@ impl Chart {
                         });
                     }
                 }
+                ui.checkbox(&mut self.bb, t("chart.bb"));
                 ui.checkbox(&mut self.magnet, t("chart.magnet"));
                 ui.checkbox(&mut self.heat, t("chart.heatmap"));
                 if market == Market::Perp { ui.checkbox(&mut self.liqmap, t("chart.liqmap")).on_hover_text(t("chart.liqmap_tip")); }
@@ -1632,6 +1795,20 @@ mod tests {
         // k = 2 / (3 + 1) = 0.5
         assert_eq!(e[3], Some(3.0));
         assert_eq!(Tool::parse("fib").map(Tool::id), Some("fib"));
+    }
+
+    #[test]
+    fn rsi_macd_bollinger() {
+        let r = rsi(&[1.0, 2.0, 1.0, 2.0, 3.0], 2);
+        assert_eq!(r[..2], [None, None]);
+        assert_eq!(r[2], Some(50.0));
+        // Wilder: up = (0.5 + 1) / 2, dn = 0.5 / 2
+        assert_eq!(r[3], Some(75.0));
+        assert_eq!(rsi(&[1.0, 2.0, 3.0], 2)[2], Some(100.0));
+        let m = macd(&[5.0; 40], 12, 26, 9);
+        assert!(m[32].is_none() && m[33] == Some((0.0, 0.0, 0.0)));
+        let b = bollinger(&[1.0, 3.0, 1.0, 3.0], 2, 2.0);
+        assert_eq!((b[0], b[1]), (None, Some((2.0, 2.0))));
     }
 
     #[test]
