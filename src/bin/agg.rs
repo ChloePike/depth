@@ -32,6 +32,16 @@ fn print(a: &Agg, base: &str) {
             b.first().map(|l| l.px).unwrap_or(0.0), k.first().map(|l| l.px).unwrap_or(0.0),
             depth(&b, 0.001, false), depth(&k, 0.001, true), depth(&b, 0.005, false), depth(&k, 0.005, true), depth(&b, 0.01, false), depth(&k, 0.01, true));
     }
+    if let Some(s) = a.series.get(&(None, Market::Perp)) {
+        let row = |s: &agg::Series| s.bars.iter().rev().take(2).fold((0.0, 0.0, 0.0, 0.0), |a, b| { let (nb, na) = b.book_net(); (a.0 + nb, a.1 + na, a.2 + b.flow.ofi, a.3 + b.vol) });
+        let (nb, na, ofi, vol) = row(s);
+        println!("book flow last 2 bars ({base}): net bid {nb:+.1}  net ask {na:+.1}  OFI {ofi:+.1}  | traded {vol:.1}");
+        for ex in Exchange::ALL {
+            let Some(s) = a.series.get(&(Some(ex), Market::Perp)) else { continue };
+            let (nb, na, ofi, vol) = row(s);
+            println!("  {:<12} net bid {nb:+.1}  net ask {na:+.1}  OFI {ofi:+.1}  traded {vol:.1}", format!("{ex:?}"));
+        }
+    }
     for (m, h) in &a.heat { println!("heatmap {m:?}: {} columns, bin {}, last column {} bins", h.cols.len(), h.bin, h.cols.back().map(|c| c.1.len()).unwrap_or(0)); }
 
     println!("\n==== {base} options (first 4 expiries per venue) ====");

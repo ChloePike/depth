@@ -59,14 +59,14 @@ fn stitch(hist: &[Bar], live: Vec<Bar>, first_live_1m: i64, tf: i64) -> Vec<Bar>
 }
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-enum Pane { Vol, Cvd, Oi, Funding, Basis, Ls, Premium }
+enum Pane { Vol, Cvd, Oi, Funding, Basis, Ls, Premium, Ofi, BookFlow }
 
 impl Pane {
     fn key(self) -> &'static str {
         match self {
             Pane::Vol => "chart.vol", Pane::Cvd => "chart.cvd", Pane::Oi => "chart.oi",
             Pane::Funding => "chart.funding", Pane::Basis => "chart.basis", Pane::Ls => "chart.ls",
-            Pane::Premium => "chart.premium",
+            Pane::Premium => "chart.premium", Pane::Ofi => "chart.ofi", Pane::BookFlow => "chart.bookflow",
         }
     }
     fn perp_only(self) -> bool { matches!(self, Pane::Oi | Pane::Funding | Pane::Basis | Pane::Ls) }
@@ -91,13 +91,43 @@ struct HeatCache {
 struct TexGeom { t0: i64, ms: i64, lo: i64, bins: usize, cols: usize }
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-enum Tool { HLine, Trend, Ray }
+enum Tool { HLine, Trend, Ray, Fib, Rect }
+
+impl Tool {
+    fn id(self) -> &'static str { match self { Tool::HLine => "hline", Tool::Trend => "trend", Tool::Ray => "ray", Tool::Fib => "fib", Tool::Rect => "rect" } }
+    fn parse(s: &str) -> Option<Tool> { [Tool::HLine, Tool::Trend, Tool::Ray, Tool::Fib, Tool::Rect].into_iter().find(|t| t.id() == s) }
+}
 
 /// A price line from the account: entry of a position or a resting order.
 /// Drawn dashed with a tag at the left edge ("tag | sub") and the price on the axis.
 pub struct ChartLine { pub price: f64, pub tag: String, pub sub: String, pub col: Color32 }
 
-const MA: [(usize, Color32); 3] = [(7, Color32::from_rgb(0xf0, 0xb9, 0x0b)), (25, Color32::from_rgb(0xe0, 0x5b, 0xc4)), (99, Color32::from_rgb(0x9b, 0x8c, 0xf0))];
+/// One moving average line: period, color (0xRRGGBB), exponential instead of simple, shown.
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MaLine { pub n: usize, pub col: u32, pub ema: bool, pub on: bool }
+
+fn default_mas() -> Vec<MaLine> {
+    vec![MaLine { n: 7, col: 0xf0b90b, ema: false, on: true }, MaLine { n: 25, col: 0xe05bc4, ema: false, on: true }, MaLine { n: 99, col: 0x9b8cf0, ema: false, on: true }]
+}
+
+fn rgb(c: u32) -> Color32 { Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8) }
+
+/// Exponential moving average (seeded with the SMA of the first n values, as TradingView does).
+fn ema(vals: &[f64], n: usize) -> Vec<Option<f64>> {
+    let k = 2.0 / (n as f64 + 1.0);
+    let mut prev: Option<f64> = None;
+    vals.iter().enumerate().map(|(i, v)| {
+        prev = match prev {
+            Some(p) => Some(p + k * (v - p)),
+            None if i + 1 >= n => Some(vals[i + 1 - n..=i].iter().sum::<f64>() / n as f64),
+            None => None,
+        };
+        prev
+    }).collect()
+}
+
+/// Fibonacci retracement levels drawn between a drawing's two points (0 at the second point).
+const FIB: [f64; 7] = [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0];
 
 /// Simple moving average of `vals` over `n` (None until n values are in).
 /// 1.2K / 3.4M / 1.1B for wall sizes.
@@ -144,8 +174,11 @@ pub struct Chart {
     bar_w: f32,
     /// drawings per base asset
     drawings: std::collections::HashMap<String, Vec<Drawing>>,
-    /// MA(7/25/99) on the price chart
+    /// moving averages on the price chart (master toggle, then each line)
     ma: bool,
+    mas: Vec<MaLine>,
+    /// magnet: the crosshair's price snaps to the hovered bar's open / high / low / close
+    magnet: bool,
     /// auto support / resistance from clustered swing highs and lows
     sr: bool,
     /// large resting orders in the aggregated book (liquidity walls)
@@ -177,14 +210,20 @@ pub struct Chart {
     #[serde(skip)] tool: Option<Tool>,
     /// first point of a two-point drawing in progress
     #[serde(skip)] pending: Option<(i64, f64)>,
+    /// drawing part under the pointer last frame (index, 0 = point a, 1 = point b, 2 = whole), and
+    /// the one being dragged: a drag that starts on a drawing edits it instead of panning
+    #[serde(skip)] hot: Option<(usize, u8)>,
+    #[serde(skip)] drag: Option<(usize, u8)>,
+    /// pan velocity after a drag is released (bars per second), decaying
+    #[serde(skip)] fling: f32,
 }
 
 impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: None, ma: false, sr: true, walls: false, mark: true, breakouts: true, vwap: true, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
-            panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false)],
+            drawings: Default::default(), tool: None, pending: None, hot: None, drag: None, fling: 0.0, ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false)],
         }
     }
 }
@@ -200,6 +239,7 @@ pub fn resample(bars: &[Bar], tf: i64) -> Vec<Bar> {
                 o.h = o.h.max(b.h); o.l = o.l.min(b.l); o.c = b.c;
                 o.vol += b.vol; o.buy += b.buy; o.sell += b.sell;
                 o.liq_long += b.liq_long; o.liq_short += b.liq_short;
+                o.flow += b.flow;
                 o.cvd = b.cvd;
                 if b.oi.is_some() { o.oi = b.oi; }
                 if b.funding_h.is_some() { o.funding_h = b.funding_h; }
@@ -498,7 +538,7 @@ impl Chart {
         // one-time move to the calmer defaults (fewer overlays on by default); each stays a toggle
         if self.style < 2 { self.ma = false; self.walls = false; self.cone = false; self.style = 2; }
         // panes added after a layout was saved
-        if !self.panes.iter().any(|p| p.0 == Pane::Premium) { self.panes.push((Pane::Premium, false)); }
+        for p in [Pane::Premium, Pane::Ofi, Pane::BookFlow] { if !self.panes.iter().any(|x| x.0 == p) { self.panes.push((p, false)); } }
         let smarket = if market == Market::Margin { Market::Spot } else { market };
         // hosted: the native toolbar above the chart drives these through native_set
         if !native() { self.toolbar(ui, a, smarket, base); }
@@ -531,16 +571,41 @@ impl Chart {
         // interaction (panning stays on while a drawing tool is armed: placing is click-only)
         // a drag that starts on the price axis scales prices instead of panning time
         let on_axis = resp.interact_pointer_pos().is_some_and(|p| p.x > main.right() && p.y < main.bottom());
-        if resp.dragged() && !on_axis { self.right += resp.drag_delta().x / self.bar_w; }
-        if resp.hover_pos().is_some_and(|p| p.x > main.right() && p.y < main.bottom()) { ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical); }
-        // wheel: over the price axis it scales prices, over the plot it zooms time
-        let mut y_wheel = 0.0f32;
-        if resp.hovered() {
-            let dy = ui.input(|i| i.smooth_scroll_delta.y);
-            let over_axis = resp.hover_pos().is_some_and(|p| p.x > main.right() && p.y < main.bottom());
-            if dy != 0.0 { if over_axis { y_wheel = dy; } else { self.bar_w = (self.bar_w * (dy * 0.003).exp()).clamp(2.0, 40.0); } }
+        // a drag that starts on a drawing (hit-tested last frame) moves it instead of the chart
+        if resp.drag_started() { self.drag = if on_axis { None } else { self.hot }; self.fling = 0.0; }
+        let editing = self.drag.is_some();
+        let dt = ui.input(|i| i.stable_dt).clamp(0.001, 0.05);
+        if resp.dragged() && !on_axis && !editing { self.right += resp.drag_delta().x / self.bar_w; }
+        if resp.drag_stopped() {
+            // released while moving: keep gliding (TradingView-style inertia)
+            let vx = ui.input(|i| i.pointer.velocity().x);
+            self.fling = if !editing && !on_axis && vx.abs() > 150.0 { vx / self.bar_w } else { 0.0 };
+            self.drag = None;
+        } else if !resp.dragged() && self.fling != 0.0 {
+            self.right += self.fling * dt;
+            self.fling *= (-dt * 4.0).exp();
+            // repaints only while gliding: under half a bar per second it stops
+            if self.fling.abs() < 0.5 { self.fling = 0.0 } else { ui.ctx().request_repaint(); }
         }
-        if resp.double_clicked() { self.right = 0.0; self.bar_w = 7.0; self.y_range = None; }
+        if resp.hover_pos().is_some_and(|p| p.x > main.right() && p.y < main.bottom()) { ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical); }
+        // wheel over the price axis scales prices; over the plot vertical scroll / pinch zooms time
+        // around the pointer (the bar under it stays put) and horizontal scroll pans
+        let mut y_wheel = 0.0f32;
+        if let (true, Some(hp)) = (resp.hovered(), resp.hover_pos()) {
+            let (d, pinch) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
+            if hp.x > main.right() && hp.y < main.bottom() { y_wheel = d.y; } else {
+                let bw = (self.bar_w * (d.y * 0.003).exp() * pinch).clamp(1.5, 60.0);
+                if bw != self.bar_w {
+                    let edge = bars.len() as f32 + 3.0 - self.right;
+                    let idx = edge - (main.right() - hp.x - self.bar_w / 2.0) / self.bar_w;
+                    let edge2 = idx + (main.right() - hp.x - bw / 2.0) / bw;
+                    self.right = bars.len() as f32 + 3.0 - edge2;
+                    self.bar_w = bw;
+                }
+                if d.x != 0.0 { self.right += d.x / self.bar_w; self.fling = 0.0; }
+            }
+        }
+        if resp.double_clicked() && self.hot.is_none() { self.right = 0.0; self.bar_w = 7.0; self.y_range = None; }
         let n_vis = plot_w / self.bar_w;
         self.right = self.right.clamp(-n_vis * 0.5, bars.len() as f32);
         let right_edge = bars.len() as f32 - 1.0 + 4.0 - self.right;
@@ -565,7 +630,7 @@ impl Chart {
                 let (mid, half) = ((lo + hi) / 2.0, (hi - lo) / 2.0 * (dy * 0.006).exp());
                 (lo, hi) = (mid - half, mid + half);
                 self.y_range = Some((lo, hi));
-            } else if self.y_range.is_some() {
+            } else if self.y_range.is_some() && !editing {
                 let shift = dy / ph * (hi - lo);
                 (lo, hi) = (lo + shift, hi + shift);
                 self.y_range = Some((lo, hi));
@@ -696,10 +761,10 @@ impl Chart {
             legend3.push((t("chart.poc").into(), fmt_px(poc), gold));
             legend3.push((t("chart.va").into(), format!("{} – {}", fmt_px(p.lo + va0 as f64 * p.bin), fmt_px(p.lo + (va1 + 1) as f64 * p.bin)), accent()));
             clip.hline(main.left()..=main.right(), y(poc), Stroke::new(1.2, gold.linear_multiply(0.85)));
-            let mut tagged = vec![(poc, format!("POC {}", fmt_px(poc)), gold)];
+            let mut tagged = vec![(poc, "POC".to_string(), gold)];
             for (px, k) in [(p.lo + (va1 + 1) as f64 * p.bin, "VAH"), (p.lo + va0 as f64 * p.bin, "VAL")] {
                 painter.extend(egui::Shape::dashed_line(&[pos2(main.left(), y(px)), pos2(main.right(), y(px))], Stroke::new(1.0, accent().linear_multiply(0.7)), 5.0, 4.0));
-                tagged.push((px, format!("{k} {}", fmt_px(px)), accent()));
+                tagged.push((px, k.to_string(), accent()));
             }
             // the two strongest nodes away from the POC (and not just broken: the breakout tag says it):
             // support below the last price, resistance above
@@ -711,14 +776,19 @@ impl Chart {
             for l in nodes.into_iter().take(2) {
                 let (col, k) = if l.px > last { (dn(), "R") } else { (up(), "S") };
                 clip.hline(main.left()..=main.right(), y(l.px), Stroke::new(1.0, col.linear_multiply(0.35 + 0.4 * l.score as f32)));
-                tagged.push((l.px, format!("{k} {}", fmt_px(l.px)), col));
+                tagged.push((l.px, k.to_string(), col));
             }
+            // TradingView-style: the price sits in a tag on the axis, the name small at the plot's left
+            // edge, so neither covers the candles
             for (px, tag, col) in tagged {
                 if !(px > lo && px < hi) { continue; }
-                let g = painter.layout_no_wrap(tag, mono(10.5), col);
-                let r = place(Rect::from_min_size(pos2(main.left() + w + 8.0, y(px) - 9.0), vec2(g.size().x + 10.0, 16.0)), &mut taken);
-                painter.rect_filled(r, 3, label_bg());
+                let g = painter.layout_no_wrap(tag, prop(9.5), col);
+                let r = Rect::from_min_size(pos2(main.left() + 4.0, y(px) - 13.0), vec2(g.size().x + 6.0, 12.0));
+                painter.rect_filled(r, 2, label_bg().gamma_multiply(0.8));
                 painter.galley(r.center() - g.size() / 2.0, g, col);
+                let ax = place(Rect::from_min_size(pos2(main.right() + 2.0, y(px) - 8.0), vec2(AXIS_W - 4.0, 16.0)), &mut taken);
+                painter.rect_filled(ax, 2, col.linear_multiply(0.85));
+                painter.text(ax.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, fmt_px(px), mono(10.5), Color32::BLACK);
             }
         }
         if let (true, Some(p)) = (self.breakouts, prof.as_ref()) {
@@ -838,8 +908,10 @@ impl Chart {
 
         // moving averages of the close, computed over every loaded bar so the left edge is right
         let closes: Vec<f64> = bars.iter().map(|b| b.c).collect();
-        let mas: Vec<Vec<Option<f64>>> = if self.ma { MA.iter().map(|(n, _)| sma(&closes, *n)).collect() } else { vec![] };
-        for (m, (_, col)) in mas.iter().zip(MA) {
+        let lines: Vec<MaLine> = if self.ma { self.mas.iter().filter(|m| m.on && m.n >= 1).copied().collect() } else { vec![] };
+        let mas: Vec<(Vec<Option<f64>>, MaLine)> = lines.iter().map(|m| (if m.ema { ema(&closes, m.n) } else { sma(&closes, m.n) }, *m)).collect();
+        for (m, l) in &mas {
+            let col = rgb(l.col);
             let pts: Vec<Pos2> = (i0..=i1).filter_map(|i| Some(pos2(fr.x(i as f32), y(m[i]?)))).collect();
             if pts.len() > 1 { painter.with_clip_rect(main_plot).add(egui::Shape::line(pts, Stroke::new(1.2, col))); }
         }
@@ -953,7 +1025,7 @@ impl Chart {
         let hover = resp.hover_pos().filter(|p| p.x < main.right());
         let hi_idx = hover.map(|p| fr.idx(p.x).round().clamp(i0 as f32, i1 as f32) as usize).unwrap_or(bars.len() - 1);
         let prem = if panes.contains(&Pane::Premium) { premium_lines(a, smarket, vis, self.tf * 60_000, hi_idx.checked_sub(i0)) } else { vec![] };
-        for (p, r) in &pane_rects { self.draw_pane(&painter, *p, *r, vis, i0, &fr, &bars[hi_idx], &prem); }
+        let pane_scales: Vec<(Pane, Rect, Option<(f64, f64)>)> = pane_rects.iter().map(|(p, r)| (*p, *r, self.draw_pane(&painter, *p, *r, vis, i0, &fr, &bars[hi_idx], &prem))).collect();
 
         // time axis
         let ty = top + TIME_H / 2.0;
@@ -990,15 +1062,31 @@ impl Chart {
             let cross = Stroke::new(1.0, mu().linear_multiply(0.55));
             painter.extend(egui::Shape::dashed_line(&[pos2(x, rect.top()), pos2(x, top)], cross, 4.0, 4.0));
             if main_plot.contains(p) {
-                painter.extend(egui::Shape::dashed_line(&[pos2(main.left(), p.y), pos2(main.right(), p.y)], cross, 4.0, 4.0));
-                let v = ps.v(p.y);
-                let lab = Rect::from_min_size(pos2(main.right() + 1.0, p.y - 9.0), vec2(AXIS_W - 2.0, 18.0));
-                painter.rect_filled(lab, 2, hl());
-                painter.text(lab.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, axis_label(v), mono(11.0), fg());
+                // magnet: within 12px of the hovered bar's open / high / low / close the line sits on it
+                let hb = &bars[hi_idx];
+                let py = if self.magnet {
+                    [hb.o, hb.h, hb.l, hb.c].into_iter().map(|v| y(v)).filter(|yy| (yy - p.y).abs() < 12.0)
+                        .min_by(|a, b| (a - p.y).abs().total_cmp(&(b - p.y).abs())).unwrap_or(p.y)
+                } else { p.y };
+                painter.extend(egui::Shape::dashed_line(&[pos2(main.left(), py), pos2(main.right(), py)], cross, 4.0, 4.0));
+                let lab = Rect::from_min_size(pos2(main.right() + 1.0, py - 9.0), vec2(AXIS_W - 2.0, 18.0));
+                painter.rect_filled(lab, 2, cross_bg());
+                painter.text(lab.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, axis_label(ps.v(py)), mono(11.0), Color32::WHITE);
+            }
+            // over a sub-pane: its own horizontal line and value on the axis
+            for (_, r, sc) in &pane_scales {
+                let (Some((plo, phi)), true) = (sc, r.contains(p)) else { continue };
+                let inner = Rect::from_min_max(pos2(r.left(), r.top() + 18.0), pos2(r.right(), r.bottom() - 4.0));
+                if !(p.y >= inner.top() && p.y <= inner.bottom()) { continue; }
+                painter.extend(egui::Shape::dashed_line(&[pos2(r.left(), p.y), pos2(r.right(), p.y)], cross, 4.0, 4.0));
+                let v = plo + (inner.bottom() - p.y) as f64 / inner.height() as f64 * (phi - plo);
+                let lab = Rect::from_min_size(pos2(main.right() + 1.0, p.y - 8.0), vec2(AXIS_W - 2.0, 16.0));
+                painter.rect_filled(lab, 2, cross_bg());
+                painter.text(lab.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, fmt_big(v), mono(10.5), Color32::WHITE);
             }
             let tl = Rect::from_center_size(pos2(x, ty), vec2(110.0, TIME_H - 2.0));
-            painter.rect_filled(tl, 2, hl());
-            painter.text(tl.center(), Align2::CENTER_CENTER, fmt_time_full(bars[hi_idx].t), mono(10.5), fg());
+            painter.rect_filled(tl, 2, cross_bg());
+            painter.text(tl.center(), Align2::CENTER_CENTER, fmt_time_full(bars[hi_idx].t), mono(10.5), Color32::WHITE);
         }
 
         // legend: row 1 time + OHLC + change + range (labels muted, values colored), row 2 MAs
@@ -1017,8 +1105,8 @@ impl Chart {
         kv(lx, y1, t("chart.range"), format!("{range:.2}%"), c);
         let y2 = main.top() + 30.0;
         let mut lx = main.left() + 8.0;
-        for (m, (n, col)) in mas.iter().zip(MA) {
-            lx = kv(lx, y2, &format!("MA({n})"), m[hi_idx].map(fmt_px).unwrap_or("-".into()), col);
+        for (m, l) in &mas {
+            lx = kv(lx, y2, &format!("{}({})", if l.ema { "EMA" } else { "MA" }, l.n), m[hi_idx].map(fmt_px).unwrap_or("-".into()), rgb(l.col));
         }
         if lmax > 0.0 {
             kv(lx, y2, t("chart.liq"), format!("{} / {}", fmt_big(b.liq_long), fmt_big(b.liq_short)), dim());
@@ -1035,13 +1123,16 @@ impl Chart {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_pane(&self, painter: &egui::Painter, p: Pane, r: Rect, vis: &[Bar], i0: usize, fr: &Frame, hb: &Bar, prem: &[Prem]) {
+    /// Returns the value range the pane was drawn with (for the crosshair), None when it drew nothing.
+    fn draw_pane(&self, painter: &egui::Painter, p: Pane, r: Rect, vis: &[Bar], i0: usize, fr: &Frame, hb: &Bar, prem: &[Prem]) -> Option<(f64, f64)> {
         // the top 18px hold the legend, so lines never run through it
         let inner = Rect::from_min_max(pos2(r.left(), r.top() + 18.0), pos2(r.right(), r.bottom() - 4.0));
         let label = |s: String, col: Color32, x: f32| painter.text(pos2(x, r.top() + 9.0), Align2::LEFT_CENTER, s, mono(10.5), col).right() + 10.0;
         // pane name in the UI font, values in mono
         let mut lx = painter.text(pos2(r.left() + 8.0, r.top() + 9.0), Align2::LEFT_CENTER, t(p.key()), prop(11.5), mu()).right() + 10.0;
+        let scale = std::cell::Cell::new(None);
         let axis = |lo: f64, hi: f64, fmt: &dyn Fn(f64) -> String| {
+            scale.set(Some((lo, hi)));
             painter.text(pos2(r.right() + 6.0, inner.top() + 4.0), Align2::LEFT_CENTER, fmt(hi), mono(10.0), dim());
             painter.text(pos2(r.right() + 6.0, inner.bottom() - 4.0), Align2::LEFT_CENTER, fmt(lo), mono(10.0), dim());
         };
@@ -1086,7 +1177,7 @@ impl Chart {
             Pane::Cvd | Pane::Oi | Pane::Ls | Pane::Basis => {
                 let get = |b: &Bar| -> Option<f64> { match p { Pane::Cvd => Some(b.cvd), Pane::Oi => b.oi, Pane::Ls => b.ls, _ => b.basis_bps } };
                 let vals: Vec<(usize, f64)> = vis.iter().enumerate().filter_map(|(k, b)| Some((k, get(b)?))).collect();
-                if vals.is_empty() { return; }
+                if vals.is_empty() { return None; }
                 let (lo, hi) = range(&vals.iter().map(|x| x.1).collect::<Vec<_>>(), p == Pane::Basis);
                 zero_line(lo, hi);
                 let col = match p { Pane::Cvd => accent(), Pane::Oi => WARN, Pane::Ls => PURPLE, _ => fg() };
@@ -1099,7 +1190,7 @@ impl Chart {
                 // each venue against the composite; the axis ignores the 2% most extreme points so one
                 // stale feed cannot flatten the rest
                 let mut all: Vec<f64> = prem.iter().flat_map(|l| l.vals.iter().flatten().copied()).collect();
-                if all.is_empty() { return; }
+                if all.is_empty() { return None; }
                 all.sort_by(f64::total_cmp);
                 let n = all.len();
                 let (lo, hi) = range(&[all[n / 50], all[(n - 1) - n / 50]], true);
@@ -1129,11 +1220,34 @@ impl Chart {
                 }
                 axis(lo, hi, &|v| format!("{v:+.1}bp"));
             }
+            // inferred from L2 book updates (live only): OFI is top-of-book pressure, book flow is the
+            // net liquidity each side gained within 0.25% of mid (adds minus cancels)
+            Pane::Ofi | Pane::BookFlow => {
+                let net = |b: &Bar| match p { Pane::Ofi => b.flow.ofi, _ => { let (nb, na) = b.book_net(); nb - na } };
+                let vals: Vec<f64> = vis.iter().map(net).collect();
+                let max = vals.iter().fold(0.0f64, |m, v| m.max(v.abs())).max(1e-12);
+                let (lo, hi) = (-max * 1.08, max * 1.08);
+                let zy = y_of(0.0, lo, hi, inner);
+                painter.hline(r.left()..=r.right(), zy, Stroke::new(1.0, super::theme::line()));
+                let bw = (self.bar_w * 0.7).max(1.0);
+                for (k, v) in vals.iter().enumerate().filter(|(_, v)| **v != 0.0) {
+                    let x = fr.x((i0 + k) as f32);
+                    let col = if *v > 0.0 { up() } else { dn() }.linear_multiply(0.7);
+                    painter.rect_filled(Rect::from_min_max(pos2(x - bw / 2.0, zy.min(y_of(*v, lo, hi, inner))), pos2(x + bw / 2.0, zy.max(y_of(*v, lo, hi, inner)))), 0, col);
+                }
+                let v = net(hb);
+                lx = label(format!("{v:+.2} {}", self.base_unit), if v >= 0.0 { up() } else { dn() }, lx);
+                if p == Pane::BookFlow {
+                    let (nb, na) = hb.book_net();
+                    label(format!("{} {:+.1} / {} {:+.1}", t("tr.bid"), nb, t("tr.ask"), na), mu(), lx);
+                }
+                axis(lo, hi, &fmt_big);
+            }
             Pane::Funding => {
                 let pred: Vec<(usize, f64)> = vis.iter().enumerate().filter_map(|(k, b)| Some((k, b.funding_h? * 1e4))).collect();
                 let sett: Vec<(usize, f64)> = vis.iter().enumerate().filter_map(|(k, b)| Some((k, b.funding_settled? * 1e4))).collect();
                 let all: Vec<f64> = pred.iter().chain(sett.iter()).map(|x| x.1).collect();
-                if all.is_empty() { return; }
+                if all.is_empty() { return None; }
                 let (lo, hi) = range(&all, true);
                 zero_line(lo, hi);
                 line(sett, lo, hi, WARN, true);
@@ -1143,33 +1257,58 @@ impl Chart {
                 axis(lo, hi, &|v| format!("{v:+.3}"));
             }
         }
+        scale.get()
     }
 
-    /// Place, draw and delete drawings. Click places points for the armed tool, right-click
-    /// deletes the drawing under the pointer, Escape disarms.
+    /// Place, draw, edit and delete drawings. Click places points for the armed tool; drag a
+    /// handle to move that point or the drawing's body to move all of it; right-click or Delete
+    /// removes the drawing under the pointer; Escape disarms.
     #[allow(clippy::too_many_arguments)]
     fn drawings_ui(&mut self, ui: &Ui, resp: &egui::Response, painter: &egui::Painter, bars: &[Bar], fr: &Frame, main: Rect, ps: PScale, base: &str) {
         let ms = self.tf * 60_000;
         let plot = ps.r;
         let y = |v: f64| ps.y(v);
-        let price = |py: f32| ps.v(py);
         let to_screen = |(t, p): (i64, f64)| pos2(fr.x(idx_of(bars, t, ms)), y(p));
-        let to_point = |p: Pos2| (time_of(bars, fr.idx(p.x), ms), price(p.y));
+        let to_point = |p: Pos2| (time_of(bars, fr.idx(p.x), ms), ps.v(p.y));
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) { self.tool = None; self.pending = None; }
 
         let list = self.drawings.entry(base.to_string()).or_default();
         let ptr = resp.hover_pos().filter(|p| plot.contains(*p));
-        // screen segment of each drawing: rays run to the plot edge, horizontal lines span it
-        let seg = |d: &Drawing| -> (Pos2, Pos2) {
+
+        // editing: the part grabbed at drag start follows the pointer
+        if let (Some((i, part)), true) = (self.drag, resp.dragged()) {
+            if let Some(d) = list.get_mut(i) {
+                let delta = resp.drag_delta();
+                let mv = |pt: (i64, f64)| to_point(to_screen(pt) + delta);
+                match part { 0 => d.a = mv(d.a), 1 => d.b = mv(d.b), _ => { d.a = mv(d.a); d.b = mv(d.b); } }
+                if d.tool == Tool::HLine { d.b = d.a; }
+            }
+        }
+
+        // screen segments of a drawing (for drawing and hit-testing)
+        let segs = |d: &Drawing| -> Vec<(Pos2, Pos2)> {
             let (a, b) = (to_screen(d.a), to_screen(d.b));
             match d.tool {
-                Tool::HLine => (pos2(main.left(), a.y), pos2(main.right(), a.y)),
-                Tool::Trend => (a, b),
-                Tool::Ray => { let dir = b - a; let k = if dir.length() > 0.0 { 4000.0 / dir.length() } else { 0.0 }; (a, a + dir * k) }
+                Tool::HLine => vec![(pos2(main.left(), a.y), pos2(main.right(), a.y))],
+                Tool::Trend => vec![(a, b)],
+                Tool::Ray => { let dir = b - a; let k = if dir.length() > 0.0 { 4000.0 / dir.length() } else { 0.0 }; vec![(a, a + dir * k)] }
+                Tool::Rect => { let r = Rect::from_two_pos(a, b); vec![(r.left_top(), r.right_top()), (r.right_top(), r.right_bottom()), (r.right_bottom(), r.left_bottom()), (r.left_bottom(), r.left_top())] }
+                Tool::Fib => FIB.iter().map(|f| { let yy = y(d.b.1 + (d.a.1 - d.b.1) * f); (pos2(a.x.min(b.x), yy), pos2(a.x.max(b.x), yy)) }).collect(),
             }
         };
-        let near = ptr.and_then(|p| list.iter().enumerate().map(|(i, d)| { let (a, b) = seg(d); (i, dist_to_segment(p, a, b)) })
-            .filter(|(_, dd)| *dd < 6.0).min_by(|x, z| x.1.total_cmp(&z.1)).map(|(i, _)| i));
+        // part under the pointer: a handle first, then the nearest line (or a rectangle's inside)
+        let hot = ptr.filter(|_| self.tool.is_none()).and_then(|p| {
+            for (i, d) in list.iter().enumerate().rev() {
+                if d.tool == Tool::HLine { continue; }
+                for (k, q) in [(0u8, d.a), (1, d.b)] { if (to_screen(q) - p).length() < 7.0 { return Some((i, k)); } }
+            }
+            list.iter().enumerate().filter_map(|(i, d)| {
+                let dist = segs(d).iter().map(|(a, b)| dist_to_segment(p, *a, *b)).fold(f32::MAX, f32::min);
+                let inside = d.tool == Tool::Rect && Rect::from_two_pos(to_screen(d.a), to_screen(d.b)).contains(p);
+                (dist < 6.0 || inside).then_some((i, if inside { 5.9 } else { dist }))
+            }).min_by(|x, z| x.1.total_cmp(&z.1)).map(|(i, _)| (i, 2))
+        });
+        let hot = self.drag.or(hot);
 
         if let (Some(tool), true, Some(p)) = (self.tool, resp.clicked(), resp.interact_pointer_pos().filter(|p| plot.contains(*p))) {
             let pt = to_point(p);
@@ -1178,33 +1317,67 @@ impl Chart {
                 (_, None) => self.pending = Some(pt),
                 (_, Some(a)) => { list.push(Drawing { tool, a, b: pt }); self.tool = None; self.pending = None; }
             }
-        } else if resp.secondary_clicked() {
-            if let Some(i) = near { list.remove(i); }
+        } else if let (Some((i, _)), None) = (hot, self.drag) {
+            if resp.secondary_clicked() || ui.input(|x| x.key_pressed(egui::Key::Delete) || x.key_pressed(egui::Key::Backspace)) {
+                list.remove(i);
+                self.hot = None;
+                return;
+            }
         }
 
         let clip = painter.with_clip_rect(plot);
-        for (i, d) in list.iter().enumerate() {
-            let (a, b) = seg(d);
-            let w = if near == Some(i) { 2.0 } else { 1.2 };
-            clip.line_segment([a, b], Stroke::new(w, accent()));
-            if d.tool != Tool::HLine { for p in [to_screen(d.a), to_screen(d.b)] { clip.circle_filled(p, 2.5, accent()); } }
+        let draw = |d: &Drawing, emph: bool, alpha: f32| {
+            let col = accent().linear_multiply(alpha);
+            let s = Stroke::new(if emph { 2.0 } else { 1.2 }, col);
+            let (a, b) = (to_screen(d.a), to_screen(d.b));
+            match d.tool {
+                Tool::Rect => {
+                    let r = Rect::from_two_pos(a, b);
+                    clip.rect_filled(r, 0, col.linear_multiply(0.12));
+                    clip.rect_stroke(r, 0, s, egui::StrokeKind::Middle);
+                }
+                Tool::Fib => {
+                    let (x0, x1) = (a.x.min(b.x), a.x.max(b.x));
+                    let px = |f: f64| d.b.1 + (d.a.1 - d.b.1) * f;
+                    let fib_col = |f: f64| match f { f if f == 0.5 => fg().linear_multiply(0.7), f if f == 0.618 => WARN, f if f == 0.0 || f == 1.0 => mu(), _ => accent() };
+                    for w in FIB.windows(2) {
+                        clip.rect_filled(Rect::from_two_pos(pos2(x0, y(px(w[0]))), pos2(x1, y(px(w[1])))), 0, fib_col(w[1]).linear_multiply(0.06 * alpha));
+                    }
+                    for f in FIB {
+                        let yy = y(px(f));
+                        clip.hline(x0..=x1, yy, Stroke::new(s.width, fib_col(f).linear_multiply(alpha)));
+                        clip.text(pos2(x0 + 3.0, yy - 1.0), Align2::LEFT_BOTTOM, format!("{f} ({})", fmt_px(px(f))), mono(10.0), fib_col(f).linear_multiply(alpha));
+                    }
+                    clip.extend(egui::Shape::dashed_line(&[a, b], Stroke::new(1.0, mu().linear_multiply(0.6 * alpha)), 4.0, 4.0));
+                }
+                _ => for (p0, p1) in segs(d) { clip.line_segment([p0, p1], s); },
+            }
             if d.tool == Tool::HLine {
                 let lab = Rect::from_min_size(pos2(main.right() + 1.0, a.y - 9.0), vec2(AXIS_W - 2.0, 18.0));
                 painter.rect_filled(lab, 2, accent());
                 painter.text(lab.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, fmt_px(d.a.1), mono(11.0), Color32::BLACK);
+            } else if emph {
+                // handles show on hover: hollow, as in TradingView
+                for p in [a, b] { clip.circle(p, 4.0, panel2(), Stroke::new(1.5, accent())); }
             }
-        }
+        };
+        for (i, d) in list.iter().enumerate() { draw(d, hot.is_some_and(|h| h.0 == i), 1.0); }
         // preview of a drawing in progress
         if let (Some(tool), Some(p)) = (self.tool, ptr) {
-            let s = Stroke::new(1.0, accent().linear_multiply(0.6));
+            let pt = to_point(p);
             match (tool, self.pending) {
-                (Tool::HLine, _) => { clip.hline(main.left()..=main.right(), p.y, s); }
-                (_, Some(a)) => { clip.line_segment([to_screen(a), p], s); }
+                (Tool::HLine, _) => draw(&Drawing { tool, a: pt, b: pt }, false, 0.6),
+                (_, Some(a)) => draw(&Drawing { tool, a, b: pt }, false, 0.6),
                 _ => {}
             }
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
-        if near.is_some() && self.tool.is_none() { resp.clone().on_hover_text(t("draw.delete_tip")); }
+        match hot {
+            Some((_, 0 | 1)) => ui.ctx().set_cursor_icon(egui::CursorIcon::Grab),
+            Some(_) => { ui.ctx().set_cursor_icon(egui::CursorIcon::Move); if self.drag.is_none() { resp.clone().on_hover_text(t("draw.delete_tip")); } }
+            None => {}
+        }
+        self.hot = hot;
     }
 
     /// Back to auto-fit at the live edge: a manual price range from one symbol is meaningless for
@@ -1216,13 +1389,14 @@ impl Chart {
         let market = if market == Market::Margin { Market::Spot } else { market };
         let mut venues: Vec<String> = a.series.keys().filter(|(e, m)| *m == market && e.is_some()).filter_map(|(e, _)| e.map(|e| format!("{e:?}"))).collect();
         venues.sort();
-        let tool = self.tool.map(|t| match t { Tool::HLine => "hline", Tool::Trend => "trend", Tool::Ray => "ray" });
+        let tool = self.tool.map(Tool::id);
         serde_json::json!({
             "tf": self.tf, "tfs": TFS.iter().map(|(m, l)| serde_json::json!([m, l])).collect::<Vec<_>>(), "quick": TF_QUICK,
             "src": self.src.map(|e| format!("{e:?}")), "venues": venues,
             "panes": self.panes.iter().filter(|(p, _)| !p.perp_only() || market == Market::Perp)
                 .map(|(p, on)| serde_json::json!({"key": p.key(), "label": t(p.key()), "on": on})).collect::<Vec<_>>(),
             "ma": self.ma, "heat": self.heat, "liqmap": self.liqmap, "sr": self.sr, "walls": self.walls, "mark": self.mark, "breakouts": self.breakouts, "vwap": self.vwap, "cone": self.cone, "perp": market == Market::Perp,
+            "mas": self.mas.iter().map(|m| serde_json::json!({"n": m.n, "col": format!("#{:06x}", m.col), "ema": m.ema, "on": m.on})).collect::<Vec<_>>(), "magnet": self.magnet,
             "tool": tool, "drawings": self.drawings.get(base).map_or(0, |v| v.len()), "panned": self.right.abs() > 0.5 || self.bar_w != 7.0,
         })
     }
@@ -1242,8 +1416,16 @@ impl Chart {
         if let Some(b) = v["breakouts"].as_bool() { self.breakouts = b; }
         if let Some(b) = v["vwap"].as_bool() { self.vwap = b; }
         if let Some(b) = v["cone"].as_bool() { self.cone = b; }
+        if let Some(b) = v["magnet"].as_bool() { self.magnet = b; }
+        // {ma_line: i, n?, col?: "#rrggbb", ema?, on?}
+        if let Some(m) = v["ma_line"].as_u64().and_then(|i| self.mas.get_mut(i as usize)) {
+            if let Some(n) = v["n"].as_u64() { m.n = (n as usize).clamp(1, 1000); }
+            if let Some(c) = v["col"].as_str().and_then(|c| u32::from_str_radix(c.trim_start_matches('#'), 16).ok()) { m.col = c & 0xffffff; }
+            if let Some(b) = v["ema"].as_bool() { m.ema = b; }
+            if let Some(b) = v["on"].as_bool() { m.on = b; }
+        }
         if v.get("tool").is_some() {
-            self.tool = match v["tool"].as_str() { Some("hline") => Some(Tool::HLine), Some("trend") => Some(Tool::Trend), Some("ray") => Some(Tool::Ray), _ => None };
+            self.tool = v["tool"].as_str().and_then(Tool::parse);
             self.pending = None;
         }
         if v["clear_drawings"].as_bool() == Some(true) { self.drawings.remove(base); }
@@ -1282,12 +1464,24 @@ impl Chart {
                     ui.checkbox(on, t(p.key()));
                 }
                 ui.separator();
-                ui.checkbox(&mut self.ma, "MA (7 / 25 / 99)");
+                ui.checkbox(&mut self.ma, t("chart.ma"));
+                if self.ma {
+                    for m in self.mas.iter_mut() {
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut m.on, "");
+                            let mut c = rgb(m.col);
+                            if ui.color_edit_button_srgba(&mut c).changed() { m.col = super::theme::pack(c); }
+                            ui.add(egui::DragValue::new(&mut m.n).range(1..=1000).speed(0.3));
+                            if ui.selectable_label(m.ema, "EMA").clicked() { m.ema = !m.ema; }
+                        });
+                    }
+                }
+                ui.checkbox(&mut self.magnet, t("chart.magnet"));
                 ui.checkbox(&mut self.heat, t("chart.heatmap"));
                 if market == Market::Perp { ui.checkbox(&mut self.liqmap, t("chart.liqmap")).on_hover_text(t("chart.liqmap_tip")); }
             });
             ui.separator();
-            for (tool, key) in [(Tool::HLine, "draw.hline"), (Tool::Trend, "draw.trend"), (Tool::Ray, "draw.ray")] {
+            for (tool, key) in [(Tool::HLine, "draw.hline"), (Tool::Trend, "draw.trend"), (Tool::Ray, "draw.ray"), (Tool::Fib, "draw.fib"), (Tool::Rect, "draw.rect")] {
                 if tool_button(ui, Some(tool), self.tool == Some(tool)).on_hover_text(t(key)).clicked() {
                     self.tool = if self.tool == Some(tool) { None } else { Some(tool) };
                     self.pending = None;
@@ -1330,6 +1524,10 @@ fn tool_button(ui: &mut Ui, tool: Option<Tool>, on: bool) -> egui::Response {
             p.line_segment([b, b + vec2(-5.0, 0.5)], s);
             p.line_segment([b, b + vec2(-0.5, 5.0)], s);
         }
+        Some(Tool::Fib) => {
+            for (k, dy) in [-6.0f32, -2.0, 2.0, 6.0].into_iter().enumerate() { p.hline(egui::Rangef::new(c.x - 8.0, c.x + 8.0 - k as f32 * 2.0), c.y + dy, Stroke::new(1.2, col)); }
+        }
+        Some(Tool::Rect) => { p.rect_stroke(Rect::from_center_size(c, vec2(15.0, 11.0)), 1, s, egui::StrokeKind::Middle); }
         None => {
             // trash can
             p.hline(egui::Rangef::new(c.x - 6.0, c.x + 6.0), c.y - 5.0, s);
@@ -1384,11 +1582,11 @@ fn heat_color(s: f32) -> Color32 {
         (lerp(20.0, 30.0, t), lerp(40.0, 150.0, t), lerp(90.0, 200.0, t))
     } else {
         let t = (s - 0.5) / 0.5;
-        (lerp(30.0, 250.0, t), lerp(150.0, 220.0, t), lerp(200.0, 80.0, t))
+        (lerp(30.0, 235.0, t), lerp(150.0, 200.0, t), lerp(200.0, 95.0, t))
     };
     // thin liquidity fades out completely, so only real walls light up (a floor here turned a
     // lone column into a solid block)
-    let a = if s < 0.25 { 0.0 } else { 235.0 * ((s - 0.25) / 0.75).powf(1.3) };
+    let a = if s < 0.25 { 0.0 } else { 190.0 * ((s - 0.25) / 0.75).powf(1.3) };
     Color32::from_rgba_unmultiplied(r as u8, g as u8, b as u8, a as u8)
 }
 
@@ -1425,6 +1623,16 @@ fn local_parts(ms: i64) -> (String, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ema_seeds_with_sma_then_smooths() {
+        let e = ema(&[1.0, 2.0, 3.0, 4.0], 3);
+        assert_eq!(e[..2], [None, None]);
+        assert_eq!(e[2], Some(2.0));
+        // k = 2 / (3 + 1) = 0.5
+        assert_eq!(e[3], Some(3.0));
+        assert_eq!(Tool::parse("fib").map(Tool::id), Some("fib"));
+    }
 
     #[test]
     fn heatmap_pulled_wall_fades() {

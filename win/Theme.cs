@@ -36,8 +36,8 @@ static class T1
     public static Color Mu => D(0x8a929d, 0x6e6e73);
     public static Color Dim => D(0x59616c, 0x9a9aa0);
     public static readonly Color Warn = C(0xe8a33d);
-    public static readonly Color Green = C(0x30d158);
-    public static readonly Color Red = C(0xff453a);
+    public static readonly Color Green = C(0x26a69a);
+    public static readonly Color Red = C(0xef5350);
     public static readonly Color Orange = C(0xff9f0a);
 
     static Prefs P => Store.Shared.State.Prefs;

@@ -24,6 +24,8 @@ pub fn fg() -> Color32 { pick(Color32::from_rgb(0xe8, 0xe8, 0xe8), Color32::from
 pub fn mu() -> Color32 { pick(Color32::from_rgb(0x9b, 0x9b, 0x9b), Color32::from_rgb(0x6e, 0x6e, 0x73), light()) }
 pub fn dim() -> Color32 { pick(Color32::from_rgb(0x6e, 0x6e, 0x6e), Color32::from_rgb(0x9a, 0x9a, 0xa0), light()) }
 /// opaque fill for labels painted over the chart
+/// crosshair tags on the axes (white text on it in both themes, as TradingView does)
+pub fn cross_bg() -> Color32 { pick(Color32::from_rgb(0x50, 0x53, 0x5e), Color32::from_rgb(0x13, 0x17, 0x22), light()) }
 pub fn label_bg() -> Color32 { pick(Color32::from_rgb(0x26, 0x26, 0x28), Color32::from_rgb(0xe8, 0xe8, 0xed), light()) }
 /// off-state track of switches and sliders
 pub fn track() -> Color32 { pick(Color32::from_rgb(0x2a, 0x31, 0x3b), Color32::from_rgb(0xd1, 0xd1, 0xd6), light()) }
@@ -39,8 +41,8 @@ pub fn bg() -> Color32 { if native() { Color32::TRANSPARENT } else { bg_c() } }
 pub fn panel() -> Color32 { if native() { Color32::TRANSPARENT } else { panel_c() } }
 /// User-adjustable colors (Settings > Appearance), packed 0xRRGGBB; read every frame.
 static ACCENT_C: AtomicU32 = AtomicU32::new(0x4c9eeb);
-static UP_C: AtomicU32 = AtomicU32::new(0x30d158);
-static DN_C: AtomicU32 = AtomicU32::new(0xff453a);
+static UP_C: AtomicU32 = AtomicU32::new(0x26a69a);
+static DN_C: AtomicU32 = AtomicU32::new(0xef5350);
 fn unpack(v: u32) -> Color32 { Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8) }
 pub fn pack(c: Color32) -> u32 { (c.r() as u32) << 16 | (c.g() as u32) << 8 | c.b() as u32 }
 pub fn accent() -> Color32 { unpack(ACCENT_C.load(Relaxed)) }

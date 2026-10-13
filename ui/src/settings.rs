@@ -35,9 +35,9 @@ impl Default for Prefs {
 #[serde(rename_all = "lowercase")]
 pub enum ThemePref { #[default] System, Dark, Light }
 
-// macOS dark-mode systemGreen / systemRed, so egui and SwiftUI share one red and green
-const GREEN: Color32 = Color32::from_rgb(0x30, 0xd1, 0x58);
-const RED: Color32 = Color32::from_rgb(0xff, 0x45, 0x3a);
+// TradingView-style teal / coral (calmer than the system neon pair); SwiftUI (T1.green / T1.red) uses the same
+const GREEN: Color32 = Color32::from_rgb(0x26, 0xa6, 0x9a);
+const RED: Color32 = Color32::from_rgb(0xef, 0x53, 0x50);
 const ACCENTS: [(&str, [u8; 3]); 6] = [("Blue", [0x4c, 0x9e, 0xeb]), ("Gold", [0xf0, 0xb9, 0x0b]), ("Violet", [0x9b, 0x8c, 0xf0]),
     ("Teal", [0x2e, 0xc4, 0xb6]), ("Orange", [0xf5, 0x8a, 0x3d]), ("Pink", [0xe0, 0x5b, 0xc4])];
 const DEFAULT_FEES: (f64, f64) = (0.055, 0.02);

@@ -13,6 +13,8 @@ const GROUPS: [f64; 5] = [1.0, 2.0, 5.0, 10.0, 50.0];
 
 /// `quote`: sizes in quote currency (size x price) instead of base.
 pub struct BookView { trades: bool, pub src: Option<Exchange>, group: usize, pub clicked: Option<(Exchange, f64)>, quote: bool,
+    /// tape filter: index into MIN_USD
+    min_usd: usize,
     /// levels last computed: (when, what they were computed for, bids, asks). The rows repaint every
     /// frame from this; the cross-venue aggregation runs at most every REFRESH.
     cache: Option<(std::time::Instant, (Option<Exchange>, Market, usize, u64), Vec<Level>, Vec<Level>)> }
@@ -21,7 +23,7 @@ pub struct BookView { trades: bool, pub src: Option<Exchange>, group: usize, pub
 /// (and the aggregation across ten venues is not free).
 const REFRESH: std::time::Duration = std::time::Duration::from_millis(100);
 
-impl Default for BookView { fn default() -> Self { BookView { trades: false, src: None, group: 1, clicked: None, quote: false, cache: None } } }
+impl Default for BookView { fn default() -> Self { BookView { trades: false, src: None, group: 1, clicked: None, quote: false, min_usd: 0, cache: None } } }
 
 /// Quote amounts: 12.3K / 4.56M style, whole units below a thousand.
 fn fmt_big_book(v: f64) -> String {
@@ -122,7 +124,11 @@ impl BookView {
                 if tab(ui, base, !self.quote, 11.5).clicked() { self.quote = false; }
             });
         }); ui.add_space(2.0); }
-        if self.trades { return self.tape(ui, a, market, scope); }
+        if self.trades {
+            let r = ui.available_rect_before_wrap();
+            ui.allocate_rect(r, Sense::hover());
+            return self.tape(ui, r, a, market, scope);
+        }
 
         let Some(mid) = (match self.src { None => a.mid(market), Some(e) => a.venues.get(&(e, market)).and_then(|v| v.mid()) }) else {
             ui.label(t("chart.loading"));
@@ -147,10 +153,17 @@ impl BookView {
             });
         }); }
 
-        let rect = ui.available_rect_before_wrap();
-        ui.allocate_rect(rect, Sense::hover());
+        let full = ui.available_rect_before_wrap();
+        ui.allocate_rect(full, Sense::hover());
+        // depth on top, the (filterable) tape under it: both at a glance, as on a venue's own page
+        let split = (full.top() + full.height() * 0.62).round();
+        let rect = Rect::from_min_max(full.min, pos2(full.right(), split));
+        self.tape(ui, Rect::from_min_max(pos2(full.left(), split + 4.0), full.max), a, market, scope);
         let painter = ui.painter_at(rect);
-        let n = (((rect.height() - ROW * 3.5) / 2.0 / ROW).floor() as usize).max(3);
+        // rows stretch to fill the column: header, mid line and ratio bar are fixed, the rest is levels
+        let fixed = ROW * 2.5 + 22.0;
+        let n = (((rect.height() - fixed) / 2.0 / ROW).floor() as usize).max(3);
+        let rh = ((rect.height() - fixed) / (2 * n) as f32).max(ROW * 0.8);
         let key = (self.src, market, n, bin.to_bits());
         let fresh = self.cache.as_ref().is_some_and(|(t, k, _, _)| *k == key && t.elapsed() < REFRESH);
         if !fresh {
@@ -171,55 +184,65 @@ impl BookView {
         ui.ctx().request_repaint_after(REFRESH);
 
         // header
-        let cols = [rect.left() + 8.0, rect.left() + rect.width() * 0.52, rect.right() - 40.0];
+        let cols = [rect.left() + 6.0, rect.left() + rect.width() * 0.52, rect.right() - 36.0];
         let hy = rect.top() + ROW / 2.0;
         painter.text(pos2(cols[0], hy), Align2::LEFT_CENTER, t("book.price"), prop(11.0), dim());
         painter.text(pos2(cols[1], hy), Align2::RIGHT_CENTER, t("book.size"), prop(11.0), dim());
         painter.text(pos2(cols[2], hy), Align2::RIGHT_CENTER, t("book.total"), prop(11.0), dim());
+        if bids.is_empty() && asks.is_empty() {
+            // a mid without levels: depth streams are down (the status bar shows which venues)
+            painter.text(rect.center(), Align2::CENTER_CENTER, t("book.waiting"), prop(11.5), mu());
+        }
 
         let quote = self.quote;
         let size = |l: &Level| if quote { l.qty * l.px } else { l.qty };
         let cum = |ls: &[Level]| -> Vec<f64> { ls.iter().scan(0.0, |s, l| { *s += size(l); Some(*s) }).collect() };
         let (cb, ca) = (cum(&bids), cum(&asks));
         let max = cb.last().copied().unwrap_or(0.0).max(ca.last().copied().unwrap_or(0.0)).max(1e-12);
+        // one decimal count per column, so sizes line up instead of switching precision row to row
+        let lmax = bids.iter().chain(&asks).map(size).fold(0.0, f64::max);
+        let (fs, ft) = (col_fmt(lmax, quote), col_fmt(max, quote));
         let dp = step_dp(bin);
-        let row = |i: usize, y: f32, l: &Level, c: f64, is_ask: bool| {
-            let r = Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), ROW));
-            let w = (c / max) as f32 * (rect.width() - 36.0);
+        let bar_r = rect.right() - 32.0;
+        let row = |y: f32, l: &Level, c: f64, is_ask: bool| {
+            let r = Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), rh));
             let col = if is_ask { dn() } else { up() };
-            painter.rect_filled(Rect::from_min_max(pos2(r.right() - 36.0 - w, r.top() + 1.0), pos2(r.right() - 36.0, r.bottom() - 1.0)), 0, col.linear_multiply(0.12));
-            painter.text(pos2(cols[0], r.center().y), Align2::LEFT_CENTER, fmt_dp(l.px, dp), mono(11.5), col);
-            let f = |x: f64| if quote { fmt_big_book(x) } else { fmt_qty(x) };
-            painter.text(pos2(cols[1], r.center().y), Align2::RIGHT_CENTER, f(size(l)), mono(11.5), fg());
-            painter.text(pos2(cols[2], r.center().y), Align2::RIGHT_CENTER, f(c), mono(11.0), mu());
+            // cumulative depth behind the row, and this level's own size stronger on top of it
+            let w = (c / max) as f32 * (bar_r - rect.left());
+            painter.rect_filled(Rect::from_min_max(pos2(bar_r - w, r.top() + 1.0), pos2(bar_r, r.bottom() - 1.0)), 0, col.linear_multiply(0.10));
+            let w1 = (size(l) / lmax.max(1e-12)) as f32 * (bar_r - rect.left()) * 0.5;
+            painter.rect_filled(Rect::from_min_max(pos2(bar_r - w1, r.top() + 1.0), pos2(bar_r, r.bottom() - 1.0)), 0, col.linear_multiply(0.16));
+            let cy = r.center().y;
+            painter.text(pos2(cols[0], cy), Align2::LEFT_CENTER, fmt_dp(l.px, dp), mono(11.5), col);
+            painter.text(pos2(cols[1], cy), Align2::RIGHT_CENTER, fs(size(l)), mono(11.5), fg());
+            painter.text(pos2(cols[2], cy), Align2::RIGHT_CENTER, ft(c), mono(11.0), mu());
             // per-venue split
-            let (mut x, total) = (r.right() - 32.0, l.qty.max(1e-12));
+            let (mut x, total) = (bar_r + 4.0, l.qty.max(1e-12));
             for (e, q) in &l.by {
                 let ww = (q / total) as f32 * 26.0;
-                painter.rect_filled(Rect::from_min_size(pos2(x, r.center().y - 2.5), vec2(ww, 5.0)), 0, ex_color(*e));
+                painter.rect_filled(Rect::from_min_size(pos2(x, cy - 2.5), vec2(ww, 5.0)), 0, ex_color(*e));
                 x += ww;
             }
-            let _ = i;
         };
         let top = rect.top() + ROW;
         let mut rows_at: Vec<(Rect, f64)> = vec![];
         for (i, l) in asks.iter().enumerate() {
-            let y = top + (n - 1 - i) as f32 * ROW;
-            row(i, y, l, ca[i], true);
-            rows_at.push((Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), ROW)), l.px));
+            let y = top + (n - 1 - i) as f32 * rh;
+            row(y, l, ca[i], true);
+            rows_at.push((Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), rh)), l.px));
         }
-        let my = top + n as f32 * ROW;
+        let my = top + n as f32 * rh;
         let (bb, ba) = (bids.first().map(|l| l.px), asks.first().map(|l| l.px));
-        painter.rect_filled(Rect::from_min_size(pos2(rect.left(), my), vec2(rect.width(), ROW * 1.5)), 0, panel2());
+        painter.rect_filled(Rect::from_min_size(pos2(rect.left(), my), vec2(rect.width(), ROW * 1.5)), 4, panel2());
         painter.text(pos2(cols[0], my + ROW * 0.75), Align2::LEFT_CENTER, fmt_px(mid), display(16.0), fg());
         if let (Some(b), Some(k)) = (bb, ba) {
-            painter.text(pos2(rect.right() - 8.0, my + ROW * 0.75), Align2::RIGHT_CENTER,
+            painter.text(pos2(rect.right() - 6.0, my + ROW * 0.75), Align2::RIGHT_CENTER,
                 format!("{} {:.1}bp", t("book.spread"), (k / b - 1.0) * 1e4), mono(11.0), mu());
         }
         for (i, l) in bids.iter().enumerate() {
-            let y = my + ROW * 1.5 + i as f32 * ROW;
-            row(i, y, l, cb[i], false);
-            rows_at.push((Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), ROW)), l.px));
+            let y = my + ROW * 1.5 + i as f32 * rh;
+            row(y, l, cb[i], false);
+            rows_at.push((Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), rh)), l.px));
         }
         // click-to-fill only on a single venue's raw book (aligned aggregate prices are not executable)
         if let Some(e) = self.src {
@@ -233,37 +256,81 @@ impl BookView {
         // buy/sell ratio of the shown depth
         let (sb, sa) = (cb.last().copied().unwrap_or(0.0), ca.last().copied().unwrap_or(0.0));
         if sb + sa > 0.0 {
-            let y = my + ROW * 1.5 + n as f32 * ROW + 6.0;
-            let w = rect.width() - 16.0;
+            let y = my + ROW * 1.5 + n as f32 * rh + 4.0;
+            let w = rect.width() - 12.0;
             let wb = (sb / (sb + sa)) as f32 * w;
-            painter.rect_filled(Rect::from_min_size(pos2(rect.left() + 8.0, y + 12.0), vec2(wb, 4.0)), 1, up());
-            painter.rect_filled(Rect::from_min_size(pos2(rect.left() + 8.0 + wb, y + 12.0), vec2(w - wb, 4.0)), 1, dn());
-            painter.text(pos2(rect.left() + 8.0, y + 4.0), Align2::LEFT_CENTER, format!("B {:.1}%", sb / (sb + sa) * 100.0), mono(10.5), up());
-            painter.text(pos2(rect.right() - 8.0, y + 4.0), Align2::RIGHT_CENTER, format!("{:.1}% S", sa / (sb + sa) * 100.0), mono(10.5), dn());
+            painter.rect_filled(Rect::from_min_size(pos2(rect.left() + 6.0, y + 12.0), vec2(wb, 3.0)), 1, up());
+            painter.rect_filled(Rect::from_min_size(pos2(rect.left() + 6.0 + wb, y + 12.0), vec2(w - wb, 3.0)), 1, dn());
+            painter.text(pos2(rect.left() + 6.0, y + 4.0), Align2::LEFT_CENTER, format!("B {:.1}%", sb / (sb + sa) * 100.0), mono(10.5), up());
+            painter.text(pos2(rect.right() - 6.0, y + 4.0), Align2::RIGHT_CENTER, format!("{:.1}% S", sa / (sb + sa) * 100.0), mono(10.5), dn());
         }
     }
 
-    fn tape(&self, ui: &mut Ui, a: &Agg, market: Market, scope: &HashSet<Exchange>) {
-        let rect = ui.available_rect_before_wrap();
-        ui.allocate_rect(rect, Sense::hover());
+    /// The trade tape in `rect`: a filter row (minimum USDT notional), then the newest prints.
+    /// Fills of one taker order arrive merged (see `Agg::on`); prints of at least `BIG_USD` come
+    /// from the longer `Agg::big` tape, so a whale filter still shows minutes of history.
+    fn tape(&mut self, ui: &mut Ui, rect: Rect, a: &Agg, market: Market, scope: &HashSet<Exchange>) {
         let painter = ui.painter_at(rect);
-        let rows: Vec<_> = a.trades.iter().rev()
-            .filter(|x| x.market == market && scope.contains(&x.ex) && self.src.is_none_or(|e| e == x.ex))
-            .take((rect.height() / ROW) as usize).collect();
+        painter.hline(rect.left()..=rect.right(), rect.top() - 2.0, egui::Stroke::new(1.0, line()));
+        // filter chips
+        let mut x = rect.left() + 6.0;
+        let cy = rect.top() + ROW / 2.0 + 1.0;
+        x = painter.text(pos2(x, cy), Align2::LEFT_CENTER, t("book.min"), prop(10.5), dim()).right() + 6.0;
+        for (i, (v, label)) in MIN_USD.iter().enumerate() {
+            let label = if *v == 0.0 { t("book.all") } else { label };
+            let g = painter.layout_no_wrap(label.to_string(), prop(10.5), fg());
+            let r = Rect::from_min_size(pos2(x, cy - 8.0), vec2(g.size().x + 10.0, 16.0));
+            let resp = ui.interact(r, ui.id().with(("tape_min", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let on = self.min_usd == i;
+            if on { painter.rect_filled(r, 3, accent().linear_multiply(0.25)); } else if resp.hovered() { painter.rect_filled(r, 3, hl()); }
+            painter.text(r.center(), Align2::CENTER_CENTER, label, prop(10.5), if on { fg() } else { mu() });
+            if resp.clicked() { self.min_usd = i; }
+            x = r.right() + 2.0;
+        }
+        let min = MIN_USD[self.min_usd].0;
+        let src = if min >= depth::agg::BIG_USD { &a.big } else { &a.trades };
+        let body = Rect::from_min_max(pos2(rect.left(), rect.top() + ROW + 2.0), rect.max);
+        let usd = |x: &depth::agg::Tick| x.px * x.qty * a.usdt(x.ex, x.market);
+        let rows: Vec<_> = src.iter().rev()
+            .filter(|x| x.market == market && scope.contains(&x.ex) && self.src.is_none_or(|e| e == x.ex) && usd(x) >= min)
+            .take((body.height() / ROW) as usize).collect();
+        if rows.is_empty() {
+            painter.text(body.center_top() + vec2(0.0, 20.0), Align2::CENTER_CENTER, t("book.no_trades"), prop(11.0), dim());
+            return;
+        }
+        // highlight: the top decile of what is shown, and anything of at least $100K
         let big = {
-            let mut q: Vec<f64> = rows.iter().map(|x| x.qty).collect();
+            let mut q: Vec<f64> = rows.iter().map(|x| usd(x)).collect();
             q.sort_by(f64::total_cmp);
-            q.get(q.len() * 9 / 10).copied().unwrap_or(f64::MAX)
+            q.get(q.len() * 9 / 10).copied().unwrap_or(f64::MAX).min(100_000.0)
         };
+        let quote = self.quote;
+        let amt = |x: &depth::agg::Tick| if quote { usd(x) } else { x.qty };
+        let fs = col_fmt(rows.iter().map(|x| amt(x)).fold(0.0, f64::max), quote);
         for (i, x) in rows.iter().enumerate() {
-            let y = rect.top() + (i as f32 + 0.5) * ROW;
+            let y = body.top() + (i as f32 + 0.5) * ROW;
             let col = if x.side == Side::Buy { up() } else { dn() };
-            let f = if x.qty >= big { mono(11.5) } else { mono(11.0) };
-            if x.qty >= big { painter.rect_filled(Rect::from_min_size(pos2(rect.left(), y - ROW / 2.0), vec2(rect.width(), ROW)), 0, col.linear_multiply(0.08)); }
-            painter.text(pos2(rect.left() + 8.0, y), Align2::LEFT_CENTER, fmt_px(x.px), f.clone(), col);
-            painter.text(pos2(rect.left() + rect.width() * 0.55, y), Align2::RIGHT_CENTER, fmt_qty(x.qty), f, if x.qty >= big { fg() } else { mu() });
-            painter.text(pos2(rect.right() - 22.0, y), Align2::RIGHT_CENTER, super::hms(x.ts), mono(10.5), dim());
-            icon(&painter, x.ex, Rect::from_center_size(pos2(rect.right() - 11.0, y), vec2(12.0, 12.0)), false);
+            let whale = usd(x) >= big;
+            if whale {
+                // bar length by notional, log-scaled from $10K to $10M
+                let k = ((usd(x).max(1e4).log10() - 4.0) / 3.0).clamp(0.1, 1.0) as f32;
+                painter.rect_filled(Rect::from_min_size(pos2(body.left(), y - ROW / 2.0 + 1.0), vec2(body.width() * k, ROW - 2.0)), 0, col.linear_multiply(0.14));
+            }
+            let f = if whale { mono(11.5) } else { mono(11.0) };
+            painter.text(pos2(body.left() + 6.0, y), Align2::LEFT_CENTER, fmt_px(x.px), f.clone(), col);
+            painter.text(pos2(body.left() + body.width() * 0.55, y), Align2::RIGHT_CENTER, fs(amt(x)), f, if whale { fg() } else { mu() });
+            painter.text(pos2(body.right() - 22.0, y), Align2::RIGHT_CENTER, super::hms(x.ts), mono(10.5), dim());
+            icon(&painter, x.ex, Rect::from_center_size(pos2(body.right() - 10.0, y), vec2(12.0, 12.0)), false);
         }
     }
+}
+
+/// Minimum USDT notional of the tape filter.
+const MIN_USD: [(f64, &str); 5] = [(0.0, ""), (10_000.0, "10K"), (50_000.0, "50K"), (250_000.0, "250K"), (1_000_000.0, "1M")];
+
+/// Formatter for one column: quote amounts as 12.3K / 4.56M, base sizes with the decimals the
+/// column's largest value needs (3 significant digits on it), the same for every row.
+fn col_fmt(max: f64, quote: bool) -> impl Fn(f64) -> String {
+    let d = if max > 0.0 { (3.0 - max.log10().floor()).clamp(0.0, 4.0) as usize } else { 2 };
+    move |v| if quote { fmt_big_book(v) } else { fmt_dp(v, d) }
 }

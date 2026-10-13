@@ -721,8 +721,8 @@ enum OrderNum {
 
 /// Up/down follow the system green/red, swapped by the red-up preference.
 @MainActor enum OrderColor {
-    static var up: Color { Store.shared.state.prefs.red_up ? .red : .green }
-    static var down: Color { Store.shared.state.prefs.red_up ? .green : .red }
+    static var up: Color { Store.shared.state.prefs.red_up ? T1.red : T1.green }
+    static var down: Color { Store.shared.state.prefs.red_up ? T1.green : T1.red }
 }
 
 /// Capsule input: label inside on the left, value right-aligned, unit and an optional accessory.

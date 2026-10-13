@@ -227,11 +227,13 @@ struct ChartCtl: Decodable, Equatable {
     var tf = 60; var tfs: [[TfItem]] = []; var quick = 6; var src: String?; var venues: [String] = []
     var panes: [Pane] = []; var ma = true; var heat = false; var liqmap = false; var sr = true; var walls = true; var mark = true; var breakouts = true; var vwap = true; var cone = true; var perp = true
     var tool: String?; var drawings = 0; var panned = false
+    struct Ma: Decodable, Equatable { var n: Int; var col: String; var ema: Bool; var on: Bool }
+    var mas: [Ma] = []; var magnet = true
     /// (minutes, label) pairs
     var intervals: [(Int, String)] { tfs.compactMap { p in if case .m(let m) = p.first, case .l(let l) = p.last { return (m, l) }; return nil } }
     static func == (a: ChartCtl, b: ChartCtl) -> Bool {
         a.tf == b.tf && a.src == b.src && a.venues == b.venues && a.panes == b.panes && a.ma == b.ma && a.heat == b.heat
-            && a.liqmap == b.liqmap && a.sr == b.sr && a.walls == b.walls && a.mark == b.mark && a.breakouts == b.breakouts && a.vwap == b.vwap && a.cone == b.cone && a.perp == b.perp && a.tool == b.tool && a.drawings == b.drawings && a.panned == b.panned && a.tfs.count == b.tfs.count
+            && a.liqmap == b.liqmap && a.sr == b.sr && a.walls == b.walls && a.mark == b.mark && a.breakouts == b.breakouts && a.vwap == b.vwap && a.cone == b.cone && a.perp == b.perp && a.tool == b.tool && a.mas == b.mas && a.magnet == b.magnet && a.drawings == b.drawings && a.panned == b.panned && a.tfs.count == b.tfs.count
     }
 }
 /// one element of a [minutes, "label"] pair

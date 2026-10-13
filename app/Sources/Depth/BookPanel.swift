@@ -23,11 +23,11 @@ struct BookPanel: View {
                     Text(L("Quant")).tag(3)
                 }
                 .pickerStyle(.segmented).labelsHidden()
-                .padding(.horizontal, 10).padding(.top, 8)
+                .padding(.horizontal, 8).padding(.top, 8)
                 // second row: the active tab's options
                 HStack(spacing: 6) {
-                    Spacer(minLength: 0)
                     if pane == 2 {
+                        Spacer(minLength: 0)
                         Picker(L("Window"), selection: $window) {
                             Text("5m").tag(5); Text("1h").tag(60); Text("24h").tag(1440)
                         }
@@ -36,7 +36,7 @@ struct BookPanel: View {
                         ChartBar().bookRight(b)
                     }
                 }
-                .padding(.horizontal, 10).frame(height: 28)
+                .padding(.horizontal, 8).frame(height: 28).frame(minWidth: 0, maxWidth: .infinity).clipped()
             }
             .controlSize(.small)
             .frame(height: 62)

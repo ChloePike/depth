@@ -250,8 +250,8 @@ func numFont(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font { .syste
 extension Color {
     static let t1Dim = Color(nsColor: .tertiaryLabelColor)
     /// Rising / profit color: system green, or system red when Settings flips to red-up.
-    @MainActor static var t1Up: Color { Store.shared.state.prefs.red_up ? .red : .green }
-    @MainActor static var t1Down: Color { Store.shared.state.prefs.red_up ? .green : .red }
+    @MainActor static var t1Up: Color { Store.shared.state.prefs.red_up ? T1.red : T1.green }
+    @MainActor static var t1Down: Color { Store.shared.state.prefs.red_up ? T1.green : T1.red }
 }
 
 /// T1_OPEN_SETTINGS / T1_OPEN_TRANSFER with T1_UI_SHOT: a sheet is its own window, so the

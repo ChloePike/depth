@@ -87,6 +87,85 @@ pub struct Bar {
     pub basis_bps: Option<f64>,
     pub liq_long: f64, pub liq_short: f64,
     pub ls: Option<f64>,
+    /// order flow inferred from book updates (live only, base units, see `book_flow`)
+    pub flow: Flow,
+}
+
+/// Liquidity added and removed within FLOW_BAND of mid, and the top-of-book order-flow imbalance
+/// (Cont, Kukanov & Stoikov 2014: bid growth / ask shrink positive), all in base units.
+/// L2 only shows each price level's total, so adds / removals are net per level and update: an
+/// order placed and pulled between two snapshots is invisible. Removals include fills; see
+/// `Bar::book_net` for cancels.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Flow { pub add_bid: f64, pub add_ask: f64, pub rm_bid: f64, pub rm_ask: f64, pub ofi: f64 }
+
+impl std::ops::AddAssign for Flow {
+    fn add_assign(&mut self, o: Flow) { self.add_bid += o.add_bid; self.add_ask += o.add_ask; self.rm_bid += o.rm_bid; self.rm_ask += o.rm_ask; self.ofi += o.ofi; }
+}
+
+impl Bar {
+    /// Net resting liquidity gained per side over the bar, (bid, ask): adds minus cancels, where
+    /// cancels are removals not explained by taker flow (sells fill bids, buys fill asks). Done per
+    /// bar, not per update: trade and depth messages come on separate streams in either order.
+    /// ponytail: taker volume of a venue whose updates were skipped as resets is still subtracted.
+    pub fn book_net(&self) -> (f64, f64) {
+        let f = &self.flow;
+        (f.add_bid - (f.rm_bid - self.sell).max(0.0), f.add_ask - (f.rm_ask - self.buy).max(0.0))
+    }
+}
+
+/// Band around mid in which book changes count as flow: deep levels churn with quote refreshes
+/// that say nothing about intent near the price.
+const FLOW_BAND: f64 = 0.0025;
+
+/// Levels of one side within [lo, hi], as (price bits, qty).
+fn band(levels: impl Iterator<Item = (f64, f64)>, lo: f64, hi: f64) -> HashMap<u64, f64> {
+    levels.skip_while(|(p, _)| *p < lo || *p > hi).take_while(|(p, _)| *p >= lo && *p <= hi).map(|(p, q)| (p.to_bits(), q)).collect()
+}
+
+/// Flow between two states of one venue's book. Only prices inside both books' ranges count: a
+/// top-N snapshot says nothing about levels beyond its deepest one. None when the books share too few prices (a resubscribe, a regroup
+/// like Hyperliquid's sig-figs switch), which is a reset, not flow.
+/// The part of `b` within `band` of its mid, as its own book (what `book_flow` needs from the
+/// previous state, without cloning a full-depth book on every update).
+fn near(b: &Book, band: f64) -> Book {
+    let mut out = Book::default();
+    if let (Some((bb, _)), Some((ba, _))) = (b.best_bid(), b.best_ask()) {
+        let mid = (bb + ba) / 2.0;
+        let bids: Vec<_> = b.bids().take_while(|l| l.0 >= mid * (1.0 - band)).collect();
+        let asks: Vec<_> = b.asks().take_while(|l| l.0 <= mid * (1.0 + band)).collect();
+        out.apply(true, &bids, &asks);
+    }
+    out
+}
+
+pub fn book_flow(old: &Book, new: &Book) -> Option<Flow> {
+    let ((ob, obq), (oa, oaq)) = (old.best_bid()?, old.best_ask()?);
+    let ((nb, nbq), (na, naq)) = (new.best_bid()?, new.best_ask()?);
+    if !(ob < oa && nb < na) { return None; }
+    let mid = (ob + oa) / 2.0;
+    let mut f = Flow {
+        ofi: if nb >= ob { nbq } else { 0.0 } - if nb <= ob { obq } else { 0.0 } - if na <= oa { naq } else { 0.0 } + if na >= oa { oaq } else { 0.0 },
+        ..Default::default()
+    };
+    let deepest = |b: &Book, bid: bool| if bid { b.bids().last().map(|l| l.0) } else { b.asks().last().map(|l| l.0) };
+    let (mut seen, mut shared) = (0usize, 0usize);
+    for bid in [true, false] {
+        let (Some(od), Some(nd)) = (deepest(old, bid), deepest(new, bid)) else { continue };
+        // open toward the touch: a new best bid above the old mid must count as an add, or its later
+        // removal shows up alone and every up-move reads as pulled bids
+        let (lo, hi) = if bid { ((mid * (1.0 - FLOW_BAND)).max(od).max(nd), f64::INFINITY) } else { (0.0, (mid * (1.0 + FLOW_BAND)).min(od).min(nd)) };
+        let (o, n) = if bid { (band(old.bids(), lo, hi), band(new.bids(), lo, hi)) } else { (band(old.asks(), lo, hi), band(new.asks(), lo, hi)) };
+        seen += n.len();
+        shared += n.keys().filter(|k| o.contains_key(k)).count();
+        let (mut add, mut rm) = (0.0, 0.0);
+        for k in o.keys().chain(n.keys().filter(|k| !o.contains_key(k))) {
+            let d = n.get(k).copied().unwrap_or(0.0) - o.get(k).copied().unwrap_or(0.0);
+            if d > 0.0 { add += d } else { rm -= d }
+        }
+        if bid { f.add_bid = add; f.rm_bid = rm } else { f.add_ask = add; f.rm_ask = rm }
+    }
+    (seen > 0 && shared * 2 >= seen).then_some(f)
 }
 
 #[derive(Default)]
@@ -349,6 +428,7 @@ fn combine(venues: Vec<(f64, Vec<&Bar>)>) -> Vec<Bar> {
                 carry[i] = Some(x);
                 b.vol += x.vol; b.buy += x.buy; b.sell += x.sell;
                 b.liq_long += x.liq_long; b.liq_short += x.liq_short;
+                b.flow += x.flow;
                 if x.c > 0.0 {
                     let w = weights[i][&t];
                     o += x.o * k * w; h += x.h * k * w; l += x.l * k * w; c += x.c * k * w; wsum += w;
@@ -396,6 +476,8 @@ pub struct Agg {
     seeded: std::collections::HashSet<(Exchange, Market)>,
     /// most recent trades across spot/perp venues, newest last
     pub trades: VecDeque<Tick>,
+    /// trades of at least BIG_USD, kept longer than the full tape (which turns over in seconds)
+    pub big: VecDeque<Tick>,
     /// native-period history for chart timeframes above 1m, keyed by minutes
     pub tf: HashMap<u32, TfSet>,
 }
@@ -417,7 +499,9 @@ impl TfSet {
 #[derive(Clone, Copy, Debug)]
 pub struct Tick { pub ts: i64, pub ex: Exchange, pub market: Market, pub px: f64, pub qty: f64, pub side: Side }
 
-const TAPE_CAP: usize = 400;
+const TAPE_CAP: usize = 1000;
+/// USDT notional from which a trade also goes to `Agg::big`
+pub const BIG_USD: f64 = 10_000.0;
 
 /// Quote currency of a venue's spot/perp book (after the connectors' quote mapping).
 pub fn quote_of(ex: Exchange, _market: Market) -> &'static str {
@@ -443,15 +527,33 @@ impl Agg {
             }
         }
         let (ex, mk, ts) = (m.ex, m.market, m.ts);
-        let Agg { venues, series, cvd, seeded, trades, .. } = self;
+        let k_usdt = self.usdt(ex, mk);
+        let Agg { venues, series, cvd, seeded, trades, big, .. } = self;
         let v = venues.entry((ex, mk)).or_default();
         if v.symbol.is_none() { v.symbol = Some(m.symbol.clone()); }
         v.ts = ts;
         match &m.ev {
             Event::Trade { px, qty, side } => {
                 let signed = if *side == Side::Buy { *qty } else { -*qty };
-                trades.push_back(Tick { ts, ex, market: mk, px: *px, qty: *qty, side: *side });
-                if trades.len() > TAPE_CAP { trades.pop_front(); }
+                // fills of one taker order (same venue, side and ms) print as one row at their VWAP,
+                // so a sweep through many levels reads as the one large order it was
+                match trades.back_mut() {
+                    Some(t) if t.ts == ts && t.ex == ex && t.market == mk && t.side == *side => {
+                        t.px = (t.px * t.qty + px * qty) / (t.qty + qty);
+                        t.qty += qty;
+                    }
+                    _ => {
+                        trades.push_back(Tick { ts, ex, market: mk, px: *px, qty: *qty, side: *side });
+                        if trades.len() > TAPE_CAP { trades.pop_front(); }
+                    }
+                }
+                let t = *trades.back().unwrap();
+                if t.px * t.qty * k_usdt >= BIG_USD {
+                    match big.back_mut() {
+                        Some(b) if b.ts == t.ts && b.ex == t.ex && b.market == t.market && b.side == t.side => *b = t,
+                        _ => { big.push_back(t); if big.len() > TAPE_CAP { big.pop_front(); } }
+                    }
+                }
                 // the cross-venue bar is in USDT; the venue bar stays in native quote
                 v.last = Some(*px);
                 v.cvd += signed;
@@ -468,7 +570,15 @@ impl Agg {
                     }
                 }
             }
-            Event::Book { snapshot, bids, asks } => { v.book.apply(*snapshot, bids, asks); v.fresh = m.recv; }
+            Event::Book { snapshot, bids, asks } => {
+                // 2x the band so the trimmed copy still reaches past the band edge
+                let before = near(&v.book, FLOW_BAND * 2.0);
+                v.book.apply(*snapshot, bids, asks);
+                v.fresh = m.recv;
+                if let Some(f) = book_flow(&before, &v.book) {
+                    for k in [(Some(ex), mk), (None, mk)] { if let Some(b) = series.entry(k).or_default().at(ts) { b.flow += f; } }
+                }
+            }
             Event::Bbo { bid, bid_qty, ask, ask_qty } => { v.bbo = Some([*bid, *bid_qty, *ask, *ask_qty]); v.fresh = m.recv; }
             Event::Mark { mark, index, funding, next_funding_ms } => {
                 v.mark = Some(*mark);
@@ -844,6 +954,25 @@ pub fn nice(x: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn book_flow_splits_adds_cancels_and_fills() {
+        use super::*;
+        let book = |b: &[(f64, f64)], a: &[(f64, f64)]| { let mut x = Book::default(); x.apply(true, b, a); x };
+        let old = book(&[(100.0, 5.0), (99.9, 3.0), (99.8, 1.0)], &[(100.1, 4.0), (100.2, 2.0), (100.3, 1.0)]);
+        // bid 100 shrinks 5 -> 1, 99.9 grows by 2; ask 100.2 pulled
+        let new = book(&[(100.0, 1.0), (99.9, 5.0), (99.8, 1.0)], &[(100.1, 4.0), (100.3, 1.0)]);
+        let f = book_flow(&old, &new).unwrap();
+        assert_eq!((f.add_bid, f.rm_bid, f.add_ask, f.rm_ask), (2.0, 4.0, 0.0, 2.0));
+        // 3 sold into the bids that bar: of the 4 removed, 1 was cancelled
+        let bar = Bar { sell: 3.0, flow: f, ..Default::default() };
+        assert_eq!(bar.book_net(), (1.0, -2.0));
+        // same best prices: OFI = bid qty change - ask qty change = (1 - 5) - (4 - 4)
+        assert_eq!(f.ofi, -4.0);
+        // a regrouped book shares no prices: a reset, not flow
+        let regrouped = book(&[(99.95, 9.0), (99.85, 9.0)], &[(100.15, 9.0), (100.25, 9.0)]);
+        assert!(book_flow(&old, &regrouped).is_none());
+    }
 
     #[test]
     fn aligned_book_never_crosses_on_a_stale_bbo() {

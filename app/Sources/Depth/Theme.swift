@@ -11,8 +11,8 @@ enum T1 {
     static let mu = Color(dark: 0x8a929d, light: 0x6e6e73)
     static let dim = Color(dark: 0x59616c, light: 0x9a9aa0)
     static let warn = Color(hex: 0xe8a33d)
-    static let green = Color(nsColor: .systemGreen)
-    static let red = Color(nsColor: .systemRed)
+    static let green = Color(hex: 0x26a69a)
+    static let red = Color(hex: 0xef5350)
 
     @MainActor static var accent: Color { let a = Store.shared.state.prefs.accent; return a.count == 3 ? Color(red: Double(a[0]) / 255, green: Double(a[1]) / 255, blue: Double(a[2]) / 255) : .blue }
     /// Display time zone (Settings > General), the system's by default.
@@ -79,17 +79,47 @@ enum Fmt {
     }
 }
 
-/// Coin logo (Binance CDN, the same source the Rust side caches); a lettered disc meanwhile.
+/// Coin logo (Binance CDN) through the disk cache the Rust side also uses (~/Library/Caches/Depth/coins),
+/// held in memory once loaded; a lettered disc meanwhile or when the CDN has none.
 struct CoinIcon: View {
     let base: String
     var size: CGFloat = 18
+    @State private var img: NSImage?
     var body: some View {
-        AsyncImage(url: URL(string: "https://bin.bnbstatic.com/static/assets/logos/\(base).png")) { img in
-            img.resizable().interpolation(.high)
-        } placeholder: {
-            ZStack { Circle().fill(T1.hl); Text(String(base.prefix(1))).font(T1.ui(size * 0.5, .semibold)).foregroundStyle(T1.mu) }
+        Group {
+            if let i = img ?? CoinImages.cache[base] {
+                Image(nsImage: i).resizable().interpolation(.high)
+            } else {
+                ZStack { Circle().fill(T1.hl); Text(String(base.prefix(1))).font(T1.ui(size * 0.5, .semibold)).foregroundStyle(T1.mu) }
+            }
         }
         .frame(width: size, height: size).clipShape(Circle())
+        .task(id: base) { if CoinImages.cache[base] == nil { img = await CoinImages.load(base) } }
+    }
+}
+
+@MainActor enum CoinImages {
+    static var cache: [String: NSImage] = [:]
+    /// bases the CDN answered without an image (not retried this session)
+    private static var missing: Set<String> = []
+    private static let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("Depth/coins")
+
+    static func load(_ base: String) async -> NSImage? {
+        if let i = cache[base] { return i }
+        if missing.contains(base) { return nil }
+        let file = dir.appendingPathComponent("\(base).png")
+        var data = try? Data(contentsOf: file)
+        if data == nil, let url = URL(string: "https://bin.bnbstatic.com/static/assets/logos/\(base).png"),
+           let (d, r) = try? await URLSession.shared.data(from: url) {
+            // a 404 is stored empty, like the Rust side does, so it is not refetched every launch
+            let ok = (r as? HTTPURLResponse)?.statusCode == 200
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? (ok ? d : Data()).write(to: file)
+            data = ok ? d : Data()
+        }
+        guard let d = data, !d.isEmpty, let i = NSImage(data: d) else { if data != nil { missing.insert(base) }; return nil }
+        cache[base] = i
+        return i
     }
 }
 
