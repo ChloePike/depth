@@ -585,18 +585,25 @@ fn liq_levels(bars: &[Bar]) -> Option<LiqMap> {
 
 impl LiqMap {
     /// Open mass (longs + shorts) per cell: `cols` columns of `ms` from `t0` (each column shows the
-    /// state at its end), `rows` rows from the bottom; `row` maps a price to its row (any scale).
-    fn grid(&self, t0: i64, ms: i64, cols: usize, rows: usize, row: impl Fn(f64) -> Option<usize>) -> Vec<f32> {
+    /// state at its end), `rows` rows from the bottom; `row` maps a price to its (fractional, unclamped)
+    /// row, any scale. A level fills the rows of its whole bin, so neighbours join into bands.
+    fn grid(&self, t0: i64, ms: i64, cols: usize, rows: usize, row: impl Fn(f64) -> f32) -> Vec<f32> {
         let mut g = vec![0f32; cols * rows];
         let n = self.long.len();
         if cols == 0 || rows == 0 { return g; }
         let span = cols as i64 * ms;
         for s in &self.segs {
-            let Some(r) = row((self.lo + (s.i % n) as i64) as f64 * self.bin) else { continue };
+            let px = (self.lo + (s.i % n) as i64) as f64 * self.bin;
+            let (a, b) = (row(px - self.bin / 2.0), row(px + self.bin / 2.0));
+            let (a, b) = (a.min(b), a.max(b));
+            if b < 0.0 || a >= rows as f32 { continue; }
+            let (r0, r1) = (a.max(0.0) as usize, (b.ceil() as usize).clamp(1, rows) - 1);
+            // the bin's mass spread over its rows, so a zoomed-in bin is not brighter than a small one
+            let q = s.q / (r1 - r0 + 1) as f32;
             // column c (end te = t0 + (c+1) ms - 1) shows the segment when t0_seg <= te < t1_seg
             let c0 = ((s.t0 - t0 + 1).max(0) + ms - 1) / ms - 1;
             let c1 = (s.t1.min(t0 + span) - t0).div_euclid(ms) - 1;
-            for c in c0.max(0)..=c1.min(cols as i64 - 1) { g[c as usize * rows + r.min(rows - 1)] += s.q; }
+            for c in c0.max(0)..=c1.min(cols as i64 - 1) { for r in r0.max(0)..=r1.max(r0) { g[c as usize * rows + r] += q; } }
         }
         g
     }
@@ -713,14 +720,14 @@ impl LiqCache {
     /// Cells scale to the 99th percentile so one stacked level does not wash out the rest.
     #[allow(clippy::too_many_arguments)]
     /// `view` identifies the price mapping (range and scale) for the cache.
-    fn texture(&mut self, ctx: &egui::Context, t0: i64, ms: i64, cols: usize, rows: usize, view: (u64, u64, u8), row: impl Fn(f64) -> Option<usize>) -> Option<egui::TextureId> {
+    fn texture(&mut self, ctx: &egui::Context, t0: i64, ms: i64, cols: usize, rows: usize, view: (u64, u64, u8), row: impl Fn(f64) -> f32) -> Option<egui::TextureId> {
         let k = (self.ver, t0, ms, cols, view.0, view.1 ^ ((view.2 as u64) << 60), rows);
         if let Some((kk, t)) = &self.tex { if *kk == k { return Some(t.id()); } }
         let m = self.map.as_ref()?;
         let g = m.grid(t0, ms, cols, rows, row);
         let mut nz: Vec<f32> = g.iter().copied().filter(|v| *v > 0.0).collect();
         if nz.is_empty() { self.tex = None; return None; }
-        let p = (nz.len() * 99 / 100).min(nz.len() - 1);
+        let p = (nz.len() * 995 / 1000).min(nz.len() - 1);
         let top = *nz.select_nth_unstable_by(p, f32::total_cmp).1;
         let (cold, hot) = (Color32::from_rgb(0x8a, 0x4b, 0x0f), Color32::from_rgb(0xff, 0xd6, 0x0a));
         let mut img = egui::ColorImage::filled([cols, rows], Color32::TRANSPARENT);
@@ -728,8 +735,10 @@ impl LiqCache {
             for r in 0..rows {
                 let v = g[c * rows + r];
                 if v <= 0.0 { continue; }
-                let t = (v / top).min(1.0).sqrt();
-                img.pixels[(rows - 1 - r) * cols + c] = lerp(cold, hot, t).gamma_multiply(0.12 + 0.6 * t);
+                // squared, like Coinglass: most of the map stays dark, only real clusters light up
+                let t = (v / top).min(1.0).powi(2);
+                if t < 0.02 { continue; }
+                img.pixels[(rows - 1 - r) * cols + c] = lerp(cold, hot, t.sqrt()).gamma_multiply(0.04 + 0.86 * t);
             }
         }
         let tex = match self.tex.take() { Some((_, mut t)) => { t.set(img, egui::TextureOptions::NEAREST); t } None => ctx.load_texture("liqheat", img, egui::TextureOptions::NEAREST) };
@@ -983,11 +992,11 @@ impl Chart {
         if self.liqmap && smarket == Market::Perp && live {
             // estimated from the 1m series whatever the interval: finer OI steps, same levels
             // time x price: each estimated level from when it formed until price swept it (2 px rows)
-            if self.liq.get(&raw, 1).is_some() {
+                if self.liq.get(&raw, 1).is_some() {
                 let rows = ((main_plot.height() / 2.0) as usize).clamp(1, 1000);
                 let ms = self.tf * 60_000;
                 let (bot, h) = (main_plot.bottom(), main_plot.height());
-                let row = |px: f64| { let v = (bot - y(px)) / h * rows as f32; (v >= 0.0 && v < rows as f32).then_some(v as usize) };
+                let row = |px: f64| (bot - y(px)) / h * rows as f32;
                 if let Some(id) = self.liq.texture(ui.ctx(), bars[i0].t, ms, i1 - i0 + 1, rows, (lo.to_bits(), hi.to_bits(), self.scale as u8), row) {
                     let r = Rect::from_min_max(pos2(fr.x(i0 as f32) - self.bar_w / 2.0, main_plot.top()), pos2(fr.x(i1 as f32) + self.bar_w / 2.0, main_plot.bottom()));
                     painter.with_clip_rect(main_plot).image(id, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
@@ -2336,10 +2345,10 @@ impl Chart {
     }
 
     fn toolbar(&mut self, ui: &mut Ui, a: &Agg, market: Market, base: &str) {
-        // design: a 40 px bar over a hairline; compact interval pills, outlined menus, tools on a strip
-        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
+        // design: a 32 px bar over a hairline; compact interval pills, outlined menus, tools on a strip
+        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
         ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, line()));
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(0.0, 6.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(0.0, 2.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
         let ui = &mut child;
         ui.spacing_mut().item_spacing.x = 2.0;
         for (m, l) in &TFS[..TF_QUICK] {
@@ -2970,7 +2979,7 @@ mod tests {
         // to 60 and sweeps every long level above it, so column 1 keeps only the shorts (10)
         {
             let m = liq_levels(&[bar(0, 100.0, 20.0), Bar { t: 60_000, o: 100.0, h: 100.0, l: 60.0, c: 100.0, vol: 0.0, ..Default::default() }]).unwrap();
-            let g = m.grid(0, 60_000, 2, 1, |_| Some(0));
+            let g = m.grid(0, 60_000, 2, 1, |_| 0.5);
             assert!((g[0] - 20.0).abs() < 1e-3 && (g[1] - 10.0).abs() < 1e-3, "{g:?}");
         }
         let total = |m: &LiqMap| m.long.iter().chain(&m.short).sum::<f32>();
