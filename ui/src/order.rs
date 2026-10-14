@@ -42,8 +42,8 @@ struct Waiting { ex: String, symbol: String, pos: String, base_qty: f64, tp: Opt
 /// One staged TP/SL level of the position sheet; `pct` = amount is % of the position.
 struct Level { tp: bool, price: String, amount: String, pct: bool }
 
-/// The TP/SL sheet of one position (whole position or staged levels).
-struct TpSlSheet { ex: String, symbol: String, side: String, partial: bool, tp: String, sl: String, last: bool, levels: Vec<Level>, err: Option<String> }
+/// The TP/SL sheet of one position (whole position or staged levels); shared with the account strip.
+pub(crate) struct TpSlSheet { ex: String, symbol: String, side: String, partial: bool, tp: String, sl: String, last: bool, levels: Vec<Level>, err: Option<String> }
 
 pub struct OrderPanel {
     close: bool,
@@ -139,8 +139,8 @@ fn qty_str(v: f64, step: Option<f64>) -> String {
     out
 }
 
-fn usd(v: f64) -> String { fmt_dp(v, 2) }
-fn signed(v: f64) -> String { format!("{}{}", if v >= 0.0 { "+" } else { "" }, fmt_dp(v, 2)) }
+pub(crate) fn usd(v: f64) -> String { fmt_dp(v, 2) }
+pub(crate) fn signed(v: f64) -> String { format!("{}{}", if v >= 0.0 { "+" } else { "" }, fmt_dp(v, 2)) }
 fn f(v: &Value) -> Option<f64> { v.as_f64() }
 fn s(v: &Value) -> &str { v.as_str().unwrap_or_default() }
 
@@ -183,7 +183,7 @@ fn field(ui: &mut Ui, label: &str, text: &mut String, unit: &str, id: &str) -> (
 }
 
 /// Full-width segmented control.
-fn segments<T: PartialEq + Copy>(ui: &mut Ui, sel: &mut T, items: &[(T, &str)]) -> bool {
+pub(crate) fn segments<T: PartialEq + Copy>(ui: &mut Ui, sel: &mut T, items: &[(T, &str)]) -> bool {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover());
     ui.painter().rect_filled(rect, 6, panel2());
     let w = rect.width() / items.len() as f32;
@@ -225,7 +225,7 @@ fn slider(ui: &mut Ui, v: &mut f32) -> bool {
     false
 }
 
-fn big_button(ui: &mut Ui, text: &str, fill: Color32, enabled: bool) -> bool {
+pub(crate) fn big_button(ui: &mut Ui, text: &str, fill: Color32, enabled: bool) -> bool {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
     let col = if !enabled { fill.linear_multiply(0.3) } else if resp.is_pointer_button_down_on() { fill.linear_multiply(0.8) } else if resp.hovered() { fill.gamma_multiply(1.15) } else { fill };
     ui.painter().rect_filled(rect, 6, col);
@@ -241,19 +241,19 @@ fn chip(ui: &mut Ui, text: &str, enabled: bool) -> egui::Response {
     if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
 }
 
-fn kv(ui: &mut Ui, k: &str, v: String, col: Color32) {
+pub(crate) fn kv(ui: &mut Ui, k: &str, v: String, col: Color32) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(k).font(prop(11.5)).color(dim()));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label(RichText::new(v).font(mono(11.5)).color(col)); });
     });
 }
 
-fn note(ui: &mut Ui, text: &str, col: Color32) {
+pub(crate) fn note(ui: &mut Ui, text: &str, col: Color32) {
     ui.add(egui::Label::new(RichText::new(text).font(prop(11.0)).color(col)).wrap());
 }
 
 /// Card: rounded panel with a hairline, like the native glass cards.
-fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+pub(crate) fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     egui::Frame::new().fill(panel2()).stroke(egui::Stroke::new(1.0, line())).corner_radius(10).inner_margin(12).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 8.0;
@@ -261,7 +261,7 @@ fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     }).inner
 }
 
-fn checkbox(ui: &mut Ui, on: &mut bool, text: &str) -> bool { ui.checkbox(on, RichText::new(text).font(prop(12.0))).changed() }
+pub(crate) fn checkbox(ui: &mut Ui, on: &mut bool, text: &str) -> bool { ui.checkbox(on, RichText::new(text).font(prop(12.0))).changed() }
 
 impl OrderPanel {
     /// The whole order column. `st` is the app's state document, `call` sends ops.
@@ -377,7 +377,7 @@ impl OrderPanel {
         self.confirm_modal(ui, st, call);
         self.algo_modal(ui, t, call);
         self.leverage_modal(ui, t, call);
-        self.tpsl_modal(ui, st, call);
+        tpsl_modal(&mut self.sheet, ui, st, call);
     }
 
     /// Position mode, leverage (opens the sheet), untested warning, routing / venue menu.
@@ -672,19 +672,23 @@ impl OrderPanel {
                     }
                 }
                 if c[1].add_sized([c[1].available_width(), 26.0], egui::Button::new(l("Limit"))).on_hover_text(l("Fill the form with a limit close at the venue's best price")).clicked() {
-                    // prefill: close tab, limit at the venue's own touch on the passive side
-                    let t = &st["trade"];
-                    (self.close, self.kind, self.bbo_on) = (true, Kind::Limit, false);
-                    if let Some(px) = f(&t[if long { "ask" } else { "bid" }]) { self.price = px_str(px, f(&t["tick"])); }
-                    self.qty = qty_str(qty, f(&t["step"]));
-                    self.last_pos = Some(s(&p["side"]).into());
+                    self.prefill_close(p, st);
                 }
                 if c[2].add_sized([c[2].available_width(), 26.0], egui::Button::new(l("TP/SL"))).on_hover_text(l("Whole-position or staged take-profit / stop-loss")).clicked() {
-                    self.sheet = Some(TpSlSheet { ex: s(&p["ex"]).into(), symbol: s(&p["symbol"]).into(), side: s(&p["side"]).into(), partial: false, tp: String::new(), sl: String::new(), last: false,
-                        levels: vec![Level { tp: true, price: String::new(), amount: "50".into(), pct: true }, Level { tp: false, price: String::new(), amount: "100".into(), pct: true }], err: None });
+                    self.sheet = Some(TpSlSheet::new(s(&p["ex"]), s(&p["symbol"]), s(&p["side"])));
                 }
             });
         });
+    }
+
+    /// Limit close of a position in the form: close tab, limit at the venue's own touch on the
+    /// passive side, the whole size, and Enter repeats that side.
+    pub(crate) fn prefill_close(&mut self, p: &Value, st: &Value) {
+        let t = &st["trade"];
+        (self.close, self.kind, self.bbo_on) = (true, Kind::Limit, false);
+        if let Some(px) = f(&t[if s(&p["side"]) == "long" { "ask" } else { "bid" }]) { self.price = px_str(px, f(&t["tick"])); }
+        self.qty = qty_str(f(&p["qty"]).unwrap_or(0.0), f(&t["step"]));
+        self.last_pos = Some(s(&p["side"]).into());
     }
 
     /// The trade venue's account: margin health, equity, uPnL, keys shortcut.
@@ -966,11 +970,20 @@ impl OrderPanel {
         }
     }
 
-    /// TP/SL for an existing position: whole position, or staged levels (one `set_tpsl` with
-    /// `partial_qty` each); lists its live TP/SL with cancel.
-    fn tpsl_modal(&mut self, ui: &mut Ui, st: &Value, call: &mut Call) {
-        let Some(sh) = self.sheet.as_mut() else { return };
-        let Some(p) = st["positions"].as_array().and_then(|a| a.iter().find(|p| s(&p["ex"]) == sh.ex && s(&p["symbol"]) == sh.symbol && s(&p["side"]) == sh.side)).cloned() else { self.sheet = None; return };
+}
+
+impl TpSlSheet {
+    pub(crate) fn new(ex: &str, symbol: &str, side: &str) -> Self {
+        TpSlSheet { ex: ex.into(), symbol: symbol.into(), side: side.into(), partial: false, tp: String::new(), sl: String::new(), last: false,
+            levels: vec![Level { tp: true, price: String::new(), amount: "50".into(), pct: true }, Level { tp: false, price: String::new(), amount: "100".into(), pct: true }], err: None }
+    }
+}
+
+/// TP/SL for an existing position: whole position, or staged levels (one `set_tpsl` with
+/// `partial_qty` each); lists its live TP/SL with cancel. Closes itself when the position is gone.
+pub(crate) fn tpsl_modal(sheet: &mut Option<TpSlSheet>, ui: &mut Ui, st: &Value, call: &mut Call) {
+        let Some(sh) = sheet.as_mut() else { return };
+        let Some(p) = st["positions"].as_array().and_then(|a| a.iter().find(|p| s(&p["ex"]) == sh.ex && s(&p["symbol"]) == sh.symbol && s(&p["side"]) == sh.side)).cloned() else { *sheet = None; return };
         let long = sh.side == "long";
         let sign = if long { 1.0 } else { -1.0 };
         let (qty, entry, mark) = (f(&p["qty"]).unwrap_or(0.0), f(&p["entry"]).unwrap_or(0.0), f(&p["mark"]).unwrap_or(0.0));
@@ -1092,15 +1105,14 @@ impl OrderPanel {
             }
             done = true;
         }
-        if done { self.sheet = None; }
-    }
+        if done { *sheet = None; }
 }
 
 fn ms(v: Option<f64>) -> String { v.map(|x| format!("{x:.0}ms")).unwrap_or("–".into()) }
 
 /// Algo status strings come from the engine at runtime; `l` wants a static key.
 /// ponytail: leaks one copy per distinct status text (a handful of fixed strings in practice).
-fn leak(s: &str) -> &'static str {
+pub(crate) fn leak(s: &str) -> &'static str {
     use std::sync::Mutex;
     static SEEN: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
     let mut v = SEEN.lock().unwrap();
