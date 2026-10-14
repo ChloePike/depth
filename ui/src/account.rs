@@ -262,12 +262,13 @@ fn empty_state(ui: &mut Ui, title: &str, desc: &str, button: Option<&str>) -> bo
 }
 
 /// A piece of the summary line: text, or a venue logo.
-enum Seg { T(String, egui::FontId, Color32), I(Exchange) }
+/// Text, a venue logo, or a risk gauge (0..1).
+enum Seg { T(String, egui::FontId, Color32), I(Exchange), G(f32) }
 
 /// Lays `segs` out left to right as one group (gap after labels / logos); false, and nothing
 /// drawn, when the space left in the line is too small for it.
 fn segs_group(ui: &mut Ui, segs: &[Seg], tip: &str) -> bool {
-    let gals: Vec<Option<std::sync::Arc<egui::Galley>>> = segs.iter().map(|g| match g { Seg::T(t, f, c) => Some(ui.painter().layout_no_wrap(t.clone(), f.clone(), *c)), Seg::I(_) => None }).collect();
+    let gals: Vec<Option<std::sync::Arc<egui::Galley>>> = segs.iter().map(|g| match g { Seg::T(t, f, c) => Some(ui.painter().layout_no_wrap(t.clone(), f.clone(), *c)), _ => None }).collect();
     let gap = 4.0;
     let w: f32 = gals.iter().map(|g| g.as_ref().map_or(12.0, |g| g.size().x) + gap).sum::<f32>() - gap;
     if w + 14.0 > ui.available_width() { return false; }
@@ -276,6 +277,7 @@ fn segs_group(ui: &mut Ui, segs: &[Seg], tip: &str) -> bool {
     let mut x = r.left();
     for (sg, g) in segs.iter().zip(gals) {
         match (sg, g) {
+            (Seg::G(risk), _) => { risk_gauge(ui.painter(), egui::pos2(x + 7.0, r.center().y + 4.5), 6.5, *risk); x += 12.0 + gap; }
             (Seg::I(e), _) => { icon(ui.painter(), *e, Rect::from_center_size(egui::pos2(x + 6.0, r.center().y), egui::vec2(12.0, 12.0)), false); x += 12.0 + gap; }
             (Seg::T(_, _, c), Some(g)) => { let gw = g.size().x; ui.painter().galley(egui::pos2(x, r.center().y - g.size().y / 2.0), g, *c); x += gw + gap; }
             _ => {}
@@ -480,8 +482,8 @@ impl AccountPanel {
             let mut segs = vec![];
             if let Some(e) = Exchange::parse(s(&b["ex"])) { segs.push(Seg::I(e)); }
             segs.extend([k(l("Equity")), v(usd(f(&b["equity"])), fg()), k(l("Available")), v(usd(f(&b["available"])), fg())]);
-            if let Some(m) = b["uni_mmr"].as_f64() { segs.extend([k("uniMMR"), v(fmt_dp(m, 2), if m > 1.5 { up() } else if m > 1.2 { WARN } else { dn() })]); }
-            if let Some(r) = b["mm_rate"].as_f64() { segs.extend([k(l("MM rate")), v(format!("{:.1}%", r * 100.0), if r < 0.5 { up() } else if r < 0.8 { WARN } else { dn() })]); }
+            if let Some(m) = b["uni_mmr"].as_f64() { segs.extend([k("uniMMR"), Seg::G(mmr_risk(m)), v(fmt_dp(m, 2), if m > 1.5 { up() } else if m > 1.2 { WARN } else { dn() })]); }
+            if let Some(r) = b["mm_rate"].as_f64() { segs.extend([k(l("MM rate")), Seg::G(r as f32), v(format!("{:.1}%", r * 100.0), if r < 0.5 { up() } else if r < 0.8 { WARN } else { dn() })]); }
             let mut tip = format!("{} · {} {} USD · {} {} USD", s(&b["ex"]), l("Equity"), usd(f(&b["equity"])), l("Available"), usd(f(&b["available"])));
             if let Some(m) = b["maint_margin"].as_f64() { tip += &format!("\n{} {} USD", l("Maintenance margin"), usd(m)); }
             if !b["uni_mmr"].is_null() { tip += "\n"; tip += l("Portfolio Margin maintenance ratio: below 1.20 margin call, below 1.05 the whole account is liquidated. Higher is safer."); }

@@ -318,6 +318,23 @@ pub fn tab(ui: &mut egui::Ui, text: &str, selected: bool, size: f32) -> egui::Re
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Risk gauge (half dial, green -> amber -> red, needle at `risk` 0..1) centred on `c`'s
+/// baseline, `r` its radius: drawn next to uniMMR / margin ratio figures.
+pub fn risk_gauge(p: &Painter, c: egui::Pos2, r: f32, risk: f32) {
+    let risk = risk.clamp(0.0, 1.0);
+    let segs = [(0.0, 0.5, up()), (0.5, 0.8, WARN), (0.8, 1.0, dn())];
+    let at = |f: f32, rr: f32| { let a = std::f32::consts::PI * (1.0 - f); c + egui::vec2(a.cos(), -a.sin()) * rr };
+    for (f0, f1, col) in segs {
+        let pts: Vec<egui::Pos2> = (0..=8).map(|i| at(f0 + (f1 - f0) * i as f32 / 8.0, r)).collect();
+        p.add(egui::Shape::line(pts, egui::Stroke::new((r * 0.32).max(1.6), col)));
+    }
+    p.line_segment([c, at(risk, r * 0.78)], egui::Stroke::new(1.4, fg()));
+    p.circle_filled(c, (r * 0.18).max(1.4), fg());
+}
+
+/// uniMMR as a gauge position: liquidation at 1.05 is the far right, 10 and above the far left.
+pub fn mmr_risk(uni_mmr: f64) -> f32 { ((1.0 / uni_mmr.max(1e-9) - 0.1) / (1.0 / 1.05 - 0.1)).clamp(0.0, 1.0) as f32 }
+
 /// Linear blend of two colors (t = 0 gives `a`), for hover / selection fades.
 pub fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);

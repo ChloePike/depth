@@ -684,10 +684,21 @@ impl OrderPanel {
                 });
             });
             ui.separator();
+            // the account-level number that liquidates a unified account, with a risk gauge beside it
+            let risk_row = |ui: &mut Ui, k: &str, v: String, col: Color32, risk: f32, tip: &str| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(k).font(prop(11.5)).color(dim()));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(v).font(mono(14.0)).strong().color(col));
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(20.0, 14.0), egui::Sense::hover());
+                        risk_gauge(ui.painter(), egui::pos2(r.center().x, r.bottom() - 2.0), 8.0, risk);
+                    });
+                }).response.on_hover_text(tip);
+            };
             if let Some(u) = f(&b["uni_mmr"]) {
-                kv(ui, l("UniMMR"), fmt_dp(u, 2), if u < 1.5 { dn() } else if u < 3.0 { WARN } else { up() });
+                risk_row(ui, l("UniMMR"), fmt_dp(u, 2), if u < 1.5 { dn() } else if u < 3.0 { WARN } else { up() }, mmr_risk(u), l("Portfolio Margin: the whole account is liquidated when UniMMR falls to 1.05"));
             } else if let Some(r) = f(&b["mm_rate"]) {
-                kv(ui, l("Margin ratio"), format!("{:.2}%", r * 100.0), if r > 0.7 { dn() } else if r > 0.4 { WARN } else { up() });
+                risk_row(ui, l("Margin ratio"), format!("{:.2}%", r * 100.0), if r > 0.7 { dn() } else if r > 0.4 { WARN } else { up() }, r as f32, l("Maintenance margin / margin balance; liquidation at 100%"));
             }
             if let Some(m) = f(&b["maint_margin"]) { kv(ui, l("Maintenance margin"), format!("{} USD", usd(m)), fg()); }
             if let Some(e) = f(&b["adj_equity"]) { kv(ui, l("Adjusted equity"), format!("{} USD", usd(e)), fg()); }
