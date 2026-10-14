@@ -2599,7 +2599,9 @@ fn vsep(ui: &mut Ui) {
 
 /// Menu body (design: popups radius 6 with a soft shadow come from the style): 28 px rows.
 fn menu_rows(ui: &mut Ui, w: f32) {
+    // a cap as well: anything that fills the available width would otherwise take the screen
     ui.set_min_width(w);
+    ui.set_max_width(w + 120.0);
     let s = ui.spacing_mut();
     s.interact_size.y = 26.0;
     s.button_padding = vec2(8.0, 0.0);
@@ -2615,7 +2617,9 @@ fn menu_head(ui: &mut Ui, s: &str) {
 
 /// Hairline between menu sections.
 fn menu_sep(ui: &mut Ui) {
-    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 7.0), Sense::hover());
+    // as wide as the menu's content so far: available_width in a popup is the whole screen on
+    // its first frame, and the popup keeps whatever width that frame took
+    let (r, _) = ui.allocate_exact_size(vec2(ui.min_rect().width(), 7.0), Sense::hover());
     ui.painter().hline(r.x_range().shrink(4.0), r.center().y, Stroke::new(1.0, line()));
 }
 
