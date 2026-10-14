@@ -278,9 +278,9 @@ impl App {
         // T1_ACC_TAB=<n>: open the account strip on tab n (screenshots)
         let mut picker = picker::Picker::default();
         picker.open = env("T1_PICK").is_some();
-        // T1_BOOK_PANE=<0..3>: book, trades, venues, quant (screenshots, as in the SwiftUI host)
+        // T1_BOOK_PANE=<0..4>: book, trades, venues, quant, L3 (screenshots, as in the SwiftUI host)
         let mut book = book::BookView::default();
-        match env("T1_BOOK_PANE").and_then(|s| s.parse::<u8>().ok()) { Some(1) => book.native_set(&serde_json::json!({"trades": true})), Some(p @ 2..=3) => book.page = p, _ => {} }
+        match env("T1_BOOK_PANE").and_then(|s| s.parse::<u8>().ok()) { Some(1) => book.native_set(&serde_json::json!({"trades": true})), Some(p @ 2..=4) => book.page = p, _ => {} }
         if let Some(tf) = env("T1_TF").and_then(|s| s.parse().ok()) { chart.tf = tf; }
         let layout = env("T1_LAYOUT").or(st.layout).unwrap_or_else(|| "1".into());
         App {
@@ -691,7 +691,9 @@ impl App {
                 let panel = egui::Panel::right("book").show_separator_line(theme::native()).frame(card(8));
                 let panel = if self.hosted { panel.resizable(false).exact_size(300.0) } else { panel.resizable(true).default_size(320.0) };
                 let pane = if self.hosted { 0 } else { self.book.pane() };
-                let r = if pane >= 2 {
+                // the L3 page starts the exact order feeds (REST polls) only while someone looks at it
+                if pane == book::L3_PAGE { self.eng.wants_l3.store(true, std::sync::atomic::Ordering::Relaxed); }
+                let r = if pane == 2 || pane == 3 {
                     // the venue_share op takes the agg lock itself
                     drop(a);
                     let st = self.state_doc();

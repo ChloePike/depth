@@ -18,6 +18,8 @@ const GROUPS: [f64; 5] = [1.0, 2.0, 5.0, 10.0, 50.0];
 
 /// `quote`: sizes in quote currency (size x price) instead of base.
 pub struct BookView { trades: bool,
+    /// L3 page: venue shown and the event tape's size filter (index into MIN_USD)
+    l3_src: Exchange, l3_min: usize,
     /// 2 venues, 3 quant (own window only); otherwise `trades` picks book or tape
     pub page: u8, pub src: Option<Exchange>, group: usize, pub clicked: Option<(Exchange, f64)>, quote: bool,
     /// tape filter: index into MIN_USD
@@ -40,7 +42,7 @@ const FLASH_GAP: Duration = Duration::from_millis(300);
 /// (and the aggregation across ten venues is not free).
 const REFRESH: Duration = Duration::from_millis(100);
 
-impl Default for BookView { fn default() -> Self { BookView { trades: false, page: 0, src: None, group: 1, clicked: None, quote: false, min_usd: 0, cache: None, flash: Default::default(), seen: Default::default(), last_mid: (0.0, true) } } }
+impl Default for BookView { fn default() -> Self { BookView { trades: false, l3_src: Exchange::Lighter, l3_min: 0, page: 0, src: None, group: 1, clicked: None, quote: false, min_usd: 0, cache: None, flash: Default::default(), seen: Default::default(), last_mid: (0.0, true) } } }
 
 /// Quote amounts: 12.3K / 4.56M style, whole units below a thousand.
 fn fmt_big_book(v: f64) -> String {
@@ -134,6 +136,7 @@ impl BookView {
         // hosted: tabs, unit, source and grouping are native controls (native_set)
         if !native() {
             if self.tabs(ui) { return; }
+            if self.page == L3_PAGE { return self.l3(ui, a, market); }
             self.controls(ui, a, market, base, mid);
         }
         if self.trades {
@@ -310,7 +313,7 @@ impl BookView {
         self.flash.retain(|_, t| now.duration_since(*t) < FLASH);
     }
 
-    /// Shown page: 0 book, 1 trades, 2 venues, 3 quant.
+    /// Shown page: 0 book, 1 trades, 2 venues, 3 quant, 4 L3.
     pub fn pane(&self) -> u8 { if self.page > 1 { self.page } else { self.trades as u8 } }
 
     /// Tab bar: Book / Trades / Venues / Quant as compact pills over a hairline that spans the
@@ -320,8 +323,7 @@ impl BookView {
         let sp = ui.spacing().item_spacing.y;
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
         let mut x = row.left();
-        for (i, name) in [l("Book"), l("Trades"), l("Venues"), l("Quant")].into_iter().enumerate() {
-            let i = i as u8;
+        for (i, name) in [(0u8, l("Book")), (1, l("Trades")), (L3_PAGE, "L3"), (2, l("Venues")), (3, l("Quant"))] {
             let r = pill(ui, pos2(x, row.top()), name, self.pane() == i, ("book_tab", i));
             x = r.rect.right() + 2.0;
             if r.clicked() && self.pane() != i {
@@ -333,7 +335,127 @@ impl BookView {
         let y = row.bottom() + 6.5;
         ui.painter().with_clip_rect(ui.clip_rect().expand2(vec2(8.0, 0.0))).hline(row.left() - 8.0..=row.right() + 8.0, y, Stroke::new(1.0, line()));
         ui.add_space((15.0 - sp).max(0.0));
-        self.page > 1
+        self.page == 2 || self.page == 3
+    }
+
+    /// L3: the order-by-order book of one venue (Lighter exact, OKX inferred from order counts):
+    /// each level's orders as blocks in queue order, sized by quantity and marked by how they are
+    /// known; then the life-cycle tape (adds, amends, partial fills, fills, cancels).
+    fn l3(&mut self, ui: &mut Ui, a: &Agg, market: Market) {
+        let sp = ui.spacing().item_spacing.y;
+        // source row
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
+        let mut c = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        let srcs = [(Exchange::Lighter, "Lighter"), (Exchange::Okx, "OKX")];
+        seg_fit(&mut c, &mut self.l3_src, &srcs);
+        let exact = self.l3_src == Exchange::Lighter;
+        c.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(egui::RichText::new(if exact { l("exact, from venue order ids") } else { l("inferred from order counts") }).font(prop(11.0)).color(if exact { up() } else { WARN }));
+        });
+        ui.add_space((8.0 - sp).max(0.0));
+        let mk = if self.l3_src == Exchange::Lighter { Market::Perp } else { market };
+        let Some(book) = a.l3.get(&(self.l3_src, mk)) else {
+            let msg = if self.l3_src == Exchange::Lighter && market != Market::Perp { l("Lighter lists perpetuals only") } else { l("Waiting for the order feed…") };
+            ui.label(egui::RichText::new(msg).font(prop(12.0)).color(mu()));
+            return;
+        };
+        let full = ui.available_rect_before_wrap();
+        ui.allocate_rect(full, Sense::hover());
+        let split = (full.top() + full.height() * 0.58).round();
+        let p = ui.painter_at(full);
+        // levels
+        let n = 8usize;
+        let asks = book.levels(false, n);
+        let bids = book.levels(true, n);
+        let max = asks.iter().chain(bids.iter()).map(|(_, v)| v.iter().map(|o| o.qty).sum::<f64>()).fold(0.0, f64::max).max(1e-12);
+        let big = {
+            let mut sz: Vec<f64> = asks.iter().chain(bids.iter()).flat_map(|(_, v)| v.iter().map(|o| o.qty)).collect();
+            sz.sort_by(|x, y| y.total_cmp(x));
+            sz.get(sz.len() / 20).copied().unwrap_or(f64::MAX)
+        };
+        // header 16, separator 5, legend 18 below the rows
+        let rh = ((split - full.top() - 16.0 - 5.0 - 20.0) / (2 * n) as f32).clamp(10.0, 22.0);
+        overline_at(&p, pos2(full.left() + 2.0, full.top() + 6.0), Align2::LEFT_CENTER, l("Price"));
+        overline_at(&p, pos2(full.right() - 2.0, full.top() + 6.0), Align2::RIGHT_CENTER, l("Orders"));
+        let bar_l = full.left() + 72.0;
+        let bar_w = full.right() - 30.0 - bar_l;
+        let hover = ui.input(|i| i.pointer.hover_pos());
+        let mut tip: Option<String> = None;
+        let now = depth::now_ms();
+        let mut y = full.top() + 16.0;
+        for (bid, levels) in [(false, asks.iter().rev().collect::<Vec<_>>()), (true, bids.iter().collect::<Vec<_>>())] {
+            let col = if bid { up() } else { dn() };
+            for (px, orders) in levels {
+                let r = Rect::from_min_size(pos2(full.left(), y), vec2(full.width(), rh));
+                p.text(pos2(r.left() + 2.0, r.center().y), Align2::LEFT_CENTER, fmt_px(*px), mono_m(11.5), col);
+                p.text(pos2(r.right() - 2.0, r.center().y), Align2::RIGHT_CENTER, format!("{}", orders.len()), mono(11.0), mu());
+                // blocks in queue order: the front fills first
+                let mut x = bar_l;
+                for o in orders.iter() {
+                    let w = ((o.qty / max) as f32 * bar_w).max(1.5);
+                    if x >= bar_l + bar_w { break; }
+                    let b = Rect::from_min_max(pos2(x, r.top() + 2.0), pos2((x + w - 1.0).min(bar_l + bar_w), r.bottom() - 2.0));
+                    let strong = o.qty >= big;
+                    let (alpha, stroke) = match o.src {
+                        depth::l3::Src::Exact => (if strong { 0.85 } else { 0.5 }, Stroke::NONE),
+                        depth::l3::Src::Inferred => (if strong { 0.7 } else { 0.35 }, Stroke::NONE),
+                        depth::l3::Src::Split => (0.14, Stroke::new(1.0, col.gamma_multiply(0.45))),
+                    };
+                    p.rect(b, 1, col.gamma_multiply(alpha), stroke, egui::StrokeKind::Inside);
+                    if hover.is_some_and(|h| b.contains(h)) {
+                        p.rect_stroke(b, 1, Stroke::new(1.0, fg_strong()), egui::StrokeKind::Outside);
+                        let age = if o.since_known { age_str(now - o.since) } else { format!("> {}", age_str(now - o.since)) };
+                        let src = match o.src { depth::l3::Src::Exact => l("exact"), depth::l3::Src::Inferred => l("inferred"), depth::l3::Src::Split => l("split estimate") };
+                        tip = Some(format!("{} @ {}\n{} {} · {} {}\n{}", qty_sig(o.qty), fmt_px(*px), l("resting"), age,
+                            l("placed"), qty_sig(o.initial), src));
+                    }
+                    x += w;
+                }
+                y += rh;
+            }
+            if !bid { p.hline(full.x_range(), y + 2.0, Stroke::new(1.0, line())); y += 5.0; }
+        }
+        if let Some(t) = tip { egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), ui.id().with("l3tip"), egui::PopupAnchor::Pointer).show(|ui| { ui.label(egui::RichText::new(t).font(mono(11.5))); }); }
+        // legend
+        let ly = split - 8.0;
+        let mut lx = full.left() + 2.0;
+        for (name, alpha, dashed) in [(l("exact"), 0.6, false), (l("inferred"), 0.35, false), (l("split estimate"), 0.14, true)] {
+            let b = Rect::from_center_size(pos2(lx + 5.0, ly), vec2(10.0, 8.0));
+            p.rect(b, 1, fg().gamma_multiply(alpha), if dashed { Stroke::new(1.0, fg().gamma_multiply(0.5)) } else { Stroke::NONE }, egui::StrokeKind::Inside);
+            lx = p.text(pos2(b.right() + 5.0, ly), Align2::LEFT_CENTER, name, prop(11.0), mu()).right() + 12.0;
+        }
+        // life-cycle tape, newest first, filtered by size
+        let tape = Rect::from_min_max(pos2(full.left(), split + 4.0), full.max);
+        p.hline(full.x_range(), split, Stroke::new(1.0, line()));
+        p.text(pos2(tape.left() + 2.0, tape.top() + 12.0), Align2::LEFT_CENTER, l("Events"), prop_s(12.0), fg());
+        let mut px = tape.left() + 52.0;
+        for (i, (_, label)) in MIN_USD.iter().enumerate() {
+            let name = if label.is_empty() { l("All") } else { label };
+            let r = pill_sized(ui, pos2(px, tape.top() + 2.0), name, self.l3_min == i, ("l3min_b", i), 20.0, 11.0);
+            if r.clicked() { self.l3_min = i; }
+            px = r.rect.right() + 2.0;
+        }
+        let min = MIN_USD[self.l3_min].0;
+        let mut ey = tape.top() + 30.0;
+        let er = 19.0;
+        for e in book.events.iter().rev().filter(|e| e.qty * e.px >= min) {
+            if ey + er > tape.bottom() { break; }
+            let side_c = if e.bid { up() } else { dn() };
+            let (kind, kc) = match e.kind {
+                depth::l3::Kind::Add => (l("Added"), accent()),
+                depth::l3::Kind::Amend => (l("Amended"), mu()),
+                depth::l3::Kind::Partial => (l("Partial fill"), side_c),
+                depth::l3::Kind::Fill => (l("Filled"), side_c),
+                depth::l3::Kind::Cancel => (l("Cancelled"), dim()),
+            };
+            let cy = ey + er / 2.0;
+            p.text(pos2(tape.left() + 2.0, cy), Align2::LEFT_CENTER, super::hms(e.ts), mono(10.5), dim());
+            p.text(pos2(tape.left() + 60.0, cy), Align2::LEFT_CENTER, kind, prop_m(11.5), kc);
+            p.text(pos2(tape.left() + 120.0, cy), Align2::LEFT_CENTER, fmt_px(e.px), mono_m(11.5), side_c);
+            let mark = match e.src { depth::l3::Src::Exact => "", depth::l3::Src::Inferred => " ~", depth::l3::Src::Split => " ≈" };
+            p.text(pos2(tape.right() - 2.0, cy), Align2::RIGHT_CENTER, format!("{}{mark}", qty_sig(e.qty)), mono(11.5), fg());
+            ey += er;
+        }
     }
 
     /// Filter row of Book and Trades (26 px controls, 6 px apart): source (all venues or one),
@@ -437,6 +559,18 @@ impl BookView {
         }
     }
 }
+
+/// Order size with enough decimals to show it (0.00012 stays visible, 12.5 does not grow digits).
+fn qty_sig(q: f64) -> String { let d = if q > 0.0 { (3.0 - q.log10().floor()).clamp(0.0, 8.0) as usize } else { 2 }; fmt_dp(q, d) }
+
+/// "8s", "3m 04s", "1h 12m": how long an order has rested.
+fn age_str(ms: i64) -> String {
+    let s = (ms / 1000).max(0);
+    if s < 60 { format!("{s}s") } else if s < 3600 { format!("{}m {:02}s", s / 60, s % 60) } else { format!("{}h {:02}m", s / 3600, s % 3600 / 60) }
+}
+
+/// The L3 page's index (after the four original pages, so saved / env indices keep their meaning).
+pub const L3_PAGE: u8 = 4;
 
 /// Overline at `pos`: 10.5 semibold caps, dim, 0.06 em tracking. Returns its rect.
 pub(super) fn overline_at(p: &egui::Painter, pos: egui::Pos2, align: Align2, text: &str) -> Rect {

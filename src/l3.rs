@@ -105,6 +105,16 @@ impl L3Book {
                         self.side(bid).entry(k).or_default().push_back(ord);
                         self.log(ts, bid, k, o.qty, o.id, Kind::Add, Src::Exact);
                     }
+                    // re-priced under the same id (Lighter modifies keep it): moves to the new level,
+                    // at the back of its queue
+                    Some((_, k0)) if k0 != k => {
+                        if let Some(mut cur) = self.take(bid, k0, o.id) {
+                            cur.qty = o.qty;
+                            self.side(bid).entry(k).or_default().push_back(cur);
+                            self.index.insert(o.id, (bid, k));
+                            self.log(ts, bid, k, o.qty, o.id, Kind::Amend, Src::Exact);
+                        } else { self.index.remove(&o.id); }
+                    }
                     Some((_, k0)) => {
                         let Some(cur) = self.side(bid).get_mut(&k0).and_then(|v| v.iter_mut().find(|x| x.id == o.id)) else { continue };
                         let before = cur.qty;
@@ -297,6 +307,9 @@ mod tests {
         let kinds: Vec<Kind> = b.events.iter().skip(2).map(|e| e.kind).collect();
         assert_eq!(kinds, vec![Kind::Cancel, Kind::Add]);
         assert_eq!(b.levels(true, 2).iter().map(|(p, _)| *p).collect::<Vec<_>>(), vec![100.5, 99.0]);
+        // re-priced under the same id: it leaves 99.0 and joins 99.5
+        b.exact_snapshot(&[r(4, 100.5, 3.0, 4), r(3, 99.5, 5.0, 3)], &[r(9, 101.0, 1.0, 1)], 30);
+        assert_eq!(b.levels(true, 3).iter().map(|(p, v)| (*p, v.len())).collect::<Vec<_>>(), vec![(100.5, 1), (99.5, 1)]);
     }
 
     #[test]
