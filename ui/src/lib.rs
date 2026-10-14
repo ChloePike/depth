@@ -217,6 +217,8 @@ pub struct App {
     /// egui ports of the native panels: their state document (when built, stale) and the order panel
     st: (std::sync::Arc<serde_json::Value>, Instant, bool),
     order: order::OrderPanel,
+    /// a venue switched in the status bar, applied once the agg lock is free: (venue, on)
+    venue_toggle: Option<(Exchange, bool)>,
     /// order panel shown (Perp; Cmd-Opt-I or the header button), persisted
     order_panel: bool,
     /// header price flash; the book column's Venues / Quant pages
@@ -287,7 +289,7 @@ impl App {
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
             route: st.route.clone().unwrap_or_default(), pending_base: None, pending_mode: None, pending_restart: false, book_w: 0.0,
             layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(),
-            st: (Default::default(), Instant::now(), true), order: Default::default(), order_panel: st.order_panel.unwrap_or(true), top: Default::default(), venue_pages: Default::default(),
+            st: (Default::default(), Instant::now(), true), order: Default::default(), venue_toggle: None, order_panel: st.order_panel.unwrap_or(true), top: Default::default(), venue_pages: Default::default(),
             account: Default::default(),
         }
     }
@@ -417,11 +419,8 @@ impl App {
                 let resp = status_venue(ui, e, on, alive, lat, lat_col)
                     .on_hover_text(format!("{e:?}: {}", if on { t("status.scope_on") } else { t("status.scope_off") }));
                 // switching a venue off disconnects only that venue; on connects only it
-                if resp.clicked() && (!on || self.eng.off.len() + 1 < Exchange::ALL.len()) {
-                    self.eng.set_venue(e, !on, ui.ctx());
-                    if on && self.chart.src == Some(e) { self.chart.src = None; }
-                    if on && self.book.src == Some(e) { self.book.src = None; }
-                }
+                // applied after the frame's agg lock is released (set_venue takes it): doing it here deadlocked
+                if resp.clicked() && (!on || self.eng.off.len() + 1 < Exchange::ALL.len()) { self.venue_toggle = Some((e, !on)); }
             }
             ui.separator();
             ui.label(RichText::new(format!("{:.0} {}", self.rate.2, t("status.msgs"))).font(mono(10.5)).color(mu()));
@@ -750,6 +749,13 @@ impl App {
         if let Some(b) = self.pending_base.take() { new_base = Some(b); }
         if let Some(m) = self.pending_mode.take() { new_mode = Some(m); }
         restart |= std::mem::take(&mut self.pending_restart);
+        if let Some((e, on)) = self.venue_toggle.take() {
+            self.eng.set_venue(e, on, &ctx);
+            if !on {
+                if self.chart.src == Some(e) { self.chart.src = None; }
+                if self.book.src == Some(e) { self.book.src = None; }
+            }
+        }
         if new_base.is_some() || restart {
             let switched = new_base.is_some();
             let b = new_base.unwrap_or_else(|| self.eng.base.clone());
