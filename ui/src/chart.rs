@@ -867,11 +867,13 @@ impl Chart {
             painter.hline(main.left()..=main.right(), yy, Stroke::new(1.0, super::theme::grid()));
             painter.text(pos2(main.right() + 8.0, yy), Align2::LEFT_CENTER, axis_label(v), mono(11.0), mu());
         }
-        // watermark: the instrument, faint, behind everything
-        let wm = format!("{base}USDT · {}", self.src.map(|e| format!("{e:?}")).unwrap_or_else(|| t("src.agg").to_string()));
-        // hosted: the toolbar already names the market; the watermark is just noise behind the candles
-        if !native() { painter.text(main_plot.center(), Align2::CENTER_CENTER, wm, prop(44.0), fg().gamma_multiply(0.04)); }
-        else { painter.text(pos2(main_plot.left() + 14.0, main_plot.bottom() - 12.0), Align2::LEFT_BOTTOM, "Depth", prop(30.0), fg().gamma_multiply(0.06)); }
+        // watermark: the Depth mark and wordmark, faint, bottom-left of the plot (as TradingView does)
+        {
+            let logo = super::theme::app_logo(ui.ctx());
+            let r = Rect::from_min_size(pos2(main_plot.left() + 14.0, main_plot.bottom() - 40.0), vec2(26.0, 26.0));
+            painter.image(logo.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::from_white_alpha(70));
+            painter.text(pos2(r.right() + 8.0, r.center().y), Align2::LEFT_CENTER, "Depth", super::theme::prop_s(19.0), fg().gamma_multiply(0.22));
+        }
 
         // one textured quad: x by bar index, y by price of the top/bottom bin edges
         let quad = |tex: egui::TextureId, g: TexGeom, bin: f64| {

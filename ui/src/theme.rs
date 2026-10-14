@@ -20,19 +20,24 @@ pub fn line() -> Color32 { veil(if light() { 22 } else { 28 }, light()) }
 pub fn grid() -> Color32 { veil(if light() { 10 } else { 14 }, light()) }
 /// stronger hairline (selected segment, hovered widget)
 pub fn edge() -> Color32 { veil(if light() { 38 } else { 46 }, light()) }
-pub fn fg() -> Color32 { pick(Color32::from_rgb(0xe8, 0xe8, 0xe8), Color32::from_rgb(0x1d, 0x1d, 0x1f), light()) }
-pub fn mu() -> Color32 { pick(Color32::from_rgb(0x9b, 0x9b, 0x9b), Color32::from_rgb(0x6e, 0x6e, 0x73), light()) }
-pub fn dim() -> Color32 { pick(Color32::from_rgb(0x6e, 0x6e, 0x6e), Color32::from_rgb(0x9a, 0x9a, 0xa0), light()) }
+pub fn fg() -> Color32 { pick(Color32::from_rgb(0xdb, 0xdb, 0xdb), Color32::from_rgb(0x1d, 0x1d, 0x1f), light()) }
+/// strongest text: selected tabs, headline values
+pub fn fg_strong() -> Color32 { pick(Color32::from_rgb(0xf2, 0xf2, 0xf2), Color32::from_rgb(0x0b, 0x0b, 0x0c), light()) }
+pub fn mu() -> Color32 { pick(Color32::from_rgb(0x8c, 0x8c, 0x8c), Color32::from_rgb(0x6e, 0x6e, 0x73), light()) }
+pub fn dim() -> Color32 { pick(Color32::from_rgb(0x5e, 0x5e, 0x5e), Color32::from_rgb(0x9a, 0x9a, 0xa0), light()) }
 /// opaque fill for labels painted over the chart
 /// crosshair tags on the axes (white text on it in both themes, as TradingView does)
-pub fn cross_bg() -> Color32 { pick(Color32::from_rgb(0x50, 0x53, 0x5e), Color32::from_rgb(0x13, 0x17, 0x22), light()) }
-pub fn label_bg() -> Color32 { pick(Color32::from_rgb(0x26, 0x26, 0x28), Color32::from_rgb(0xe8, 0xe8, 0xed), light()) }
+pub fn cross_bg() -> Color32 { pick(Color32::from_rgb(0x38, 0x38, 0x38), Color32::from_rgb(0x13, 0x17, 0x22), light()) }
+pub fn label_bg() -> Color32 { pick(Color32::from_rgb(0x1c, 0x1c, 0x1c), Color32::from_rgb(0xe8, 0xe8, 0xed), light()) }
 /// off-state track of switches and sliders
-pub fn track() -> Color32 { pick(Color32::from_rgb(0x2a, 0x31, 0x3b), Color32::from_rgb(0xd1, 0xd1, 0xd6), light()) }
-fn bg_c() -> Color32 { pick(Color32::from_rgb(0x16, 0x16, 0x17), Color32::WHITE, light()) }
+pub fn track() -> Color32 { pick(Color32::from_rgb(0x38, 0x38, 0x38), Color32::from_rgb(0xd1, 0xd1, 0xd6), light()) }
+/// the window behind the panels: the gutters between them read as black seams
+fn bg_c() -> Color32 { pick(Color32::from_rgb(0x05, 0x05, 0x05), Color32::from_rgb(0xe9, 0xe9, 0xec), light()) }
 /// Opaque fill of popups, menus and windows (the panel veils are translucent and would show what is under them).
-pub fn popup_bg() -> Color32 { pick(Color32::from_rgb(0x26, 0x26, 0x29), Color32::from_rgb(0xff, 0xff, 0xff), light()) }
-pub fn panel_c() -> Color32 { pick(Color32::from_rgb(0x1e, 0x1e, 0x20), Color32::from_rgb(0xf5, 0xf5, 0xf7), light()) }
+pub fn popup_bg() -> Color32 { pick(Color32::from_rgb(0x1c, 0x1c, 0x1c), Color32::from_rgb(0xff, 0xff, 0xff), light()) }
+pub fn panel_c() -> Color32 { pick(Color32::from_rgb(0x0f, 0x0f, 0x0f), Color32::WHITE, light()) }
+/// input wells (text fields): a step darker than controls
+pub fn well() -> Color32 { pick(Color32::from_rgb(0x12, 0x12, 0x12), Color32::from_rgb(0xf6, 0xf6, 0xf8), light()) }
 
 static NATIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Hosted in the SwiftUI window: egui leaves its backgrounds transparent and the native window
@@ -106,6 +111,15 @@ pub fn decode_png(bytes: &[u8]) -> Option<egui::ColorImage> {
 static ICONS: OnceLock<HashMap<Exchange, TextureHandle>> = OnceLock::new();
 
 /// Exchange logos (assets/icons, from CoinGecko) as round textures.
+/// The app icon as a texture (chart watermark), decoded once.
+pub fn app_logo(ctx: &egui::Context) -> egui::TextureHandle {
+    static LOGO: std::sync::OnceLock<egui::TextureHandle> = std::sync::OnceLock::new();
+    LOGO.get_or_init(|| {
+        let img = decode_png(include_bytes!("../../assets/appicon/icon-1024.png")).unwrap_or_else(|| egui::ColorImage::new([1, 1], vec![Color32::TRANSPARENT]));
+        ctx.load_texture("depth-logo", img, egui::TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear)))
+    }).clone()
+}
+
 pub fn load_icons(ctx: &egui::Context) {
     let m = Exchange::ALL.iter().filter_map(|e| {
         let img = decode_png(icon_png(*e))?;
@@ -347,6 +361,16 @@ pub fn mono(size: f32) -> FontId { FontId::monospace(size) }
 /// Headline numbers and headings: Inter Display, tabular figures.
 pub fn display(size: f32) -> FontId { FontId::new(size, FontFamily::Name("display".into())) }
 pub fn prop(size: f32) -> FontId { FontId::proportional(size) }
+/// UI text, medium (500): values, control text, emphasis.
+pub fn prop_m(size: f32) -> FontId { FontId::new(size, FontFamily::Name("m".into())) }
+/// UI text, semibold (600): titles, selected tabs, primary buttons.
+pub fn prop_s(size: f32) -> FontId { FontId::new(size, FontFamily::Name("s".into())) }
+/// Numbers (tabular figures), medium.
+pub fn mono_m(size: f32) -> FontId { FontId::new(size, FontFamily::Name("num-m".into())) }
+/// Numbers (tabular figures), semibold.
+pub fn mono_s(size: f32) -> FontId { FontId::new(size, FontFamily::Name("num-s".into())) }
+/// Headline numbers, semibold display cut.
+pub fn display_s(size: f32) -> FontId { FontId::new(size, FontFamily::Name("display-s".into())) }
 
 /// Memory-map a system font for the life of the process: only the glyph pages actually used
 /// become resident (PingFang.ttc is 75 MB; reading it would keep all of it in RAM).
@@ -384,6 +408,13 @@ pub fn install(ctx: &egui::Context) {
     add("inter", include_bytes!("../../assets/fonts/Inter-Regular.ttf"), 0, &[]);
     add("inter-num", include_bytes!("../../assets/fonts/InterNum-Regular.ttf"), 0, &[]);
     add("inter-display", include_bytes!("../../assets/fonts/InterDisplayNum-Medium.ttf"), 0, &[]);
+    // weights (design: values 500, titles / selected 600): egui picks a face per family, so each
+    // weight is its own family
+    add("inter-m", include_bytes!("../../assets/fonts/Inter-Medium.ttf"), 0, &[]);
+    add("inter-s", include_bytes!("../../assets/fonts/Inter-SemiBold.ttf"), 0, &[]);
+    add("inter-num-m", include_bytes!("../../assets/fonts/InterNum-Medium.ttf"), 0, &[]);
+    add("inter-num-s", include_bytes!("../../assets/fonts/InterNum-SemiBold.ttf"), 0, &[]);
+    add("inter-display-s", include_bytes!("../../assets/fonts/InterDisplayNum-SemiBold.ttf"), 0, &[]);
     let sys = |p: &str| map_font(std::path::Path::new(p));
     #[cfg(target_os = "macos")]
     // the system UI font first for symbols Inter lacks (▾ ✓ ⚠); PingFang SC Regular is face 3 of PingFang.ttc; Hiragino Sans GB if it is missing
@@ -398,7 +429,10 @@ pub fn install(ctx: &egui::Context) {
     let fall = [(sys("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"), 0), (sys("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"), 0)];
     let fallbacks: Vec<String> = fall.into_iter().enumerate().filter_map(|(i, (b, face))| b.map(|b| { let n = format!("fb{i}"); add(&n, b, face, &[]); n })).collect();
     // `mono()` is the numbers family: Inter with tabular figures, not a monospaced face
-    for (fam, first) in [(FontFamily::Proportional, "inter"), (FontFamily::Monospace, "inter-num"), (FontFamily::Name("display".into()), "inter-display")] {
+    for (fam, first) in [(FontFamily::Proportional, "inter"), (FontFamily::Monospace, "inter-num"), (FontFamily::Name("display".into()), "inter-display"),
+                         (FontFamily::Name("m".into()), "inter-m"), (FontFamily::Name("s".into()), "inter-s"),
+                         (FontFamily::Name("num-m".into()), "inter-num-m"), (FontFamily::Name("num-s".into()), "inter-num-s"),
+                         (FontFamily::Name("display-s".into()), "inter-display-s")] {
         let v = fonts.families.entry(fam).or_default();
         for (i, n) in std::iter::once(first.to_string()).chain(fallbacks.iter().cloned()).enumerate() { v.insert(i, n); }
     }
@@ -417,15 +451,15 @@ pub fn install(ctx: &egui::Context) {
 fn style(base: &egui::Style, light: bool) -> egui::Style {
     let mut style = base.clone();
     style.text_styles = [
-        (TextStyle::Heading, display(15.0)),
+        (TextStyle::Heading, prop_s(15.0)),
         (TextStyle::Body, prop(12.5)),
-        (TextStyle::Button, prop(12.5)),
+        (TextStyle::Button, prop_m(12.5)),
         (TextStyle::Small, prop(11.0)),
         (TextStyle::Monospace, mono(12.0)),
     ].into();
-    style.spacing.item_spacing = egui::vec2(6.0, 3.0);
-    style.spacing.button_padding = egui::vec2(8.0, 3.0);
-    style.spacing.interact_size.y = 21.0;
+    style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+    style.spacing.button_padding = egui::vec2(10.0, 4.0);
+    style.spacing.interact_size.y = 24.0;
     style.spacing.menu_margin = egui::Margin::same(6);
     // thin scrollbars that float over content instead of eating a gutter
     style.spacing.scroll = egui::style::ScrollStyle::floating();
@@ -441,11 +475,11 @@ fn style(base: &egui::Style, light: bool) -> egui::Style {
     v.selection.stroke.color = fg();
     v.window_stroke.color = line();
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-        w.corner_radius = 5.into();
+        w.corner_radius = 4.into();
         w.expansion = 0.0;
     }
-    v.window_corner_radius = 10.into();
-    v.menu_corner_radius = 8.into();
+    v.window_corner_radius = 6.into();
+    v.menu_corner_radius = 6.into();
     // soft, wide shadows: popups and dialogs read as layers, not boxes
     v.window_shadow = egui::Shadow { offset: [0, 8], blur: 28, spread: 0, color: Color32::from_black_alpha(if light { 40 } else { 140 }) };
     v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(if light { 32 } else { 120 }) };

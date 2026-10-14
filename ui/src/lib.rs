@@ -4,6 +4,7 @@ mod account;
 mod book;
 mod chart;
 mod order;
+pub(crate) mod kit;
 mod engine;
 mod options;
 mod picker;
@@ -638,7 +639,7 @@ impl App {
             let stats_arc = self.eng.stats.clone();
             let stats = stats_arc.lock().unwrap();
             // panels are rounded cards on the darker base, separated by gutters instead of lines
-            let card = |m: i8| Frame::new().fill(panel()).corner_radius(6).inner_margin(Margin::symmetric(m, 5)).outer_margin(Margin::same(2));
+            let card = |m: i8| Frame::new().fill(panel()).corner_radius(4).inner_margin(Margin::symmetric(m, 5)).outer_margin(Margin::same(2));
             let flat = |m: i8| Frame::new().fill(bg()).inner_margin(Margin::symmetric(m, 4));
 
             if !self.hosted {
