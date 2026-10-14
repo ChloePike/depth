@@ -1,5 +1,6 @@
 //! egui terminal: header (asset, market mode, cross-venue stats, venue scope), chart or option
 //! view, order book / tape, venue table and status bar.
+mod account;
 mod book;
 mod chart;
 mod order;
@@ -10,7 +11,6 @@ mod top;
 mod venues;
 pub mod theme;
 mod trade;
-mod wallet;
 mod settings;
 mod native;
 
@@ -222,6 +222,7 @@ pub struct App {
     /// header price flash; the book column's Venues / Quant pages
     top: top::TopBar,
     venue_pages: venues::VenuePages,
+    account: account::AccountPanel,
 }
 
 /// Cell rects of a chart layout: "2" side by side, "2v" stacked, "3" one left and two right,
@@ -272,7 +273,6 @@ impl App {
         let mut trade = trade::TradeView::default();
         if let Some(ex) = st.trade_ex.filter(|e| depth::trade::TRADABLE.contains(e)) { trade.ex = ex; }
         // T1_ACC_TAB=<n>: open the account strip on tab n (screenshots)
-        if let Some(n) = env("T1_ACC_TAB").and_then(|s| s.parse().ok()) { trade.set_tab(n); }
         let mut picker = picker::Picker::default();
         picker.open = env("T1_PICK").is_some();
         // T1_BOOK_PANE=<0..3>: book, trades, venues, quant (screenshots, as in the SwiftUI host)
@@ -288,6 +288,7 @@ impl App {
             route: st.route.clone().unwrap_or_default(), pending_base: None, pending_mode: None, pending_restart: false, book_w: 0.0,
             layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(),
             st: (Default::default(), Instant::now(), true), order: Default::default(), order_panel: st.order_panel.unwrap_or(true), top: Default::default(), venue_pages: Default::default(),
+            account: Default::default(),
         }
     }
 
@@ -647,15 +648,15 @@ impl App {
                 .show(ui, |ui| self.header(ui, &a, &hdr_st, &mut new_base, &mut new_mode));
             egui::Panel::bottom("status").show_separator_line(false).frame(flat(12)).exact_size(24.0).show(ui, |ui| restart = self.status(ui, &stats));
             drop(stats);
-            // without keys the account strip is just its tab row and a hint
-            let has_keys = !self.eng.account.lock().unwrap().keys.is_empty();
-            let acc = egui::Panel::bottom("account").show_separator_line(false).frame(card(12));
-            let acc = if has_keys { acc.resizable(true).default_size(210.0) } else { acc.resizable(false).exact_size(46.0) };
-            acc.show(ui, |ui| self.trade.account(ui, &self.eng));
+            // ops from the account strip and the order panel take the agg lock themselves
+            // (route planning reads books): never hold it across them
+            drop(a);
+            let st = self.state_doc();
+            let mut ap = std::mem::take(&mut self.account);
+            egui::Panel::bottom("account").show_separator_line(false).frame(card(12)).resizable(true).default_size(230.0)
+                .show(ui, |ui| ap.show(ui, &st, &mut |v| { let r = self.call(&ctx, &v); self.st.2 = true; r }));
+            if let Some(tab) = ap.open_settings.take() { self.settings.open_tab(tab); }
             if self.mode == Market::Perp && self.order_panel {
-                // ops from the order panel take the agg lock themselves (route planning reads books)
-                drop(a);
-                let st = self.state_doc();
                 let mut op = std::mem::take(&mut self.order);
                 egui::Panel::right("order").show_separator_line(false).frame(Frame::new().fill(bg()).inner_margin(Margin::symmetric(4, 4))).resizable(false).exact_size(300.0)
                     .show(ui, |ui| egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
@@ -666,10 +667,17 @@ impl App {
                         self.trade.insurance_section(ui, &g, &self.eng, &base);
                     }));
                 if let Some(tab) = op.open_settings.take() { self.settings.open_tab(tab); }
-                if let Some(ex) = op.open_transfer.take().and_then(|e| Exchange::parse(&e)) { self.trade.open_transfer(ex, &self.eng, &ctx); }
+                if let Some(ex) = op.open_transfer.take() { ap.open_transfer(&ex, &st, &mut |v| { let r = self.call(&ctx, &v); self.st.2 = true; r }); }
+                // a limit close from the account strip, once the panel shows that symbol on that venue
+                // (given up after 10 s, so a stale request never fills the form later)
+                if let Some((p, at)) = ap.prefill.take() {
+                    if st["trade"]["symbol"] == p["symbol"] && st["trade"]["venue"] == p["ex"] { op.prefill_close(&p, &st); }
+                    else if at.elapsed() < Duration::from_secs(10) { ap.prefill = Some((p, at)); }
+                }
                 self.order = op;
-                a = agg.lock().unwrap();
             }
+            self.account = ap;
+            a = agg.lock().unwrap();
             } else { drop(stats); }
             // the book's rows are drawn here at display rate; hosted, its header (and the Venues / Quant
             // pages) are native views laid over a fixed 300 pt column
@@ -757,7 +765,6 @@ impl App {
             self.rate = (Instant::now(), 0, 0.0);
         }
         if let Some(m) = new_mode { self.mode = m; self.eng.ensure(m); }
-        if std::mem::take(&mut self.trade.open_settings) { self.settings.open_tab(2); }
         // T1_SETTINGS=<tab>: open the settings dialog once (screenshots)
         if let Some(n) = std::env::var("T1_SETTINGS").ok().and_then(|s| s.parse().ok()) { if !self.shot_sent && self.started.elapsed().as_secs() < 2 { self.settings.open_tab(n); } }
         if !self.hosted && self.settings.open {
@@ -767,7 +774,6 @@ impl App {
             sv.show(&ctx, &st, &mut |v| { let r = self.call(&ctx, &v); self.st.2 = true; r });
             self.settings = sv;
         }
-        self.trade.confirm_orders = self.prefs.confirm;
         self.eng.ensure_tf(chart::native_tf(self.chart.tf) as u32, &ctx);
         let n = layout_cells(&self.layout, egui::Rect::NOTHING).len();
         let tfs: Vec<i64> = self.others.iter().filter(|o| o.0 < n).map(|o| o.1.tf).collect();

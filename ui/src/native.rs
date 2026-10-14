@@ -214,7 +214,7 @@ impl App {
                 if !self.eng.off.remove(&e) { if self.eng.off.len() + 1 >= Exchange::ALL.len() { return Err("keep at least one venue".into()); } self.eng.off.insert(e); }
                 self.pending_restart = true;
             }
-            "set_trade_venue" => { let e = exv()?; if !trade::TRADABLE.contains(&e) { return Err("not tradable".into()); } self.trade.ex = e; self.trade.reset_price(); self.route.fixed = e; }
+            "set_trade_venue" => { let e = exv()?; if !trade::TRADABLE.contains(&e) { return Err("not tradable".into()); } self.trade.ex = e; self.route.fixed = e; }
             "cache_size" => return Ok(json!({"bytes": depth::sys::cache_bytes()})),
             "clear_cache" => return Ok(json!({"freed": depth::sys::clear_cache(), "bytes": depth::sys::cache_bytes()})),
             "set_lang" => super::set_lang(v["lang"].as_str().unwrap_or("en")),
