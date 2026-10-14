@@ -1,7 +1,7 @@
 //! Header pieces for the egui app: a port of the SwiftUI host's TopBar (composite price with flash,
 //! the order venue's mark / index / funding countdown, 24h stats, open interest, cross-venue extras)
 //! and MarketClock (stock market sessions). Stats read the app's state document ("header").
-use super::{fmt_dp, fmt_px, l, theme::*};
+use super::{fmt_dp, fmt_px, kit, l, theme::*};
 use depth::Market;
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense, Ui};
 use serde_json::Value;
@@ -103,38 +103,33 @@ pub struct TopBar { last: Option<f64>, dir: i8, flash: Option<Instant> }
 const FLASH: f32 = 0.45;
 
 impl TopBar {
-    /// Composite index price with a direction arrow, flashing on every change; fixed width so a
-    /// tick never shifts the rest of the header.
+    /// Composite index price (22 display semibold) with a direction arrow, flashing on every
+    /// change; fixed width so a tick never shifts the rest of the header.
     pub fn price(&mut self, ui: &mut Ui, price: Option<f64>) {
         if let (Some(o), Some(n)) = (self.last, price) {
             if n != o { self.dir = if n > o { 1 } else { -1 }; self.flash = Some(Instant::now()); }
         }
         if price.is_some() { self.last = price; }
-        let col = match self.dir { 1 => up(), -1 => dn(), _ => fg() };
-        let (r, resp) = ui.allocate_exact_size(vec2(150.0, 28.0), Sense::hover());
+        let col = match self.dir { 1 => up(), -1 => dn(), _ => fg_strong() };
+        let (r, resp) = ui.allocate_exact_size(vec2(170.0, 30.0), Sense::hover());
         let p = ui.painter();
+        let g = p.layout_no_wrap(price.map(fmt_px).unwrap_or("–".into()), display_s(22.0), col);
+        let w = g.size().x;
         if let Some(t) = self.flash {
             let k = 1.0 - t.elapsed().as_secs_f32() / FLASH;
             if k > 0.0 {
-                let g = p.layout_no_wrap(price.map(fmt_px).unwrap_or("–".into()), display(20.0), col);
-                p.rect_filled(Rect::from_min_size(r.min, vec2(g.size().x + 26.0, r.height())), 6, col.gamma_multiply(0.22 * k));
+                p.rect_filled(Rect::from_min_size(r.min, vec2(w + 30.0, r.height())), kit::R, col.gamma_multiply(0.18 * k));
                 // bounded fade: ~30 fps for at most FLASH seconds after a tick, never every frame
                 ui.ctx().request_repaint_after(Duration::from_millis(33));
             } else { self.flash = None; }
         }
-        let g = p.layout_no_wrap(price.map(fmt_px).unwrap_or("–".into()), display(20.0), col);
         let tx = r.left() + 6.0;
-        let w = g.size().x;
         p.galley(pos2(tx, r.center().y - g.size().y / 2.0), g, col);
         if self.dir != 0 {
-            // arrow: shaft and head
-            let x = tx + w + 9.0;
-            let (y0, y1) = if self.dir > 0 { (r.center().y + 5.0, r.center().y - 5.0) } else { (r.center().y - 5.0, r.center().y + 5.0) };
-            let s = egui::Stroke::new(1.8, col);
-            p.line_segment([pos2(x, y0), pos2(x, y1)], s);
-            let h = if self.dir > 0 { 3.5 } else { -3.5 };
-            p.line_segment([pos2(x - 3.5, y1 + h), pos2(x, y1)], s);
-            p.line_segment([pos2(x + 3.5, y1 + h), pos2(x, y1)], s);
+            // filled triangle, as the design's 14 px arrow glyph
+            let (x, y) = (tx + w + 11.0, r.center().y + 1.0);
+            let pts = if self.dir > 0 { vec![pos2(x - 4.5, y + 3.5), pos2(x + 4.5, y + 3.5), pos2(x, y - 4.0)] } else { vec![pos2(x - 4.5, y - 3.5), pos2(x + 4.5, y - 3.5), pos2(x, y + 4.0)] };
+            p.add(egui::Shape::convex_polygon(pts, col, egui::Stroke::NONE));
         }
         resp.on_hover_text(l("Composite index (volume-weighted venue mids); reference only, orders use the venue's own book"));
     }
@@ -149,45 +144,39 @@ impl TopBar {
         let px = |k: &str| f(k).map(fmt_px).unwrap_or("–".into());
         let sign = |v: Option<f64>| match v { Some(x) if x > 0.0 => up(), Some(x) if x < 0.0 => dn(), _ => fg() };
         let perp = mode == Market::Perp;
-        ui.spacing_mut().item_spacing.x = 24.0;
+        ui.spacing_mut().item_spacing.x = 28.0;
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         if perp {
-            stat(ui, l("Mark"), px("mark"), fg(), None).on_hover_text(format!("{venue} {}", l("mark price")));
-            stat(ui, l("Index"), px("index"), fg(), None).on_hover_text(format!("{venue} {}", l("index price")));
+            stat(ui, l("Mark"), &[(px("mark"), fg())]).on_hover_text(format!("{venue} {}", l("mark price")));
+            stat(ui, l("Index"), &[(px("index"), fg())]).on_hover_text(format!("{venue} {}", l("index price")));
             let iv = f("funding_interval_h").map(|x| format!(" ({x}h)")).unwrap_or_default();
             let rate = f("funding_rate");
             let cd = f("next_funding_ms").map(|n| left(n as i64 - depth::now_ms())).unwrap_or("–".into());
-            let r = ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing = vec2(4.0, 1.0);
-                ui.label(egui::RichText::new(format!("{}{iv} / {}", l("Funding"), l("Countdown"))).font(prop(10.5)).color(dim()));
-                ui.horizontal(|ui| {
-                    let rc = match rate { Some(x) if x >= 0.0 => WARN, Some(_) => dn(), None => fg() };
-                    ui.label(egui::RichText::new(rate.map(|x| format!("{:.4}%", x * 100.0)).unwrap_or("–".into())).font(mono(12.0)).color(rc));
-                    ui.label(egui::RichText::new("/").font(mono(12.0)).color(dim()));
-                    ui.label(egui::RichText::new(cd).font(mono(12.0)).color(fg()));
-                });
-            }).response;
-            r.on_hover_text(format!("{venue} · {}", l("rate per settlement")));
+            let rc = match rate { Some(x) if x >= 0.0 => WARN, Some(_) => dn(), None => fg() };
+            stat(ui, &format!("{}{iv} / {}", l("Funding"), l("Countdown")),
+                &[(rate.map(|x| format!("{:.4}%", x * 100.0)).unwrap_or("–".into()), rc), ("·".into(), dim()), (cd, fg())])
+                .on_hover_text(format!("{venue} · {}", l("rate per settlement")));
             // the countdown ticks once a second
             ui.ctx().request_repaint_after(Duration::from_secs(1));
         }
-        stat(ui, l("24h Change"), f("chg24").map(|x| format!("{x:+.2}%")).unwrap_or("–".into()), sign(f("chg24")), None);
-        stat(ui, l("24h High"), px("high24"), fg(), None);
-        stat(ui, l("24h Low"), px("low24"), fg(), None);
+        stat(ui, l("24h Change"), &[(f("chg24").map(|x| format!("{x:+.2}%")).unwrap_or("–".into()), sign(f("chg24")))]);
+        stat(ui, l("24h High"), &[(px("high24"), fg())]);
+        stat(ui, l("24h Low"), &[(px("low24"), fg())]);
         let vtip = l("Summed across Binance, Bybit, OKX and Hyperliquid");
-        stat(ui, &format!("{} ({base})", l("24h Vol")), f("vol24_base").map(big).unwrap_or("–".into()), fg(), None).on_hover_text(vtip);
-        stat(ui, &format!("{} (USD)", l("24h Vol")), f("vol24_usd").map(big).unwrap_or("–".into()), fg(), None).on_hover_text(vtip);
+        stat(ui, &format!("{} ({base})", l("24h Vol")), &[(f("vol24_base").map(big).unwrap_or("–".into()), fg())]).on_hover_text(vtip);
+        stat(ui, &format!("{} (USD)", l("24h Vol")), &[(f("vol24_usd").map(big).unwrap_or("–".into()), fg())]).on_hover_text(vtip);
         if perp {
-            stat(ui, l("Open Interest"), f("oi_usd").map(|x| format!("${}", big(x))).unwrap_or("–".into()), fg(), f("oi").map(|x| format!("{} {base}", big(x))))
-                .on_hover_text(l("Sum of every connected perp venue"));
+            let mut oi = vec![(f("oi_usd").map(|x| format!("${}", big(x))).unwrap_or("–".into()), fg())];
+            if let Some(x) = f("oi") { oi.push((format!("{} {base}", big(x)), mu())); }
+            stat(ui, l("Open Interest"), &oi).on_hover_text(l("Sum of every connected perp venue"));
             let fp = f("funding_pred_bph");
             let apr = fp.map(|x| format!(" · {} {:+.2}%", l("APR"), x / 1e4 * 24.0 * 365.0 * 100.0)).unwrap_or_default();
-            stat(ui, l("Pred. funding (all)"), fp.map(|x| format!("{x:+.4} bp/h")).unwrap_or("–".into()), sign(fp), None)
+            stat(ui, l("Pred. funding (all)"), &[(fp.map(|x| format!("{x:+.4} bp/h")).unwrap_or("–".into()), sign(fp))])
                 .on_hover_text(format!("{}{apr}", l("Open-interest-weighted across venues, per hour")));
-            stat(ui, l("Basis"), f("basis_bps").map(|x| format!("{x:+.2} bp")).unwrap_or("–".into()), sign(f("basis_bps")), None);
+            stat(ui, l("Basis"), &[(f("basis_bps").map(|x| format!("{x:+.2} bp")).unwrap_or("–".into()), sign(f("basis_bps")))]);
         }
         if mode != Market::Option {
-            stat(ui, l("CVD"), f("cvd").map(|x| signed(x, 1)).unwrap_or("–".into()), sign(f("cvd")), None);
+            stat(ui, l("CVD"), &[(f("cvd").map(|x| signed(x, 1)).unwrap_or("–".into()), sign(f("cvd")))]);
         }
     }
 
@@ -195,46 +184,108 @@ impl TopBar {
     pub fn clock(ui: &mut Ui) {
         let now = depth::now_ms();
         let next = MARKETS.iter().map(|m| (m, m.status(now))).filter(|x| !x.1 .0).min_by_key(|x| x.1 .1);
-        let text = match next { Some((m, (_, t))) => format!("{} {} {}", m.short, l("opens"), left(t - now)), None => l("Markets").to_string() };
-        let g = ui.painter().layout_no_wrap(text, mono(11.5), mu());
-        let (r, resp) = ui.allocate_exact_size(g.size() + vec2(16.0, 10.0), Sense::click());
+        let (label, cd) = match next { Some((m, (_, t))) => (format!("{} {}", m.short, l("opens")), left(t - now)), None => (l("Markets").to_string(), String::new()) };
+        let lg = ui.painter().layout_no_wrap(label, prop_m(12.0), mu());
+        let cg = ui.painter().layout_no_wrap(cd, mono_m(12.0), fg());
+        let gap = if cg.size().x > 0.0 { 5.0 } else { 0.0 };
+        let (r, resp) = ui.allocate_exact_size(vec2(lg.size().x + gap + cg.size().x + 16.0, 30.0), Sense::click());
         let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
-        if resp.hovered() || open { ui.painter().rect_filled(r, 5, hl()); }
-        let col = if resp.hovered() || open { fg() } else { mu() };
-        ui.painter().galley(r.center() - g.size() / 2.0, g, col);
+        let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() || open, 0.1);
+        let p = ui.painter();
+        if hv > 0.0 { p.rect_filled(r, kit::R, hl().gamma_multiply(0.7 * hv)); }
+        let x = r.left() + 8.0;
+        p.galley(pos2(x, r.center().y - lg.size().y / 2.0), lg.clone(), lerp(mu(), fg(), hv));
+        p.galley(pos2(x + lg.size().x + gap, r.center().y - cg.size().y / 2.0), cg, fg());
         let resp = resp.on_hover_text(l("Stock market sessions")).on_hover_cursor(egui::CursorIcon::PointingHand);
         ui.ctx().request_repaint_after(Duration::from_secs(1));
         egui::Popup::from_toggle_button_response(&resp)
-            .frame(egui::Frame::new().fill(popup_bg()).stroke(egui::Stroke::new(1.0, line())).corner_radius(8).inner_margin(12).shadow(ui.visuals().popup_shadow))
+            .frame(popup_frame(ui, 6))
             .align(egui::RectAlign::BOTTOM_END)
             .show(|ui| {
                 ui.set_width(290.0);
-                for (i, m) in MARKETS.iter().enumerate() {
-                    if i > 0 { ui.add_space(2.0); }
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for m in MARKETS.iter() {
                     let (open, until) = m.status(now);
-                    let (r, _) = ui.allocate_exact_size(vec2(290.0, 34.0), Sense::hover());
+                    let (r, _) = ui.allocate_exact_size(vec2(290.0, 36.0), Sense::hover());
                     let p = ui.painter();
                     let cy = r.center().y;
-                    p.circle_filled(pos2(r.left() + 4.0, cy), 3.5, if open { up() } else { dim() });
-                    p.text(pos2(r.left() + 16.0, cy - 7.0), Align2::LEFT_CENTER, l(m.name), prop(12.5), fg());
-                    p.text(pos2(r.left() + 16.0, cy + 8.0), Align2::LEFT_CENTER, m.short, prop(10.5), dim());
-                    p.text(pos2(r.left() + 138.0, cy), Align2::LEFT_CENTER, if open { l("Closes in") } else { l("Opens in") }, prop(11.5), mu());
-                    p.text(pos2(r.right(), cy), Align2::RIGHT_CENTER, left(until - now), mono(12.0), if open { fg() } else { mu() });
+                    p.circle_filled(pos2(r.left() + 10.0, cy), 3.0, if open { up() } else { dim() });
+                    p.text(pos2(r.left() + 22.0, cy - 7.0), Align2::LEFT_CENTER, l(m.name), prop_m(12.5), fg());
+                    p.text(pos2(r.left() + 22.0, cy + 8.0), Align2::LEFT_CENTER, m.short, prop(11.0), dim());
+                    p.text(pos2(r.left() + 140.0, cy), Align2::LEFT_CENTER, if open { l("Closes in") } else { l("Opens in") }, prop(12.0), mu());
+                    p.text(pos2(r.right() - 10.0, cy), Align2::RIGHT_CENTER, left(until - now), mono_m(12.5), if open { fg_strong() } else { mu() });
                 }
             });
     }
 }
 
-/// One header stat: caption over value (and an optional muted extra).
-fn stat(ui: &mut Ui, caption: &str, value: String, col: Color32, extra: Option<String>) -> egui::Response {
+/// One header stat: overline caption (10.5 semibold caps, dim) over 13 medium tabular values.
+fn stat(ui: &mut Ui, caption: &str, values: &[(String, Color32)]) -> egui::Response {
     ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing = vec2(5.0, 1.0);
-        ui.label(egui::RichText::new(caption).font(prop(10.5)).color(dim()));
+        ui.spacing_mut().item_spacing = vec2(5.0, 3.0);
+        ui.label(egui::RichText::new(caption.to_uppercase()).font(prop_s(10.5)).color(dim()).extra_letter_spacing(0.6));
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(value).font(mono(12.0)).color(col));
-            if let Some(x) = extra { ui.label(egui::RichText::new(x).font(mono(12.0)).color(mu())); }
+            for (v, c) in values { ui.label(egui::RichText::new(v).font(mono_m(13.0)).color(*c)); }
         });
     }).response
+}
+
+/// Popup / menu surface: radius 6, opaque popup fill, hairline, soft shadow.
+pub fn popup_frame(ui: &Ui, margin: i8) -> egui::Frame {
+    egui::Frame::new().fill(popup_bg()).stroke(egui::Stroke::new(1.0, line())).corner_radius(6).inner_margin(margin).shadow(ui.visuals().popup_shadow)
+}
+
+/// Pill segmented group sized to its labels (title bar markets, picker Favorites / All): a
+/// 3 px well, `h` high cells, selected hl + semibold; the thumb slides. Returns the clicked index.
+pub fn pills(ui: &mut Ui, id: &str, labels: &[&str], sel: usize, h: f32, size: f32) -> Option<usize> {
+    let (pad, gap) = (3.0, 2.0);
+    let w: Vec<f32> = labels.iter().map(|t| ui.painter().layout_no_wrap(t.to_string(), prop_s(size), fg()).size().x + 24.0).collect();
+    let total = w.iter().sum::<f32>() + gap * (w.len().max(1) - 1) as f32 + 2.0 * pad;
+    let (r, _) = ui.allocate_exact_size(vec2(total, h + 2.0 * pad), Sense::hover());
+    let en = ui.is_enabled();
+    ui.painter().rect_filled(r, kit::R + 1, panel2());
+    let mut xs = Vec::with_capacity(w.len());
+    let mut x = r.left() + pad;
+    for wi in &w { xs.push(x); x += wi + gap; }
+    let id = ui.id().with(("pills", id));
+    if let (Some(&sx), Some(&sw)) = (xs.get(sel), w.get(sel)) {
+        let tx = ui.ctx().animate_value_with_time(id.with("x"), sx, 0.15);
+        let tw = ui.ctx().animate_value_with_time(id.with("w"), sw, 0.15);
+        let thumb = Rect::from_min_size(pos2(tx, r.top() + pad), vec2(tw, h));
+        ui.painter().rect_filled(thumb.translate(vec2(0.0, 1.0)), kit::R, Color32::from_black_alpha(if light() { 18 } else { 60 }));
+        ui.painter().rect_filled(thumb, kit::R, if light() { Color32::WHITE } else { hl() });
+    }
+    let mut out = None;
+    for (i, t) in labels.iter().enumerate() {
+        let cell = Rect::from_min_size(pos2(xs[i], r.top() + pad), vec2(w[i], h));
+        let resp = ui.interact(cell, id.with(i), Sense::click());
+        let on = i == sel;
+        let k = ui.ctx().animate_bool_with_time(resp.id.with("on"), on, 0.15);
+        let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() && !on, 0.1);
+        let col = lerp(mu(), fg_strong(), k.max(hv * 0.7));
+        ui.painter().text(cell.center(), Align2::CENTER_CENTER, *t, if on { prop_s(size) } else { prop_m(size) }, if en { col } else { col.gamma_multiply(0.5) });
+        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !on { out = Some(i); }
+    }
+    out
+}
+
+/// Settings gear (16 px): ring with eight teeth and a hub.
+pub fn gear(p: &egui::Painter, r: Rect, col: Color32) {
+    let c = r.center();
+    p.circle_stroke(c, 4.6, egui::Stroke::new(1.4, col));
+    p.circle_stroke(c, 1.7, egui::Stroke::new(1.3, col));
+    for k in 0..8 {
+        let d = egui::Vec2::angled(k as f32 * std::f32::consts::FRAC_PI_4);
+        p.line_segment([c + d * 4.6, c + d * 7.0], egui::Stroke::new(2.1, col));
+    }
+}
+
+/// Order panel toggle glyph: a window with its right column filled when the panel is shown.
+pub fn panel_glyph(p: &egui::Painter, r: Rect, col: Color32, on: bool) {
+    let b = Rect::from_center_size(r.center(), vec2(16.0, 13.0));
+    p.rect_stroke(b, 2.5, egui::Stroke::new(1.4, col), egui::StrokeKind::Inside);
+    let side = Rect::from_min_max(pos2(b.right() - 6.0, b.top() + 2.0), pos2(b.right() - 2.0, b.bottom() - 2.0));
+    if on { p.rect_filled(side, 1, col.gamma_multiply(0.5)); } else { p.vline(side.left(), side.y_range(), egui::Stroke::new(1.2, col)); }
 }
 
 #[cfg(test)]

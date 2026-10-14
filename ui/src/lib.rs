@@ -304,61 +304,45 @@ impl App {
             if bar.drag_started_by(egui::PointerButton::Primary) { ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag); }
             if bar.double_clicked() { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized)); }
         }
+        // title bar, 46 px: lights, pair, market pills, headline price ... clock, panel toggle, settings
         ui.horizontal(|ui| {
+            ui.set_height(46.0);
+            ui.spacing_mut().item_spacing.x = 14.0;
             // hosted: macOS draws the traffic lights over this space
-            if self.hosted { ui.add_space(70.0); } else { window_buttons(ui, maximized); }
-            ui.add_space(10.0);
+            if self.hosted { ui.add_space(56.0); } else { window_buttons(ui, maximized); }
             let tickers = self.eng.tickers.lock().unwrap().clone();
             if let Some(b) = self.picker.show(ui, &self.eng.base, &tickers) { if b != self.eng.base { *new_base = Some(b); } }
-            ui.add_space(8.0);
-            ui.spacing_mut().item_spacing.x = 0.0;
-            for (m, k) in MODES {
-                if tab(ui, t(k), self.mode == m, 13.0).clicked() && self.mode != m { *new_mode = Some(m); }
-            }
-            ui.add_space(14.0);
+            let names: Vec<&str> = MODES.iter().map(|(_, k)| t(k)).collect();
+            let sel = MODES.iter().position(|(m, _)| *m == self.mode).unwrap_or(0);
+            if let Some(i) = top::pills(ui, "modes", &names, sel, 26.0, 13.0) { *new_mode = Some(MODES[i].0); }
             let book_market = match self.mode { Market::Margin | Market::Option => Market::Spot, m => m };
             self.top.price(ui, a.mid(book_market));
-            // settings gear at the far right of the title bar
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(6.0);
-                let (r, resp) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
-                let p = ui.painter();
-                if resp.hovered() { p.rect_filled(r, 5, hl()); }
-                let col = if resp.hovered() { fg() } else { mu() };
-                let c = r.center();
-                for k in 0..8 {
-                    let a = k as f32 * std::f32::consts::FRAC_PI_4;
-                    let d = egui::vec2(a.cos(), a.sin());
-                    p.line_segment([c + d * 5.5, c + d * 8.0], egui::Stroke::new(2.2, col));
-                }
-                p.circle_stroke(c, 5.5, egui::Stroke::new(1.6, col));
-                p.circle_filled(c, 1.8, col);
-                if resp.on_hover_text(t("set.title")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.settings.open = true; }
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if kit::icon_button(ui, 30.0, false, top::gear).on_hover_text(t("set.title")).clicked() { self.settings.open = true; }
                 // show / hide the order panel (the Swift toolbar's sidebar.trailing button); Perp only
-                ui.add_space(2.0);
-                let perp = self.mode == Market::Perp;
-                let (r, resp) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), if perp { egui::Sense::click() } else { egui::Sense::hover() });
-                let p = ui.painter();
-                if perp && resp.hovered() { p.rect_filled(r, 5, hl()); }
-                let col = if !perp { dim().linear_multiply(0.5) } else if resp.hovered() || self.order_panel { fg() } else { mu() };
-                let b = egui::Rect::from_center_size(r.center(), egui::vec2(17.0, 13.0));
-                p.rect_stroke(b, 3, egui::Stroke::new(1.4, col), egui::StrokeKind::Inside);
-                let x = b.right() - 6.0;
-                p.vline(x, b.y_range().shrink(1.0), egui::Stroke::new(1.4, col));
-                if self.order_panel { p.rect_filled(egui::Rect::from_min_max(egui::pos2(x, b.top() + 1.5), b.max - egui::vec2(1.5, 1.5)), 1, col.linear_multiply(0.5)); }
-                if resp.on_hover_text(l("Show or hide the order panel (Option-Command-I)")).clicked() { self.order_panel = !self.order_panel; }
-                ui.add_space(4.0);
+                let tip = l("Show or hide the order panel (Option-Command-I)");
+                if self.mode == Market::Perp {
+                    let on = self.order_panel;
+                    if kit::icon_button(ui, 30.0, false, |p, r, c| top::panel_glyph(p, r, c, on)).on_hover_text(tip).clicked() { self.order_panel = !on; }
+                } else {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
+                    top::panel_glyph(ui.painter(), r, dim().gamma_multiply(0.6), false);
+                }
+                ui.add_space(6.0);
                 top::TopBar::clock(ui);
             });
-
         });
-        // market strip under the title bar (the SwiftUI host's TopStats); scrolls when the window is narrow
+        // stats strip, 44 px, hairline below; scrolls when the window is narrow
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.add_space(5.0);
         egui::ScrollArea::horizontal().id_salt("hdr_stats").auto_shrink([false, true])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .show(ui, |ui| ui.horizontal(|ui| { ui.add_space(4.0); top::TopBar::stats(ui, st, self.mode); }));
-        ui.add_space(2.0);
+        ui.add_space(6.0);
+        let w = ui.ctx().content_rect().x_range();
+        ui.painter().hline(w, ui.min_rect().bottom() + 0.5, egui::Stroke::new(1.0, line().gamma_multiply(0.7)));
     }
-
     /// Keyboard shortcuts of the SwiftUI menus (App.swift): Cmd-, settings, Cmd-Opt-I order panel,
     /// Cmd-K pair, Cmd-[ / Cmd-] favorites, Cmd-D star, Cmd-1..4 market, Ctrl-1..6 interval.
     /// Never while a text field has focus or a dialog is open.
@@ -408,8 +392,12 @@ impl App {
             self.rate.2 = stats.total.saturating_sub(self.rate.1) as f64 / now.duration_since(self.rate.0).as_secs_f64();
             self.rate = (now, stats.total, self.rate.2);
         }
+        // hairline on top, across the window
+        let top = ui.max_rect().top() - 0.5;
+        ui.painter().hline(ui.ctx().content_rect().x_range(), top, egui::Stroke::new(1.0, line().gamma_multiply(0.7)));
+        let txt = |s: String, col: Color32| RichText::new(s).font(mono(11.5)).color(col);
         ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.spacing_mut().item_spacing.x = 14.0;
             let nowms = now_ms();
             for e in Exchange::ALL {
                 let last = stats.venue.iter().filter(|((x, _), _)| *x == e).map(|(_, v)| v.1).max();
@@ -423,31 +411,46 @@ impl App {
                 // applied after the frame's agg lock is released (set_venue takes it): doing it here deadlocked
                 if resp.clicked() && (!on || self.eng.off.len() + 1 < Exchange::ALL.len()) { self.venue_toggle = Some((e, !on)); }
             }
-            ui.separator();
-            ui.label(RichText::new(format!("{:.0} {}", self.rate.2, t("status.msgs"))).font(mono(10.5)).color(mu()));
-            if let Some(mb) = stats.rss_mb {
-                ui.label(RichText::new(format!("{} {mb}MB", t("status.mem"))).font(mono(10.5)).color(if mb > 1500 { dn() } else if mb > 800 { WARN } else { dim() }));
-            }
-            let bl = stats.backlog;
-            ui.label(RichText::new(format!("{} {bl}", t("status.backlog"))).font(mono(10.5)).color(if bl > 10_000 { dn() } else if bl > 1_000 { WARN } else { dim() }));
-            let h = if stats.hist_pending == 0 { t("status.history_done").to_string() } else { format!("{}/{}", stats.hist_total - stats.hist_pending, stats.hist_total) };
-            ui.label(RichText::new(format!("{} {h}", t("status.history"))).font(prop(10.5)).color(if stats.hist_pending == 0 { mu() } else { WARN }));
-            if !stats.hist_errors.is_empty() {
-                ui.label(RichText::new(format!("{} errors", stats.hist_errors.len())).font(mono(10.5)).color(dn())).on_hover_text(stats.hist_errors.join("\n"));
-            }
+            // metrics on the right (laid out right to left)
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // language switch (rightmost, persisted)
-                let mut l = lang();
-                egui::ComboBox::from_id_salt("lang").selected_text(RichText::new(LANGS[l].1).font(prop(10.5)).color(mu())).show_ui(ui, |ui| {
-                    for (i, (_, name)) in LANGS.iter().enumerate() { ui.selectable_value(&mut l, i, *name); }
+                let cur = lang();
+                let g = ui.painter().layout_no_wrap(LANGS[cur].1.to_string(), prop(11.5), mu());
+                let (r, resp) = ui.allocate_exact_size(egui::vec2(g.size().x + 26.0, 20.0), egui::Sense::click());
+                let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
+                let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() || open, 0.1);
+                if hv > 0.0 { ui.painter().rect_filled(r, kit::R, hl().gamma_multiply(0.7 * hv)); }
+                let col = lerp(mu(), fg(), hv);
+                ui.painter().galley(egui::pos2(r.left() + 7.0, r.center().y - g.size().y / 2.0), g, col);
+                chevron(ui, egui::Rect::from_center_size(egui::pos2(r.right() - 9.0, r.center().y), egui::vec2(8.0, 8.0)), &ui.visuals().widgets.inactive, open);
+                let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                egui::Popup::from_toggle_button_response(&resp).frame(top::popup_frame(ui, 4)).align(egui::RectAlign::TOP_END).show(|ui| {
+                    ui.set_min_width(150.0);
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for (i, (code, name)) in LANGS.iter().enumerate() {
+                        let (r, row) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
+                        let on = i == cur;
+                        if on || row.hovered() { ui.painter().rect_filled(r, kit::R, hl()); }
+                        if on { ui.painter().text(egui::pos2(r.left() + 13.0, r.center().y), egui::Align2::CENTER_CENTER, "✓", prop(12.0), accent()); }
+                        ui.painter().text(egui::pos2(r.left() + 28.0, r.center().y), egui::Align2::LEFT_CENTER, *name, prop(12.5), if on { fg_strong() } else { fg() });
+                        if row.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !on { set_lang(code); }
+                    }
                 });
-                if l != lang() { set_lang(LANGS[l].0); }
-                ui.add_space(10.0);
-                ui.label(RichText::new(format!("{} {}", tz_label(local_offset_ms() / 60_000), hms(now_ms()))).font(mono(10.5)).color(mu()));
+                ui.label(txt(format!("{} {}", tz_label(local_offset_ms() / 60_000), hms(now_ms())), mu()));
+                if !stats.hist_errors.is_empty() {
+                    ui.label(txt(format!("{} errors", stats.hist_errors.len()), dn())).on_hover_text(stats.hist_errors.join("\n"));
+                }
+                let h = if stats.hist_pending == 0 { t("status.history_done").to_string() } else { format!("{}/{}", stats.hist_total - stats.hist_pending, stats.hist_total) };
+                ui.label(txt(format!("{} {h}", t("status.history")), if stats.hist_pending == 0 { mu() } else { WARN }));
+                let bl = stats.backlog;
+                ui.label(txt(format!("{} {bl}", t("status.backlog")), if bl > 10_000 { dn() } else if bl > 1_000 { WARN } else { mu() }));
+                if let Some(mb) = stats.rss_mb {
+                    ui.label(txt(format!("{} {mb} MB", t("status.mem")), if mb > 1500 { dn() } else if mb > 800 { WARN } else { mu() }));
+                }
+                ui.label(txt(format!("{} {}", fmt_dp(self.rate.2, 0), t("status.msgs")), mu()));
             });
         });
     }
-
     /// T1_SHOT=<png path> [T1_SHOT_AFTER=<s>]: save one screenshot and exit (used for visual checks).
     fn screenshot(&mut self, ctx: &egui::Context) {
         let Some((path, after)) = self.shot.clone() else { return };
@@ -638,14 +641,18 @@ impl App {
             let mut a = agg.lock().unwrap();
             let stats_arc = self.eng.stats.clone();
             let stats = stats_arc.lock().unwrap();
-            // panels are rounded cards on the darker base, separated by gutters instead of lines
-            let card = |m: i8| Frame::new().fill(panel()).corner_radius(4).inner_margin(Margin::symmetric(m, 5)).outer_margin(Margin::same(2));
-            let flat = |m: i8| Frame::new().fill(bg()).inner_margin(Margin::symmetric(m, 4));
+            // panels are rounded cards on the darker base: 8 px black gutters, a faint hairline edge
+            // (none hosted: the native window shows through transparent panels)
+            let edge_c = if theme::native() { Color32::TRANSPARENT } else { line().gamma_multiply(0.8) };
+            let card = |m: i8| Frame::new().fill(panel()).corner_radius(kit::R).stroke(egui::Stroke::new(1.0, edge_c))
+                .inner_margin(Margin::symmetric(m, 5)).outer_margin(Margin::same(4));
+            // title bar + stats strip, status bar: on the base, 14 px sides, 4 px towards the cards
+            let flat = |top: i8, bottom: i8| Frame::new().fill(bg()).inner_margin(Margin { left: 14, right: 14, top, bottom });
 
             if !self.hosted {
-            egui::Panel::top("hdr").show_separator_line(false).frame(Frame::new().fill(bg()).inner_margin(Margin::symmetric(10, 3)))
+            egui::Panel::top("hdr").show_separator_line(false).frame(flat(0, 4))
                 .show(ui, |ui| self.header(ui, &a, &hdr_st, &mut new_base, &mut new_mode));
-            egui::Panel::bottom("status").show_separator_line(false).frame(flat(12)).exact_size(24.0).show(ui, |ui| self.status(ui, &stats));
+            egui::Panel::bottom("status").show_separator_line(false).frame(flat(4, 0)).exact_size(30.0).show(ui, |ui| self.status(ui, &stats));
             drop(stats);
             // ops from the account strip and the order panel take the agg lock themselves
             // (route planning reads books): never hold it across them
@@ -797,16 +804,17 @@ fn window_buttons(ui: &mut Ui, maximized: bool) {
     let cols = [(Color32::from_rgb(0xff, 0x5f, 0x57), egui::ViewportCommand::Close),
                 (Color32::from_rgb(0xfe, 0xbc, 0x2e), egui::ViewportCommand::Minimized(true)),
                 (Color32::from_rgb(0x28, 0xc8, 0x40), egui::ViewportCommand::Maximized(!maximized))];
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(58.0, 20.0), egui::Sense::hover());
+    // 12 px lights, 8 px apart
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(52.0, 20.0), egui::Sense::hover());
     let group_hover = ui.rect_contains_pointer(rect);
     for (i, (c, cmd)) in cols.into_iter().enumerate() {
-        let center = egui::pos2(rect.left() + 7.0 + i as f32 * 20.0, rect.center().y);
-        let r = egui::Rect::from_center_size(center, egui::vec2(13.0, 13.0));
+        let center = egui::pos2(rect.left() + 6.0 + i as f32 * 20.0, rect.center().y);
+        let r = egui::Rect::from_center_size(center, egui::vec2(14.0, 14.0));
         let resp = ui.interact(r, ui.id().with(("winbtn", i)), egui::Sense::click());
-        ui.painter().circle_filled(center, 6.0, c);
+        ui.painter().circle(center, 6.0, c, egui::Stroke::new(0.5, Color32::from_black_alpha(40)));
         if group_hover {
-            let s = egui::Stroke::new(1.2, Color32::from_black_alpha(150));
-            let d = 2.8;
+            let s = egui::Stroke::new(1.1, Color32::from_black_alpha(150));
+            let d = 2.6;
             match i {
                 0 => { ui.painter().line_segment([center - egui::vec2(d, d), center + egui::vec2(d, d)], s); ui.painter().line_segment([center + egui::vec2(-d, d), center + egui::vec2(d, -d)], s); }
                 1 => { ui.painter().line_segment([center - egui::vec2(d + 0.5, 0.0), center + egui::vec2(d + 0.5, 0.0)], s); }
@@ -817,20 +825,22 @@ fn window_buttons(ui: &mut Ui, maximized: bool) {
     }
 }
 
-/// Status bar venue: logo (dim when excluded from the aggregate), name, push latency.
+/// Status bar venue: state dot (green streaming, red silent, grey switched off), name, push latency.
 fn status_venue(ui: &mut Ui, e: Exchange, on: bool, alive: bool, lat: Option<f64>, lat_col: Color32) -> egui::Response {
-    let name = ui.painter().layout_no_wrap(format!("{e:?}"), prop(10.5), if on { mu() } else { dim() });
-    let ms = ui.painter().layout_no_wrap(lat.map(|l| format!("{l:.0}ms")).unwrap_or("-".into()), mono(10.0), if alive { lat_col } else { dn() });
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0 + name.size().x + 4.0 + ms.size().x, 18.0), egui::Sense::click());
-    if resp.hovered() { ui.painter().rect_filled(rect.expand(2.0), 3, hl()); }
-    icon(ui.painter(), e, egui::Rect::from_center_size(egui::pos2(rect.left() + 6.5, rect.center().y), egui::vec2(12.0, 12.0)), !on);
+    let name = ui.painter().layout_no_wrap(format!("{e:?}"), prop(11.5), if on { mu() } else { dim() });
+    let ms_col = if !on { dim() } else if alive { lat_col } else { dn() };
+    let ms = ui.painter().layout_no_wrap(if on { lat.map(|l| format!("{l:.0}ms")).unwrap_or("–".into()) } else { "off".into() }, mono(11.5), ms_col);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0 + name.size().x + 5.0 + ms.size().x, 18.0), egui::Sense::click());
+    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered(), 0.1);
+    let p = ui.painter();
+    if hv > 0.0 { p.rect_filled(rect.expand2(egui::vec2(5.0, 1.0)), 3, hl().gamma_multiply(0.7 * hv)); }
     let y = rect.center().y;
-    let x = rect.left() + 17.0;
-    ui.painter().galley(egui::pos2(x, y - name.size().y / 2.0), name.clone(), mu());
-    ui.painter().galley(egui::pos2(x + name.size().x + 4.0, y - ms.size().y / 2.0), ms, mu());
-    resp
+    p.circle_filled(egui::pos2(rect.left() + 3.0, y), 3.0, if !on { dim() } else if alive { up() } else { dn() });
+    let x = rect.left() + 12.0;
+    p.galley(egui::pos2(x, y - name.size().y / 2.0), name.clone(), mu());
+    p.galley(egui::pos2(x + name.size().x + 5.0, y - ms.size().y / 2.0), ms, mu());
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
-
 
 #[cfg(test)]
 mod tests {

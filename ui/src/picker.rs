@@ -3,7 +3,7 @@
 //! (favorites.txt / recent.txt under ~/Library/Application Support/Depth). Click picks; arrows move
 //! the selection, Enter picks it (or the first match), Escape closes. ⌘K opens, ⌘[ ⌘] step through
 //! favorites, ⌘D stars the current pair.
-use super::{fmt_px, l, theme::*, top::big};
+use super::{fmt_px, kit, l, theme::*, top, top::big};
 use crate::engine::Ticker;
 use eframe::egui::{self, pos2, vec2, Align2, Key, Modifiers, Rect, RichText, Sense, Ui};
 use std::path::PathBuf;
@@ -29,7 +29,12 @@ pub struct Picker {
     was_open: bool,
 }
 
-const ROW_H: f32 = 26.0;
+const ROW_H: f32 = 28.0;
+/// popup content width and the column anchors (pair name left edge, Last / 24h right edges)
+const W: f32 = 480.0;
+const X_PAIR: f32 = 52.0;
+const X_LAST: f32 = 300.0;
+const X_CHG: f32 = 392.0;
 
 fn path(name: &str) -> Option<PathBuf> { Some(depth::sys::data_dir()?.join(name)) }
 fn load(name: &str) -> Option<Vec<String>> {
@@ -96,9 +101,7 @@ impl Picker {
             chosen = Some(self.favs[i].clone());
         }
 
-        let btn = ui.add(egui::Button::new(RichText::new(format!("       {base}/USDT  ▾")).font(prop(15.0)).strong()).min_size(vec2(120.0, 28.0)))
-            .on_hover_text(format!("{} (⌘K)", l("Choose pair")));
-        coin_icon(ui, base, Rect::from_center_size(pos2(btn.rect.left() + 18.0, btn.rect.center().y), vec2(18.0, 18.0)));
+        let btn = pair_button(ui, base, self.open).on_hover_text(format!("{} (⌘K)", l("Choose pair")));
         if btn.clicked() || k { self.open = !self.open; }
         // opened by the button, ⌘K or T1_PICK
         let just_opened = self.open && !self.was_open;
@@ -118,27 +121,31 @@ impl Picker {
         let (down, up_k, enter) = ui.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::ArrowDown), i.consume_key(Modifiers::NONE, Key::ArrowUp), i.consume_key(Modifiers::NONE, Key::Enter)));
         let area = egui::Area::new(egui::Id::new("picker")).order(egui::Order::Foreground).fixed_pos(btn.rect.left_bottom() + vec2(0.0, 6.0));
         let inner = area.show(ui.ctx(), |ui| {
-            egui::Frame::new().fill(popup_bg()).stroke(egui::Stroke::new(1.0, line())).corner_radius(10).inner_margin(12).shadow(ui.visuals().popup_shadow).show(ui, |ui| {
-                ui.set_width(480.0);
+            top::popup_frame(ui, 8).show(ui, |ui| {
+                ui.set_width(W);
                 ui.spacing_mut().item_spacing.y = 8.0;
-                // search field
-                let (fr, _) = ui.allocate_exact_size(vec2(480.0, 30.0), Sense::hover());
+                // search field (kit::field look: well, hairline, accent border and soft ring when focused)
+                let (fr, _) = ui.allocate_exact_size(vec2(W, 32.0), Sense::hover());
                 let fid = ui.id().with("pick_q");
-                let focused = ui.memory(|m| m.has_focus(fid));
-                ui.painter().rect(fr, 6, panel2(), egui::Stroke::new(1.0, if focused { accent() } else { line() }), egui::StrokeKind::Inside);
-                search_glyph(ui.painter(), pos2(fr.left() + 15.0, fr.center().y), dim());
-                let q = ui.put(Rect::from_min_max(pos2(fr.left() + 28.0, fr.top() + 4.0), pos2(fr.right() - 8.0, fr.bottom() - 4.0)),
-                    egui::TextEdit::singleline(&mut self.query).id(fid).frame(egui::Frame::NONE).hint_text(l("Search pairs")).font(prop(13.0)).vertical_align(egui::Align::Center));
+                let f = ui.ctx().animate_bool_with_time(fid.with("f"), ui.memory(|m| m.has_focus(fid)), 0.12);
+                if f > 0.0 { ui.painter().rect_filled(fr.expand(2.5 * f), kit::R + 2, accent().gamma_multiply(0.14 * f)); }
+                ui.painter().rect(fr, kit::R, well(), egui::Stroke::new(1.0, lerp(line(), accent(), f)), egui::StrokeKind::Inside);
+                search_glyph(ui.painter(), pos2(fr.left() + 15.0, fr.center().y), mu());
+                let q = ui.put(Rect::from_min_max(pos2(fr.left() + 30.0, fr.top() + 4.0), pos2(fr.right() - 10.0, fr.bottom() - 4.0)),
+                    egui::TextEdit::singleline(&mut self.query).id(fid).frame(egui::Frame::NONE).hint_text(RichText::new(l("Search pairs")).color(dim()))
+                        .font(prop_m(13.0)).text_color(fg_strong()).vertical_align(egui::Align::Center));
                 // focus once when opened; re-requesting every frame fights row clicks and forces a repaint every frame
                 if just_opened { q.request_focus(); }
                 let searching = !norm(&self.query).is_empty();
 
                 // Favorites / All (ignored while searching) and the shortcut hint
                 ui.horizontal(|ui| {
-                    let mut i = if self.favs_only { 0 } else { 1 };
-                    ui.add_enabled_ui(!searching, |ui| { if segment(ui, &[l("Favorites"), l("All")], &mut i) { self.favs_only = i == 0; } });
+                    let i = if self.favs_only { 0 } else { 1 };
+                    ui.add_enabled_ui(!searching, |ui| {
+                        if let Some(j) = top::pills(ui, "pick_favs", &[l("Favorites"), l("All")], i, 22.0, 12.0) { self.favs_only = j == 0; }
+                    });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(format!("⌘[ ⌘]  {}  ·  ⌘D  {}", l("favorites"), l("star"))).font(prop(10.5)).color(dim()));
+                        ui.label(RichText::new(format!("⌘[ ⌘]  {}  ·  ⌘D  {}", l("favorites"), l("star"))).font(prop(11.0)).color(dim()));
                     });
                 });
 
@@ -147,13 +154,14 @@ impl Picker {
                 if !recent.is_empty() && !searching {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.label(RichText::new(l("Recent")).font(prop(11.5)).color(mu()));
+                        ui.label(RichText::new(l("Recent").to_uppercase()).font(prop_s(10.5)).color(dim()).extra_letter_spacing(0.6));
                         for b in &recent {
-                            let g = ui.painter().layout_no_wrap(b.clone(), prop(11.5), fg());
-                            let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 32.0, 22.0), Sense::click());
-                            ui.painter().rect(r, 5, if resp.hovered() { hl() } else { panel2() }, egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside);
-                            coin_icon(ui, b, Rect::from_center_size(pos2(r.left() + 13.0, r.center().y), vec2(13.0, 13.0)));
-                            ui.painter().galley(pos2(r.left() + 23.0, r.center().y - g.size().y / 2.0), g, fg());
+                            let g = ui.painter().layout_no_wrap(b.clone(), prop_m(12.0), fg());
+                            let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 32.0, kit::H_SM), Sense::click());
+                            let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered(), 0.1);
+                            ui.painter().rect(r, kit::R, lerp(panel2(), hl(), hv), egui::Stroke::new(1.0, lerp(line(), edge(), hv)), egui::StrokeKind::Inside);
+                            coin_icon(ui, b, Rect::from_center_size(pos2(r.left() + 13.0, r.center().y), vec2(14.0, 14.0)));
+                            ui.painter().galley(pos2(r.left() + 24.0, r.center().y - g.size().y / 2.0), g, fg());
                             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { chosen = Some(b.clone()); }
                         }
                     });
@@ -171,40 +179,34 @@ impl Picker {
                     chosen = self.sel.as_ref().and_then(|s| rows.iter().find(|t| &t.base == s)).or(rows.first()).map(|t| t.base.clone());
                 }
 
-                // column headers (click sorts; again reverses)
-                let (hr, _) = ui.allocate_exact_size(vec2(480.0, 18.0), Sense::hover());
-                let cols = [(Col::Pair, l("Pair"), hr.left() + 46.0, false), (Col::Last, l("Last"), hr.left() + 300.0, true), (Col::Chg, l("24h Chg"), hr.left() + 390.0, true), (Col::Vol, l("Volume"), hr.right() - 8.0, true)];
+                // column headers, 11 medium grey (click sorts; again reverses)
+                let (hr, _) = ui.allocate_exact_size(vec2(W, 22.0), Sense::hover());
+                let cols = [(Col::Pair, l("Pair"), hr.left() + X_PAIR, false), (Col::Last, l("Last"), hr.left() + X_LAST, true), (Col::Chg, l("24h Chg"), hr.left() + X_CHG, true), (Col::Vol, l("Volume"), hr.right() - 10.0, true)];
                 for (c, name, x, right) in cols {
                     let on = self.sort.0 == c;
-                    let g = ui.painter().layout_no_wrap(name.to_string(), prop(11.0), if on { fg() } else { dim() });
-                    let w = g.size().x + 12.0;
+                    let sorted = on.then_some(self.sort.1);
+                    let label = match sorted { Some(true) => format!("{name} ↑"), Some(false) => format!("{name} ↓"), None => name.to_string() };
+                    let w = ui.painter().layout_no_wrap(label, prop_m(11.0), fg()).size().x;
                     let r = if right { Rect::from_min_max(pos2(x - w, hr.top()), pos2(x, hr.bottom())) } else { Rect::from_min_size(pos2(x, hr.top()), vec2(w, hr.height())) };
-                    let resp = ui.interact(r, ui.id().with(("pick_sort", name)), Sense::click());
-                    let col = if on || resp.hovered() { fg() } else { dim() };
-                    let tx = if right { r.right() - 12.0 - g.size().x } else { r.left() };
-                    ui.painter().galley(pos2(tx, r.center().y - g.size().y / 2.0), g, col);
-                    if on {
-                        // sort direction caret
-                        let cx = tx + r.width() - 6.0;
-                        let (y0, y1) = if self.sort.1 { (r.center().y + 2.0, r.center().y - 2.0) } else { (r.center().y - 2.0, r.center().y + 2.0) };
-                        ui.painter().add(egui::Shape::line(vec![pos2(cx - 3.0, y0), pos2(cx, y1), pos2(cx + 3.0, y0)], egui::Stroke::new(1.3, fg())));
-                    }
+                    let resp = ui.interact(r.expand2(vec2(4.0, 0.0)), ui.id().with(("pick_sort", name)), Sense::click());
+                    let (pos, al) = if right { (r.right_center(), Align2::RIGHT_CENTER) } else { (r.left_center(), Align2::LEFT_CENTER) };
+                    if on { kit::th(ui.painter(), pos, al, name, sorted); } else { ui.painter().text(pos, al, name, prop_m(11.0), if resp.hovered() { fg() } else { mu() }); }
                     if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                         // a new column starts A-Z for names, largest first for numbers
                         self.sort = if on { (c, !self.sort.1) } else { (c, c == Col::Pair) };
                     }
                 }
-                ui.painter().hline(hr.x_range(), hr.bottom() + 3.0, egui::Stroke::new(1.0, line()));
+                ui.painter().hline(egui::Rangef::new(hr.left() - 8.0, hr.right() + 8.0), hr.bottom() + 0.5, egui::Stroke::new(1.0, line()));
 
                 if rows.is_empty() {
                     let msg = if tickers.is_empty() { l("Loading…") } else if self.favs_only && !searching { l("No favorites yet: star a pair in All") } else { l("No matching pairs") };
-                    let (r, _) = ui.allocate_exact_size(vec2(480.0, 120.0), Sense::hover());
+                    let (r, _) = ui.allocate_exact_size(vec2(W, 120.0), Sense::hover());
                     ui.painter().text(r.center(), Align2::CENTER_CENTER, msg, prop(12.5), mu());
                     return;
                 }
                 let mut toggle = None;
                 // keep the keyboard selection in view
-                let mut sa = egui::ScrollArea::vertical().id_salt("pick_rows").max_height(400.0).min_scrolled_height(400.0).auto_shrink([false, true]);
+                let mut sa = egui::ScrollArea::vertical().id_salt("pick_rows").max_height(420.0).min_scrolled_height(420.0).auto_shrink([false, true]);
                 if let Some(j) = self.scroll_to.take() {
                     let (top, bot) = (j as f32 * ROW_H, (j + 1) as f32 * ROW_H);
                     let (off, h) = self.view;
@@ -215,22 +217,23 @@ impl Picker {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let out = sa.show_rows(ui, ROW_H, rows.len(), |ui, range| {
                     for t in &rows[range] {
-                        let (rect, resp) = ui.allocate_exact_size(vec2(480.0, ROW_H), Sense::click());
+                        let (rect, resp) = ui.allocate_exact_size(vec2(W, ROW_H), Sense::click());
                         let sel = self.sel.as_deref() == Some(t.base.as_str());
-                        if sel { ui.painter().rect_filled(rect, 5, accent().gamma_multiply(0.22)); } else if resp.hovered() { ui.painter().rect_filled(rect, 5, hl()); }
+                        let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered(), 0.1);
+                        if sel { ui.painter().rect_filled(rect, kit::R, hl()); } else if hv > 0.0 { ui.painter().rect_filled(rect, kit::R, hl().gamma_multiply(0.6 * hv)); }
                         let y = rect.center().y;
                         let fav = self.favs.contains(&t.base);
-                        let star = Rect::from_center_size(pos2(rect.left() + 11.0, y), vec2(18.0, 18.0));
+                        let star = Rect::from_center_size(pos2(rect.left() + 13.0, y), vec2(20.0, 20.0));
                         let star_hover = resp.hovered() && ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| star.contains(p));
-                        ui.painter().text(star.center(), Align2::CENTER_CENTER, if fav { "★" } else { "☆" }, prop(13.0), if fav { WARN } else if star_hover { mu() } else { dim() });
-                        coin_icon(ui, &t.base, Rect::from_center_size(pos2(rect.left() + 34.0, y), vec2(16.0, 16.0)));
+                        ui.painter().text(star.center(), Align2::CENTER_CENTER, if fav { "★" } else { "☆" }, prop(13.0), if fav { WARN } else if star_hover { fg() } else { dim() });
+                        coin_icon(ui, &t.base, Rect::from_center_size(pos2(rect.left() + 37.0, y), vec2(18.0, 18.0)));
                         let p = ui.painter();
-                        let bx = p.text(pos2(rect.left() + 48.0, y), Align2::LEFT_CENTER, &t.base, prop(12.5), fg()).right();
-                        let ux = p.text(pos2(bx, y), Align2::LEFT_CENTER, "USDT", prop(12.5), dim()).right();
-                        if t.base == base { p.text(pos2(ux + 6.0, y), Align2::LEFT_CENTER, "✓", prop(11.0), mu()); }
-                        p.text(pos2(rect.left() + 300.0, y), Align2::RIGHT_CENTER, fmt_px(t.last), mono(12.0), fg());
-                        p.text(pos2(rect.left() + 390.0, y), Align2::RIGHT_CENTER, format!("{:+.2}%", t.chg_pct), mono(12.0), if t.chg_pct >= 0.0 { up() } else { dn() });
-                        p.text(pos2(rect.right() - 8.0, y), Align2::RIGHT_CENTER, big(t.quote_vol), mono(11.5), mu());
+                        let bx = p.text(pos2(rect.left() + X_PAIR, y), Align2::LEFT_CENTER, &t.base, prop_m(12.5), if sel { fg_strong() } else { fg() }).right();
+                        let ux = p.text(pos2(bx + 1.0, y), Align2::LEFT_CENTER, "/USDT", prop(12.0), dim()).right();
+                        if t.base == base { check(p, pos2(ux + 10.0, y), accent()); }
+                        p.text(pos2(rect.left() + X_LAST, y), Align2::RIGHT_CENTER, fmt_px(t.last), mono_m(12.5), fg());
+                        p.text(pos2(rect.left() + X_CHG, y), Align2::RIGHT_CENTER, format!("{:+.2}%", t.chg_pct), mono_m(12.5), if t.chg_pct >= 0.0 { up() } else { dn() });
+                        p.text(pos2(rect.right() - 10.0, y), Align2::RIGHT_CENTER, big(t.quote_vol), mono(12.0), mu());
                         if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                             if star_hover { toggle = Some(t.base.clone()); } else { chosen = Some(t.base.clone()); }
                         }
@@ -247,6 +250,29 @@ impl Picker {
         if let Some(b) = &chosen { let b = b.clone(); self.opened(&b, base); }
         chosen
     }
+}
+
+/// The title bar's pair button: 30 px, outlined; coin icon, "BTC/USDT" 14 semibold, chevron.
+fn pair_button(ui: &mut Ui, base: &str, open: bool) -> egui::Response {
+    let g = ui.painter().layout_no_wrap(format!("{base}/USDT"), prop_s(14.0), fg_strong());
+    let (r, resp) = ui.allocate_exact_size(vec2(6.0 + 20.0 + 8.0 + g.size().x + 8.0 + 10.0 + 10.0, 30.0), Sense::click());
+    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() || open, 0.1);
+    let p = ui.painter();
+    p.rect(r, kit::R + 1, lerp(panel2(), hl(), hv), egui::Stroke::new(1.0, lerp(line(), edge(), hv)), egui::StrokeKind::Inside);
+    coin_icon(ui, base, Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(20.0, 20.0)));
+    let p = ui.painter();
+    let tx = r.left() + 34.0;
+    p.galley(pos2(tx, r.center().y - g.size().y / 2.0), g.clone(), fg_strong());
+    // chevron, flipped while the picker is open
+    let c = pos2(tx + g.size().x + 13.0, r.center().y);
+    let (w, h) = (3.0, if open { -1.5 } else { 1.5 });
+    p.add(egui::Shape::line(vec![c + vec2(-w, -h), c + vec2(0.0, h), c + vec2(w, -h)], egui::Stroke::new(1.5, lerp(mu(), fg(), hv))));
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Check mark beside the current pair.
+fn check(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
+    p.add(egui::Shape::line(vec![c + vec2(-3.5, 0.0), c + vec2(-1.0, 2.5), c + vec2(3.5, -2.5)], egui::Stroke::new(1.5, col)));
 }
 
 /// Magnifier glyph in the search field.
