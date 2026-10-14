@@ -351,3 +351,4 @@ pos.short = Шорт
 pos.qty = объём
 pos.risk = Риск на сделку
 pos.use = Вход в цену ордера
+chart.delta = Дельта

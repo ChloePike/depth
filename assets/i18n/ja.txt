@@ -351,3 +351,4 @@ pos.short = ショート
 pos.qty = 数量
 pos.risk = 1回のリスク
 pos.use = エントリー価格を注文へ
+chart.delta = デルタ

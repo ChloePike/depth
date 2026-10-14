@@ -208,3 +208,7 @@ Reading the venue's limit… = 正在读取交易所上限…
 Set %gx = 设为 %gx
 Change leverage for this symbol = 调整该交易对的杠杆
 Trailing = 追踪止损
+This API key is read-only: trading is disabled. Allow trading for the key on the exchange to place orders. = 这个 API key 是只读的：下单已禁用。要下单，请在交易所给这个 key 开启交易权限。
+Footprint (sells × buys per price) = 足迹图（每个价位的卖 × 买）
+Live trades since Depth started; zoom in to read the numbers = 只统计 Depth 启动后的实时成交；放大图表才能看到数字
+Whale trades = 大单成交

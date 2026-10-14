@@ -70,6 +70,12 @@ pub fn sign(secret: &str, ts: &str, method: &str, path: &str, body: &str) -> Str
 }
 
 /// Signed REST call; `path` includes the query string. Returns `data`.
+/// "perm" of the key: "read_only", "read_only,trade", "read_only,trade,withdraw".
+pub async fn can_trade(k: &Keys) -> Result<Option<bool>> {
+    let v = okx(k, None, "/api/v5/account/config").await?;
+    Ok(v[0]["perm"].as_str().map(|p| p.split(',').any(|x| x.trim() == "trade")))
+}
+
 async fn okx(k: &Keys, post: Option<Value>, path: &str) -> Result<Value> {
     let url = format!("{REST}{path}");
     ws::check_paused(&url)?;

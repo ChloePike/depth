@@ -208,3 +208,7 @@ Reading the venue's limit… = Đang đọc giới hạn của sàn…
 Set %gx = Đặt %gx
 Change leverage for this symbol = Đổi đòn bẩy cho cặp này
 Trailing = Trailing
+This API key is read-only: trading is disabled. Allow trading for the key on the exchange to place orders. = API key này chỉ đọc: đã tắt đặt lệnh. Hãy bật quyền giao dịch cho key trên sàn.
+Footprint (sells × buys per price) = Footprint (bán × mua theo giá)
+Live trades since Depth started; zoom in to read the numbers = Chỉ giao dịch từ khi Depth khởi động; phóng to để đọc số
+Whale trades = Giao dịch cá voi

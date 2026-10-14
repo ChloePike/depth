@@ -351,3 +351,4 @@ pos.short = Short
 pos.qty = khối lượng
 pos.risk = Rủi ro mỗi lệnh
 pos.use = Dùng giá vào làm giá lệnh
+chart.delta = Delta

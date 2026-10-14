@@ -686,7 +686,7 @@ impl App {
                 }));
                 self.chart.lines = lines;
                 self.chart.confirm = self.prefs.confirm;
-                self.chart.trading = !acc.keys.is_empty();
+                self.chart.trading = acc.keys.contains_key(&self.trade.ex) && acc.can_trade.get(&self.trade.ex) != Some(&false);
                 self.chart.equity = acc.balances.get(&self.trade.ex).map(|b| b.equity).filter(|e| *e > 0.0);
                 self.chart.amends = depth::trade::can_amend(self.trade.ex);
             }

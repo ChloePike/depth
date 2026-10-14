@@ -208,3 +208,7 @@ Reading the venue's limit… = Leyendo el límite del exchange…
 Set %gx = Fijar %gx
 Change leverage for this symbol = Cambiar el apalancamiento de este símbolo
 Trailing = Trailing
+This API key is read-only: trading is disabled. Allow trading for the key on the exchange to place orders. = Esta clave API es de solo lectura: las órdenes están desactivadas. Activa el permiso de trading en el exchange.
+Footprint (sells × buys per price) = Footprint (ventas × compras por precio)
+Live trades since Depth started; zoom in to read the numbers = Solo operaciones desde que Depth arrancó; acerca el gráfico para ver los números
+Whale trades = Operaciones ballena

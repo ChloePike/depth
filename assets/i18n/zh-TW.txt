@@ -351,3 +351,4 @@ pos.short = 做空
 pos.qty = 倉位
 pos.risk = 單筆風險
 pos.use = 把進場價填入下單面板
+chart.delta = 買賣差

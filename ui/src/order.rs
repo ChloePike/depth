@@ -272,7 +272,9 @@ impl OrderPanel {
         let (bid, ask) = (f(&t["bid"]), f(&t["ask"]));
         let smart = st["route"]["smart"].as_bool().unwrap_or(false);
         let has_key = t["has_key"].as_bool().unwrap_or(false);
-        let can_trade = has_key || smart;
+        // a read-only key can show the account but never send an order
+        let read_only = t["read_only"] == true && !smart;
+        let can_trade = (has_key && !read_only) || smart;
         let caps = &t["caps"];
         let bbo_levels: Vec<u64> = t["bbo_levels"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
 
@@ -345,6 +347,7 @@ impl OrderPanel {
                         }
                     }
                 });
+                if read_only { note(ui, &format!("🔒 {}", l("This API key is read-only: trading is disabled. Allow trading for the key on the exchange to place orders.")), WARN); }
                 if let Some(p) = go { self.submit(p, st, ref_px, use_bbo, typed_price, call); }
                 self.summary(ui, t, &base, qty_v * ref_px, use_bbo, has_key, qty_v);
                 if let Some(e) = &self.error { note(ui, &format!("⛔ {e}"), dn()); }

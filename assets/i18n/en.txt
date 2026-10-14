@@ -363,3 +363,4 @@ pos.short = Short
 pos.qty = size
 pos.risk = Risk per trade
 pos.use = Use entry as order price
+chart.delta = Delta

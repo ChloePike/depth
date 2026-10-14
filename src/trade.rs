@@ -645,6 +645,28 @@ pub async fn place(ex: Exchange, k: &Keys, req: &OrderReq, r: &Rules, ref_px: f6
     }
 }
 
+/// Whether the key may trade USDT perps: Some(false) for a read-only key, None when the venue
+/// has no way to ask (Gate, Kraken, Hyperliquid, Lighter, Bitget) or the answer is unclear.
+/// Read once per key (stream start, key change), never polled.
+pub async fn can_trade(ex: Exchange, k: &Keys) -> Result<Option<bool>> {
+    Ok(match ex {
+        // readOnly 1 = read-only key; linear perps need the ContractTrade permission
+        Exchange::Bybit => {
+            let v = bybit(k, true, "/v5/user/query-api", json!({})).await?;
+            let ro = v["readOnly"].as_i64() == Some(1);
+            let perms = v["permissions"]["ContractTrade"].as_array().is_some_and(|a| !a.is_empty());
+            Some(!ro && perms)
+        }
+        Exchange::Binance => {
+            let v = binance_at(k, sapi_url(), reqwest::Method::GET, "/sapi/v1/account/apiRestrictions", &[]).await?;
+            let flag = if binance_pm(k).await? { "enablePortfolioMarginTrading" } else { "enableFutures" };
+            v[flag].as_bool()
+        }
+        Exchange::Okx => okx::can_trade(k).await?,
+        _ => None,
+    })
+}
+
 /// Venues whose resting limit orders `amend` changes in place (same id); the others are moved by
 /// cancel + new.
 pub fn can_amend(ex: Exchange) -> bool { matches!(ex, Exchange::Bybit | Exchange::Binance) }

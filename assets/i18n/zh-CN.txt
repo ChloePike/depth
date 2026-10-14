@@ -362,3 +362,4 @@ pos.short = 做空
 pos.qty = 仓位
 pos.risk = 单笔风险
 pos.use = 把入场价填入下单面板
+chart.delta = 买卖差

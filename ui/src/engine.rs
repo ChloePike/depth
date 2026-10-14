@@ -16,6 +16,8 @@ const HISTORY_MARKETS: [Market; 2] = [Market::Spot, Market::Perp];
 #[derive(Default)]
 pub struct Account {
     pub keys: HashMap<Exchange, Keys>,
+    /// per keyed venue: may the key trade (false = read-only); absent = unknown / not asked
+    pub can_trade: HashMap<Exchange, bool>,
     pub positions: Vec<Position>,
     pub orders: Vec<OpenOrder>,
     pub balances: HashMap<Exchange, Balance>,
@@ -85,6 +87,18 @@ fn set_status(account: &Arc<Mutex<Account>>, id: u64, s: &str) {
 
 /// Place one order with the account's keys, cached rules and position mode; logs the outcome in
 /// the order log and tracks the round trip. Returns the venue's order id.
+/// Asks the venue once whether the key may trade (read-only keys disable the order buttons).
+fn check_perms(rt: &tokio::runtime::Runtime, account: &Arc<Mutex<Account>>, ex: Exchange, k: Keys) {
+    let account = account.clone();
+    rt.spawn(async move {
+        match trade::can_trade(ex, &k).await {
+            Ok(Some(ok)) => { account.lock().unwrap().can_trade.insert(ex, ok); }
+            Ok(None) => {}
+            Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} key permissions: {e:#}\n")),
+        }
+    });
+}
+
 async fn place_logged(account: &Arc<Mutex<Account>>, ex: Exchange, req: &OrderReq, ref_px: f64) -> Option<String> {
     let k = account.lock().unwrap().keys.get(&ex).cloned()?;
     let key = (ex, req.symbol.clone());
@@ -416,7 +430,10 @@ impl Engine {
         // the runtime exists even without keys: keys can be added from Settings at any time
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("account runtime");
         let (tx, mut rx) = unbounded_channel::<(Exchange, trade::AccEvent)>();
-        for (ex, k) in &keys { self.streams.insert(*ex, rt.spawn(trade::stream(*ex, k.clone(), tx.clone()))); }
+        for (ex, k) in &keys {
+            check_perms(&rt, &self.account, *ex, k.clone());
+            self.streams.insert(*ex, rt.spawn(trade::stream(*ex, k.clone(), tx.clone())));
+        }
         self.acct_tx = Some(tx.clone());
         let (account, ctx) = (self.account.clone(), ctx.clone());
         rt.spawn(async move {
@@ -863,7 +880,9 @@ impl Engine {
             a.levs.retain(|(e, _), _| *e != ex);
             match &keys { Some(k) => { a.keys.insert(ex, k.clone()); } None => { a.keys.remove(&ex); } }
         }
+        self.account.lock().unwrap().can_trade.remove(&ex);
         if let (Some(k), Some(rt), Some(tx)) = (keys, self.acct_rt.as_ref(), self.acct_tx.clone()) {
+            check_perms(rt, &self.account, ex, k.clone());
             self.streams.insert(ex, rt.spawn(trade::stream(ex, k, tx)));
         }
     }

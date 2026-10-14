@@ -85,6 +85,7 @@ impl App {
             "bbo_levels": trade::bbo_levels(ex), "caps": trade::caps(ex), "native_twap": trade::native_twap(ex), "push_ms": push_ms, "rtt_ms": acc.order_rtt.get(&ex),
             "fee": {"taker": fee_t, "maker": fee_m},
             "smart": self.route.smart, "error": acc.errors.get(&ex),
+            "read_only": acc.can_trade.get(&ex) == Some(&false),
         });
         let funds = self.eng.funding.lock().unwrap().clone();
         let positions: Vec<Value> = acc.positions.iter().map(|p| {

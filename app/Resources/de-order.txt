@@ -208,3 +208,7 @@ Reading the venue's limit… = Börsenlimit wird gelesen…
 Set %gx = Auf %gx setzen
 Change leverage for this symbol = Hebel für dieses Symbol ändern
 Trailing = Trailing
+This API key is read-only: trading is disabled. Allow trading for the key on the exchange to place orders. = Dieser API-Schlüssel ist schreibgeschützt: Handel deaktiviert. Erlaube Trading für den Schlüssel an der Börse.
+Footprint (sells × buys per price) = Footprint (Verkäufe × Käufe je Preis)
+Live trades since Depth started; zoom in to read the numbers = Nur Trades seit dem Start von Depth; hineinzoomen für die Zahlen
+Whale trades = Wal-Trades
