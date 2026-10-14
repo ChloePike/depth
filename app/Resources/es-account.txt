@@ -259,3 +259,6 @@ received = recibido
 Funding paid since = Funding pagado desde
 the position is older; earlier fills are not available = la posición es anterior; no hay ejecuciones más antiguas
 Funding paid since the position opened = Funding pagado desde la apertura de la posición
+Funding paid = Funding pagado
+since = desde
+Funding paid since the position opened: Binance, Bybit, OKX, Gate and Hyperliquid = Funding pagado desde la apertura: Binance, Bybit, OKX, Gate e Hyperliquid

@@ -259,3 +259,6 @@ received = получено
 Funding paid since = Фандинг уплачен с
 the position is older; earlier fills are not available = позиция старше; более ранние сделки недоступны
 Funding paid since the position opened = Фандинг с момента открытия позиции
+Funding paid = Уплаченный фандинг
+since = с
+Funding paid since the position opened: Binance, Bybit, OKX, Gate and Hyperliquid = Фандинг с открытия позиции: Binance, Bybit, OKX, Gate и Hyperliquid

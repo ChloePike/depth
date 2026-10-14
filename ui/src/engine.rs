@@ -142,7 +142,8 @@ pub struct FundingSlot { pub val: Option<trade::FundingPaid>, qty: f64, at: i64,
 
 /// Positions whose funding-since-open is due: never fetched, size changed (at most once per 60 s), or
 /// ~20 s after a settlement. Marks them fetched now and drops the slots of closed positions.
-fn funding_due(a: &mut Account, fund: &HashMap<(Exchange, String), VenueFunding>, now: i64) -> Vec<(Keys, Position)> {
+/// Each comes with the open time an earlier fetch found for it (kept while the position lives).
+fn funding_due(a: &mut Account, fund: &HashMap<(Exchange, String), VenueFunding>, now: i64) -> Vec<(Keys, Position, Option<i64>)> {
     let live: std::collections::HashSet<_> = a.positions.iter().map(|p| (p.ex, p.symbol.clone(), p.side)).collect();
     a.funding_paid.retain(|k, _| live.contains(k));
     let mut out = vec![];
@@ -152,8 +153,9 @@ fn funding_due(a: &mut Account, fund: &HashMap<(Exchange, String), VenueFunding>
         let old = a.funding_paid.get(&key);
         if old.is_some_and(|s| now < s.due && (s.qty == p.qty || now - s.at < 60_000)) { continue; }
         let slot = FundingSlot { val: old.and_then(|s| s.val), qty: p.qty, at: now, due: next_settle(fund.get(&(p.ex, p.symbol.clone())), now) + 20_000 };
+        let known = slot.val.as_ref().filter(|v| !v.lower && v.since > 0).map(|v| v.since);
         a.funding_paid.insert(key, slot);
-        out.push((k.clone(), p.clone()));
+        out.push((k.clone(), p.clone(), known));
     }
     out
 }
@@ -535,10 +537,10 @@ impl Engine {
                     _ = bal_tick.tick() => {
                         // funding since open: in-memory check each tick, a REST fetch only when `funding_due` says so
                         let due = { let mut a = account.lock().unwrap(); let f = funding.lock().unwrap(); funding_due(&mut a, &f, now_ms()) };
-                        for (k, p) in due {
+                        for (k, p, known) in due {
                             let (acc, ctx) = (account.clone(), ctx.clone());
                             tokio::spawn(async move {
-                                let r = trade::funding_paid(p.ex, &k, &p).await;
+                                let r = trade::funding_paid(p.ex, &k, &p, known).await;
                                 if let Err(e) = &r { depth::sys::append_log("trade.log", &format!("{:?} {} funding paid: {e:#}\n", p.ex, p.symbol)); }
                                 let mut a = acc.lock().unwrap();
                                 let Some(s) = a.funding_paid.get_mut(&(p.ex, p.symbol.clone(), p.side)) else { return };

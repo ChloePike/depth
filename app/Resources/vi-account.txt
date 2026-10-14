@@ -259,3 +259,6 @@ received = đã nhận
 Funding paid since = Funding đã trả từ
 the position is older; earlier fills are not available = vị thế cũ hơn; không có các khớp lệnh trước đó
 Funding paid since the position opened = Funding đã trả từ khi mở vị thế
+Funding paid = Funding đã trả
+since = từ
+Funding paid since the position opened: Binance, Bybit, OKX, Gate and Hyperliquid = Funding đã trả từ khi mở vị thế: Binance, Bybit, OKX, Gate và Hyperliquid

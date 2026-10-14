@@ -1122,16 +1122,38 @@ const WEEK_MS: i64 = 7 * 86_400_000;
 /// fetches once per position, after a size change (debounced) and after each settlement.
 /// Binance: userTrades 5 + income 30 (per 1000 rows); Bybit: execution/list and
 /// transaction-log, a few pages per 7-day window. Ok(None) on venues that do not report it.
-pub async fn funding_paid(ex: Exchange, k: &Keys, p: &Position) -> Result<Option<FundingPaid>> {
+/// `known`: the open time found by an earlier call for this same position (the fill walk is skipped).
+pub async fn funding_paid(ex: Exchange, k: &Keys, p: &Position, known: Option<i64>) -> Result<Option<FundingPaid>> {
     let cur = if p.side == Side::Buy { p.qty } else { -p.qty };
     let now = crate::now_ms();
     match ex {
         Exchange::Binance => {
             let pm = binance_pm(k).await?;
             let (base, trades, income) = if pm { (papi_url(), "/papi/v1/um/userTrades", "/papi/v1/um/income") } else { (binance_url(), "/fapi/v1/userTrades", "/fapi/v1/income") };
-            // without startTime: the last 7 days, newest 1000 fills
-            let t = binance_at(k, base, reqwest::Method::GET, trades, &[("symbol", p.symbol.clone()), ("limit", "1000".into())]).await?;
-            let (since, lower) = open_time(cur, &binance_fills(&t, p.side)).unwrap_or((now - WEEK_MS, true));
+            // the fill walk back to the open, a 7-day window at a time (the most userTrades allows, weight 5
+            // each), up to 26 weeks; a full page continues inside the same window
+            let (since, lower) = match known {
+                Some(t) => (t, false),
+                None => {
+                    let mut fills: Vec<(i64, f64)> = vec![];
+                    let mut found = None;
+                    'w: for w in 0..26 {
+                        let lo = now - (w + 1) * WEEK_MS + 1;
+                        let mut hi = now - w * WEEK_MS;
+                        loop {
+                            let t = binance_at(k, base, reqwest::Method::GET, trades, &[("symbol", p.symbol.clone()), ("startTime", lo.to_string()),
+                                ("endTime", hi.to_string()), ("limit", "1000".into())]).await?;
+                            let page = binance_fills(&t, p.side);
+                            let full = t.as_array().is_some_and(|a| a.len() == 1000);
+                            let oldest = t.as_array().and_then(|a| a.iter().filter_map(|f| f["time"].as_i64()).min());
+                            fills.extend(page);
+                            if let Some((t, false)) = open_time(cur, &fills) { found = Some(t); break 'w; }
+                            match oldest { Some(o) if full && o > lo => hi = o - 1, _ => break }
+                        }
+                    }
+                    match found { Some(t) => (t, false), None => (fills.last().map_or(now - 26 * WEEK_MS, |f| f.0), true) }
+                }
+            };
             // ponytail: hedge mode sums both sides' FUNDING_FEE rows (income rows carry no positionSide)
             let (mut amount, mut start) = (0.0, since);
             for _ in 0..5 {
@@ -1146,8 +1168,8 @@ pub async fn funding_paid(ex: Exchange, k: &Keys, p: &Position) -> Result<Option
         }
         Exchange::Bybit => {
             let mut fills = vec![];
-            let mut found = None;
-            'w: for w in 0..4 {
+            let mut found = known;
+            'w: for w in 0..if known.is_some() { 0 } else { 4 } {
                 let end = now - w * WEEK_MS;
                 let mut cursor = String::new();
                 for _ in 0..10 {

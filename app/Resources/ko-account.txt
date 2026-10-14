@@ -259,3 +259,6 @@ received = 수령
 Funding paid since = 펀딩비 지불 시작
 the position is older; earlier fills are not available = 포지션이 더 오래되었습니다. 이전 체결은 조회할 수 없습니다
 Funding paid since the position opened = 포지션 진입 이후 펀딩비
+Funding paid = 지불한 펀딩비
+since = 부터
+Funding paid since the position opened: Binance, Bybit, OKX, Gate and Hyperliquid = 포지션 진입 이후 지불한 펀딩비: Binance, Bybit, OKX, Gate, Hyperliquid

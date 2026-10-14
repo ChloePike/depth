@@ -550,7 +550,7 @@ impl AccountPanel {
             Col { name: l("Symbol"), w: 220.0, right: false, grow: false, key: Key::No },
             col(l("Size"), 130.0, true, Key::No), col(l("Entry"), 92.0, true, Key::No), col(l("Mark"), 92.0, true, Key::No), col(l("Liq. Price"), 92.0, true, Key::No),
             col(l("Margin"), 116.0, true, Key::No), col(l("PnL (ROE%)"), 140.0, true, Key::No), col(l("Close Position"), 236.0, false, Key::No),
-            col(l("TP / SL"), 130.0, true, Key::No), col(l("Est. Funding"), 140.0, true, Key::No),
+            col(l("TP / SL"), 130.0, true, Key::No), col(l("Est. Funding"), 140.0, true, Key::No), col(l("Funding paid"), 120.0, true, Key::No),
             Col { name: "", w: 84.0, right: true, grow: false, key: Key::No },
         ];
         let px_map = &mut self.close_px;
@@ -638,9 +638,8 @@ impl AccountPanel {
                     9 => {
                         let rate = p["funding_rate"].as_f64();
                         let est = rate.and(p["funding_est"].as_f64());
-                        let paid = p["funding_paid"].as_f64();
-                        // rate + countdown, next estimated payment, paid since open: one line per figure known
-                        let n = rate.is_some() as usize + est.is_some() as usize + paid.is_some() as usize;
+                        // rate + countdown, next estimated payment: one line per figure known
+                        let n = rate.is_some() as usize + est.is_some() as usize;
                         if n == 0 {
                             let tr = txt(ui, r, "—", mono(12.5), dim(), true);
                             ui.interact(tr.expand(4.0), ui.id().with(("fund", &key)), egui::Sense::hover()).on_hover_text(l("Funding is shown for Binance, Bybit and Hyperliquid positions"));
@@ -659,16 +658,27 @@ impl AccountPanel {
                             if let Some(h) = p["funding_interval_h"].as_f64() { tip.push(format!("{} {h}h", l("Settles every"))); }
                             i += 1;
                         }
-                        if let Some(e) = est { txt(ui, line(i), format!("{} {} USDT", l("next"), signed(e)), mono(11.0), pnl_col(e), true); i += 1; }
-                        if let Some(v) = paid {
-                            txt(ui, line(i), format!("{} {} USDT", if v < 0.0 { l("paid") } else { l("received") }, signed(v)), mono(11.0), pnl_col(v), true);
-                            tip.push(match p["funding_since"].as_i64() {
-                                Some(t) if p["funding_since_lower"] == true => format!("{} {} ({})", l("Funding paid since"), time(t), l("the position is older; earlier fills are not available")),
-                                Some(t) => format!("{} ({})", l("Funding paid since the position opened"), time(t)),
-                                None => l("Funding paid since the position opened").to_string(),
-                            });
-                        }
+                        if let Some(e) = est { txt(ui, line(i), format!("{} {} USDT", l("next"), signed(e)), mono(11.0), pnl_col(e), true); }
                         if !tip.is_empty() { ui.interact(r, ui.id().with(("fund", &key)), egui::Sense::hover()).on_hover_text(tip.join("\n")); }
+                    }
+                    10 => {
+                        // funding received (+) / paid (-) since the position opened; "≥" when the open is
+                        // older than the fills the venue returns (then it is at least this much)
+                        let Some(v) = p["funding_paid"].as_f64() else {
+                            let tr = txt(ui, r, "—", mono(12.5), dim(), true);
+                            ui.interact(tr.expand(4.0), ui.id().with(("paid", &key)), egui::Sense::hover()).on_hover_text(l("Funding paid since the position opened: Binance, Bybit, OKX, Gate and Hyperliquid"));
+                            return;
+                        };
+                        let lower = p["funding_since_lower"] == true;
+                        let (top, bot) = halves(r);
+                        txt(ui, top, format!("{}{} USDT", if lower { "≥ " } else { "" }, signed(v)), mono_m(12.5), pnl_col(v), true);
+                        if let Some(t) = p["funding_since"].as_i64() { txt(ui, bot, format!("{} {}", l("since"), time(t)), mono(11.0), mu(), true); }
+                        let tip = match p["funding_since"].as_i64() {
+                            Some(t) if lower => format!("{} {} ({})", l("Funding paid since"), time(t), l("the position is older; earlier fills are not available")),
+                            Some(t) => format!("{} ({})", l("Funding paid since the position opened"), time(t)),
+                            None => l("Funding paid since the position opened").to_string(),
+                        };
+                        ui.interact(r, ui.id().with(("paid", &key)), egui::Sense::hover()).on_hover_text(tip);
                     }
                     _ => {
                         let b = Rect::from_min_max(egui::pos2(r.left(), r.center().y - 13.0), egui::pos2(r.right(), r.center().y + 13.0));

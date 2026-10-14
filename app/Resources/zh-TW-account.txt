@@ -259,3 +259,6 @@ received = 已收
 Funding paid since = 資金費已付，自
 the position is older; earlier fills are not available = 倉位更早開立；更早的成交無法取得
 Funding paid since the position opened = 開倉以來的資金費
+Funding paid = 已付資金費
+since = 自
+Funding paid since the position opened: Binance, Bybit, OKX, Gate and Hyperliquid = 開倉以來已付資金費：Binance、Bybit、OKX、Gate、Hyperliquid

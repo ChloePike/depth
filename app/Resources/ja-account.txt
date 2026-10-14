@@ -259,3 +259,6 @@ received = 受取
 Funding paid since = 資金調達料の支払(以降)
 the position is older; earlier fills are not available = ポジションはさらに古く、それ以前の約定は取得できません
 Funding paid since the position opened = ポジション建玉以降の資金調達料
+Funding paid = 支払済み資金調達料
+since = 開始
+Funding paid since the position opened: Binance, Bybit, OKX, Gate and Hyperliquid = 建玉以降の支払済み資金調達料：Binance、Bybit、OKX、Gate、Hyperliquid
