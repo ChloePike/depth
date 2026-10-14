@@ -15,6 +15,9 @@ fn side_name(s: Side) -> &'static str { if s == Side::Buy { "long" } else { "sho
 impl App {
     /// Everything the native panels show, as one JSON document (polled ~5x a second).
     pub fn state_json(&mut self) -> String {
+        // alerts are checked here too: the host polls this twice a second even when the chart is hidden
+        { let agg = self.eng.agg.clone(); let g = agg.lock().unwrap(); self.alerts_tick(&g); }
+        let fired: Vec<Value> = self.chart.fired.drain(..).map(|(title, body)| json!({"title": title, "body": body})).collect();
         let a = self.eng.agg.lock().unwrap();
         let st = self.eng.stats.lock().unwrap();
         let book_market = match self.mode { Market::Margin | Market::Option => Market::Spot, m => m };
@@ -173,7 +176,9 @@ impl App {
             let ag = self.eng.agg.lock().unwrap();
             let mut b = self.book.native_json(&ag, self.mode);
             b["width"] = self.book_w.into();
-            (self.chart.native_json(&ag, self.mode, &self.eng.base), b)
+            let mut c = self.chart.native_json(&ag, self.mode, &self.eng.base);
+            c["layout"] = self.layout.clone().into();
+            (c, b)
         };
         json!({
             "base": self.eng.base, "mode": format!("{:?}", self.mode), "lang": super::lang_code(), "langs": super::LANGS,
@@ -184,7 +189,7 @@ impl App {
             "wallets": wallets, "balances": balances, "algos": algos, "transferring": transferring, "binance_pm": pm, "log": log, "keys": keys,
             "prefs": serde_json::to_value(&self.prefs).unwrap_or(Value::Null),
             "route": serde_json::to_value(&self.route).unwrap_or(Value::Null),
-            "chart": chart, "book": book, "signals": signals, "quant": quant,
+            "chart": chart, "book": book, "fired": fired, "signals": signals, "quant": quant,
             "book_click": self.trade.fill.map(|(e, px)| json!({"ex": ex_name(e), "px": px})),
             "tradable": trade::TRADABLE.iter().map(|e| ex_name(*e)).collect::<Vec<_>>(),
         }).to_string()
@@ -266,7 +271,11 @@ impl App {
                 let t = self.eng.account.lock().unwrap().tpsl.iter().find(|t| t.ex == e && t.id == id).cloned().ok_or("TP/SL not found")?;
                 self.eng.cancel_tpsl(&t, ctx);
             }
-            "chart" => { let b = self.eng.base.clone(); self.chart.native_set(v, &b); }
+            "chart" => {
+                if let Some(l) = v["layout"].as_str() { self.layout = l.to_string(); }
+                let b = self.eng.base.clone();
+                self.chart.native_set(v, &b);
+            }
             "book" => self.book.native_set(v),
             "book_levels" => {
                 let scope = self.eng.venues().into_iter().collect();

@@ -129,10 +129,10 @@ pub fn hms(ms: i64) -> String {
 /// Written when it changes (checked once a second); env overrides (T1_BASE, ...) win on load.
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
-struct Settings { route: Option<depth::route::Policy>, prefs: Option<settings::Prefs>, lang: Option<String>, base: Option<String>, mode: Option<Market>, chart: Option<chart::Chart>, trade_ex: Option<Exchange>, off: Option<Vec<Exchange>>, auto: Option<HashMap<Exchange, engine::AutoTopUp>> }
+struct Settings { route: Option<depth::route::Policy>, prefs: Option<settings::Prefs>, lang: Option<String>, base: Option<String>, mode: Option<Market>, chart: Option<chart::Chart>, layout: Option<String>, cell: Option<usize>, charts: Option<Vec<(usize, chart::Chart)>>, trade_ex: Option<Exchange>, off: Option<Vec<Exchange>>, auto: Option<HashMap<Exchange, engine::AutoTopUp>> }
 
 #[derive(serde::Serialize)]
-struct SettingsRef<'a> { route: &'a depth::route::Policy, prefs: &'a settings::Prefs, lang: &'static str, base: &'a str, mode: Market, chart: &'a chart::Chart, trade_ex: Exchange, off: Vec<Exchange>, auto: std::collections::BTreeMap<String, engine::AutoTopUp> }
+struct SettingsRef<'a> { route: &'a depth::route::Policy, prefs: &'a settings::Prefs, lang: &'static str, base: &'a str, mode: Market, chart: &'a chart::Chart, layout: &'a str, cell: usize, charts: &'a [(usize, chart::Chart)], trade_ex: Exchange, off: Vec<Exchange>, auto: std::collections::BTreeMap<String, engine::AutoTopUp> }
 
 fn settings_path() -> Option<std::path::PathBuf> {
     Some(depth::sys::data_dir()?.join("settings.json"))
@@ -167,6 +167,26 @@ pub struct App {
     pending_restart: bool,
     /// order book column width (points), so the native header above it lines up
     book_w: f32,
+    /// chart layout ("1", "2", "2v", "3", "4"), the active cell (the toolbar drives `chart`, shown
+    /// there) and the other cells' charts with their slot
+    pub(crate) layout: String,
+    cell: usize,
+    others: Vec<(usize, chart::Chart)>,
+}
+
+/// Cell rects of a chart layout: "2" side by side, "2v" stacked, "3" one left and two right,
+/// "4" a 2x2 grid; anything else is one chart.
+fn layout_cells(layout: &str, r: egui::Rect) -> Vec<egui::Rect> {
+    let g = 6.0;
+    let (l, rt) = (egui::Rect::from_min_max(r.min, egui::pos2(r.center().x - g / 2.0, r.max.y)), egui::Rect::from_min_max(egui::pos2(r.center().x + g / 2.0, r.min.y), r.max));
+    let split = |x: egui::Rect| [egui::Rect::from_min_max(x.min, egui::pos2(x.max.x, x.center().y - g / 2.0)), egui::Rect::from_min_max(egui::pos2(x.min.x, x.center().y + g / 2.0), x.max)];
+    match layout {
+        "2" => vec![l, rt],
+        "2v" => split(r).to_vec(),
+        "3" => { let [b, c] = split(rt); vec![l, b, c] }
+        "4" => { let ([a, c], [b, d]) = (split(l), split(rt)); vec![a, b, c, d] }
+        _ => vec![r],
+    }
 }
 
 impl App {
@@ -206,12 +226,14 @@ impl App {
         let mut picker = picker::Picker::default();
         picker.open = env("T1_PICK").is_some();
         if let Some(tf) = env("T1_TF").and_then(|s| s.parse().ok()) { chart.tf = tf; }
+        let layout = env("T1_LAYOUT").or(st.layout).unwrap_or_else(|| "1".into());
         App {
             eng, prefs, settings: Default::default(), saved: (saved, Instant::now()), mode, chart, book: Default::default(), opt: Default::default(), picker, trade,
             rate: (Instant::now(), 0, 0.0),
             shot: env("T1_SHOT").map(|p| (p, env("T1_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(30.0))),
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
             route: st.route.clone().unwrap_or_default(), pending_base: None, pending_mode: None, pending_restart: false, book_w: 0.0,
+            layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(),
         }
     }
 
@@ -405,13 +427,70 @@ impl App {
         off.sort_by_key(|e| *e as u8);
         // sorted keys so an unchanged state serializes identically (no rewrite every second)
         let auto = self.eng.account.lock().unwrap().auto.iter().map(|(e, r)| (format!("{e:?}"), *r)).collect();
-        let s = SettingsRef { route: &self.route, prefs: &self.prefs, lang: lang_code(), base: &self.eng.base, mode: self.mode, chart: &self.chart, trade_ex: self.trade.ex, off, auto };
+        let s = SettingsRef { route: &self.route, prefs: &self.prefs, lang: lang_code(), base: &self.eng.base, mode: self.mode, chart: &self.chart, layout: &self.layout, cell: self.cell, charts: &self.others, trade_ex: self.trade.ex, off, auto };
         let Ok(json) = serde_json::to_string_pretty(&s) else { return };
         if json == self.saved.0 { return; }
         let Some(p) = settings_path() else { return };
         let tmp = p.with_extension("json.tmp");
         let ok = p.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::write(&tmp, &json).is_ok() && std::fs::rename(&tmp, &p).is_ok();
         if ok { self.saved.0 = json; } else { eprintln!("settings: cannot write {}", p.display()); }
+    }
+
+    /// Price alerts: live prices of every base with an armed alert (the one on screen from the
+    /// chart's own source, others from `Engine::watch`), checked for crossings.
+    pub(crate) fn alerts_tick(&mut self, a: &depth::agg::Agg) {
+        let base = self.eng.base.clone();
+        let mut bases = self.chart.alert_bases();
+        bases.retain(|b| *b != base);
+        self.eng.watch(&bases);
+        let mut px = self.eng.watched.lock().unwrap().clone();
+        if let Some(p) = self.chart.price(a, self.mode) { px.insert(base, p); }
+        self.chart.check_alerts(&px);
+    }
+
+    /// Charts for every cell of the layout: new cells copy the active chart with another interval.
+    fn fill_cells(&mut self, n: usize) {
+        if self.cell >= n {
+            if let Some(o) = self.others.iter_mut().find(|o| o.0 == 0) { std::mem::swap(&mut self.chart, &mut o.1); o.0 = self.cell; }
+            self.cell = 0;
+        }
+        for k in (0..n).filter(|k| *k != self.cell) {
+            if self.others.iter().any(|o| o.0 == k) { continue; }
+            let used: Vec<i64> = std::iter::once(self.chart.tf).chain(self.others.iter().map(|o| o.1.tf)).collect();
+            let mut c: chart::Chart = serde_json::to_value(&self.chart).ok().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+            c.tf = [240, 60, 15, 1440, 5, 1].into_iter().find(|tf| !used.contains(tf)).unwrap_or(60);
+            self.others.push((k, c));
+        }
+    }
+
+    /// The chart area: one chart, or the layout's cells (a press in a cell makes it the active one).
+    fn charts(&mut self, ui: &mut Ui, a: &depth::agg::Agg) {
+        let base = self.eng.base.clone();
+        let cells = layout_cells(&self.layout, ui.available_rect_before_wrap());
+        if cells.len() == 1 { self.chart.multi = false; return self.chart.show(ui, a, self.mode, &base); }
+        self.fill_cells(cells.len());
+        if let Some(p) = ui.input(|i| i.pointer.primary_pressed().then(|| i.pointer.interact_pos()).flatten()) {
+            if let Some(k) = cells.iter().position(|r| r.contains(p)).filter(|k| *k != self.cell) {
+                if let Some(o) = self.others.iter_mut().find(|o| o.0 == k) { std::mem::swap(&mut self.chart, &mut o.1); o.0 = self.cell; self.cell = k; }
+            }
+        }
+        for (k, r) in cells.iter().enumerate() {
+            let mut child = ui.new_child(egui::UiBuilder::new().id_salt(("cell", k)).max_rect(*r));
+            child.set_clip_rect(r.intersect(ui.clip_rect()));
+            if k == self.cell {
+                self.chart.multi = true;
+                self.chart.show(&mut child, a, self.mode, &base);
+            } else if let Some(o) = self.others.iter_mut().find(|o| o.0 == k) {
+                let c = &mut o.1;
+                c.multi = true;
+                c.lines = self.chart.lines.clone();
+                c.adopt_drawings(&self.chart);
+                c.show(&mut child, a, self.mode, &base);
+                self.chart.adopt_drawings(c);
+            }
+            let col = if k == self.cell { accent().linear_multiply(0.7) } else { line() };
+            ui.painter().rect_stroke(*r, 4, egui::Stroke::new(1.0, col), egui::StrokeKind::Outside);
+        }
     }
 
     pub fn frame(&mut self, ui: &mut Ui) {
@@ -500,8 +579,9 @@ impl App {
                 }));
                 self.chart.lines = lines;
             }
+            self.alerts_tick(&a);
             egui::CentralPanel::default().frame(card(10)).show(ui, |ui| {
-                if self.mode == Market::Option { self.opt.show(ui, &a) } else { self.chart.show(ui, &a, self.mode, &self.eng.base.clone()) }
+                if self.mode == Market::Option { self.opt.show(ui, &a) } else { self.charts(ui, &a) }
             });
         }
         if let Some(b) = self.pending_base.take() { new_base = Some(b); }
@@ -512,8 +592,11 @@ impl App {
             let b = new_base.unwrap_or_else(|| self.eng.base.clone());
             self.eng.start(&b, &ctx);
             if self.mode != Market::Perp && self.mode != Market::Spot { self.eng.ensure(self.mode); }
-            if switched { self.chart.reset_view(); }
-            if switched || self.chart.src.is_some_and(|e| self.eng.off.contains(&e)) { self.chart.src = None; }
+            let off = self.eng.off.clone();
+            for c in std::iter::once(&mut self.chart).chain(self.others.iter_mut().map(|o| &mut o.1)) {
+                if switched { c.reset_view(); }
+                if switched || c.src.is_some_and(|e| off.contains(&e)) { c.src = None; }
+            }
             if switched || self.book.src.is_some_and(|e| self.eng.off.contains(&e)) { self.book.src = None; }
             self.rate = (Instant::now(), 0, 0.0);
         }
@@ -524,6 +607,9 @@ impl App {
         if !self.hosted { if let Some(ex) = self.settings.show(&ctx, &mut self.prefs, self.trade.ex, &mut self.eng) { self.trade.ex = ex; self.trade.reset_price(); } }
         self.trade.confirm_orders = self.prefs.confirm;
         self.eng.ensure_tf(chart::native_tf(self.chart.tf) as u32, &ctx);
+        let n = layout_cells(&self.layout, egui::Rect::NOTHING).len();
+        let tfs: Vec<i64> = self.others.iter().filter(|o| o.0 < n).map(|o| o.1.tf).collect();
+        for tf in tfs { self.eng.ensure_tf(chart::native_tf(tf) as u32, &ctx); }
         if self.eng.wants_options.swap(false, std::sync::atomic::Ordering::Relaxed) { self.eng.ensure(Market::Option); }
     }
 }

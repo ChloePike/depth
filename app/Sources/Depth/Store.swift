@@ -26,7 +26,11 @@ final class Store {
         guard let h = handle, let p = t1_state(h) else { return }
         let data = Data(String(cString: p).utf8)
         t1_free(p)
-        if let s = try? JSONDecoder().decode(Snapshot.self, from: data) { state.apply(s) }
+        if let s = try? JSONDecoder().decode(Snapshot.self, from: data) {
+            state.apply(s)
+            if !s.chart.alerts.isEmpty { Notifier.shared.authorize() }
+            for f in s.fired { Notifier.shared.post(f.title, f.body) }
+        }
     }
 
     /// Send one action; returns the decoded reply object (or nil, with `lastError` set).

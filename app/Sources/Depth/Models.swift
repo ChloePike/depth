@@ -99,6 +99,8 @@ struct Snapshot: Decodable {
     var book = BookCtl()
     var signals: [SignalRow] = []
     var quant = QuantState()
+    /// price alerts that fired since the last poll
+    var fired: [Fired] = []
 
     init() {}
     init(from d: Decoder) throws {
@@ -108,9 +110,9 @@ struct Snapshot: Decodable {
         venues = v(.venues, venues); stats = v(.stats, stats); trade = v(.trade, trade); positions = v(.positions, positions)
         orders = v(.orders, orders); tpsl = v(.tpsl, tpsl); history = v(.history, history); wallets = v(.wallets, wallets)
         balances = v(.balances, balances); algos = v(.algos, algos); transferring = v(.transferring, transferring); binance_pm = v(.binance_pm, binance_pm); log = v(.log, log); keys = v(.keys, keys); prefs = v(.prefs, prefs)
-        route = v(.route, route); tradable = v(.tradable, tradable); book_click = v(.book_click, book_click); chart = v(.chart, chart); book = v(.book, book); signals = v(.signals, signals); quant = v(.quant, quant)
+        route = v(.route, route); tradable = v(.tradable, tradable); book_click = v(.book_click, book_click); chart = v(.chart, chart); book = v(.book, book); signals = v(.signals, signals); quant = v(.quant, quant); fired = v(.fired, fired)
     }
-    enum K: String, CodingKey { case base, mode, lang, langs, header, venues, stats, trade, positions, orders, tpsl, history, wallets, balances, algos, transferring, binance_pm, log, keys, prefs, route, tradable, book_click, chart, book, signals, quant }
+    enum K: String, CodingKey { case base, mode, lang, langs, header, venues, stats, trade, positions, orders, tpsl, history, wallets, balances, algos, transferring, binance_pm, log, keys, prefs, route, tradable, book_click, chart, book, signals, quant, fired }
 }
 
 struct Header: Decodable, Equatable {
@@ -221,6 +223,8 @@ struct Ticker: Decodable, Equatable, Identifiable { var base: String; var last: 
 /// Price clicked in the egui order book (a single venue's raw level).
 struct BookClick: Decodable, Equatable { var ex: String; var px: Double }
 
+struct Fired: Decodable { var title: String; var body: String }
+
 /// Chart controls (egui draws the chart; these drive it through the "chart" op).
 struct ChartCtl: Decodable, Equatable {
     struct Pane: Decodable, Equatable, Identifiable { var key: String; var label: String; var on: Bool; var id: String { key } }
@@ -229,11 +233,17 @@ struct ChartCtl: Decodable, Equatable {
     var tool: String?; var drawings = 0; var panned = false
     struct Ma: Decodable, Equatable { var n: Int; var col: String; var ema: Bool; var on: Bool }
     var mas: [Ma] = []; var magnet = true
+    struct Ind: Decodable, Equatable { var rsi = 14; var macd = [12, 26, 9]; var bb_n = 20; var bb_k = 2.0 }
+    struct Alert: Decodable, Equatable, Identifiable { var base: String; var i: Int; var px: Double?; var kind: String; var sound: String; var sound_name: String; var id: String { "\(base)/\(i)" } }
+    var ind = Ind(); var hide = false; var alert_sound = ""; var replay = "off"; var layout = "1"
+    /// (id, name) of every alert sound
+    var sounds: [[String]] = []; var alerts: [Alert] = []
     /// (minutes, label) pairs
     var intervals: [(Int, String)] { tfs.compactMap { p in if case .m(let m) = p.first, case .l(let l) = p.last { return (m, l) }; return nil } }
     static func == (a: ChartCtl, b: ChartCtl) -> Bool {
         a.tf == b.tf && a.src == b.src && a.venues == b.venues && a.panes == b.panes && a.ma == b.ma && a.heat == b.heat
             && a.liqmap == b.liqmap && a.sr == b.sr && a.walls == b.walls && a.mark == b.mark && a.breakouts == b.breakouts && a.vwap == b.vwap && a.bb == b.bb && a.cone == b.cone && a.perp == b.perp && a.tool == b.tool && a.mas == b.mas && a.magnet == b.magnet && a.drawings == b.drawings && a.panned == b.panned && a.tfs.count == b.tfs.count
+            && a.ind == b.ind && a.hide == b.hide && a.alert_sound == b.alert_sound && a.replay == b.replay && a.layout == b.layout && a.sounds == b.sounds && a.alerts == b.alerts
     }
 }
 /// one element of a [minutes, "label"] pair

@@ -5,6 +5,7 @@ import SwiftUI
 struct ChartBar: View {
     private var store: Store { Store.shared }
     @State private var maSettings = false
+    @State private var indSettings = false
 
     var body: some View {
         let c = store.state.chart
@@ -57,6 +58,7 @@ struct ChartBar: View {
                 Toggle(L("Moving averages"), isOn: Binding(get: { c.ma }, set: { chart(["ma": $0]) }))
                 Button(L("Moving average settings…")) { maSettings = true }
                 Toggle(L("Bollinger bands"), isOn: Binding(get: { c.bb }, set: { chart(["bb": $0]) }))
+                Button(L("RSI / MACD / Bollinger settings…")) { indSettings = true }
                 Toggle(L("Book heatmap"), isOn: Binding(get: { c.heat }, set: { chart(["heat": $0]) }))
                 if c.perp { Toggle(L("Liquidation map"), isOn: Binding(get: { c.liqmap }, set: { chart(["liqmap": $0]) })) }
             }
@@ -74,6 +76,7 @@ struct ChartBar: View {
         }
         .fixedSize()
         .popover(isPresented: $maSettings, arrowEdge: .bottom) { MaSettings(mas: c.mas) }
+        .popover(isPresented: $indSettings, arrowEdge: .bottom) { IndSettings(ind: c.ind) }
 
         ControlGroup {
             tool("hline", "minus", L("Horizontal line"), c)
@@ -81,15 +84,69 @@ struct ChartBar: View {
             tool("ray", "arrow.up.right", L("Ray"), c)
             tool("fib", "line.3.horizontal.decrease", L("Fibonacci retracement"), c)
             tool("rect", "rectangle", L("Rectangle"), c)
+            Menu {
+                moreTool("channel", "equal", L("Parallel channel"), c)
+                moreTool("text", "textformat", L("Text note"), c)
+                moreTool("measure", "ruler", L("Measure"), c)
+            } label: { Image(systemName: ["channel", "text", "measure"].contains(c.tool ?? "") ? "checkmark.circle.fill" : "ellipsis.circle") }
+            .menuIndicator(.hidden).help(L("More drawing tools"))
             if c.drawings > 0 {
+                Toggle(isOn: Binding(get: { c.hide }, set: { chart(["hide": $0]) })) { Image(systemName: c.hide ? "eye.slash" : "eye") }
+                    .toggleStyle(.button).help(L("Hide drawings"))
                 Button { chart(["clear_drawings": true]) } label: { Image(systemName: "trash") }.help("\(L("Clear drawings")) (\(c.drawings))")
             }
         }
         .fixedSize()
+        alertsMenu(c)
+        Toggle(isOn: Binding(get: { c.replay != "off" }, set: { chart(["replay": $0]) })) { Image(systemName: "backward.end.alt") }
+            .toggleStyle(.button).fixedSize().help(L("Bar replay: pick a bar, then play forward"))
+        Menu {
+            Picker(L("Layout"), selection: Binding(get: { c.layout }, set: { chart(["layout": $0]) })) {
+                ForEach(Self.layouts, id: \.0) { l in Label(L(l.2), systemImage: l.1).tag(l.0) }
+            }
+            .pickerStyle(.inline)
+        } label: { Image(systemName: Self.layouts.first { $0.0 == c.layout }?.1 ?? "rectangle") }
+        .menuIndicator(.hidden).fixedSize().help(L("Chart layout: the toolbar drives the highlighted chart"))
         if c.panned {
             Button { chart(["reset_view": true]) } label: { Label(L("Latest"), systemImage: "arrow.right.to.line") }
                 .help(L("Back to the live edge and default zoom"))
         }
+    }
+
+    static let layouts: [(String, String, String)] = [
+        ("1", "rectangle", "One chart"), ("2", "rectangle.split.2x1", "Two side by side"), ("2v", "rectangle.split.1x2", "Two stacked"),
+        ("3", "rectangle.split.3x1", "Three"), ("4", "rectangle.split.2x2", "Four"),
+    ]
+
+    private func moreTool(_ id: String, _ icon: String, _ title: String, _ c: ChartCtl) -> some View {
+        Button { chart(["tool": c.tool == id ? NSNull() : id]) } label: { Label(title, systemImage: c.tool == id ? "checkmark" : icon) }
+    }
+
+    /// Armed price alerts on every symbol (sound, remove) and the default sound of new ones.
+    @ViewBuilder private func alertsMenu(_ c: ChartCtl) -> some View {
+        Menu {
+            if c.alerts.isEmpty { Text(L("Right-click the chart or a line to add an alert")) }
+            ForEach(c.alerts) { a in
+                Menu("\(a.base)  \(a.px.map { String(format: "%.8g", $0) } ?? "-")  ·  \(a.sound_name)") {
+                    soundPicker(a.sound) { chart(["alert": ["base": a.base, "i": a.i, "sound": $0]]) }
+                    Divider()
+                    Button(L("Remove alert"), role: .destructive) { chart(["alert": ["base": a.base, "i": a.i, "off": true]]) }
+                }
+            }
+            Divider()
+            Menu(L("Sound of new alerts")) { soundPicker(c.alert_sound) { chart(["alert_sound": $0]) } }
+        } label: {
+            if c.alerts.isEmpty { Image(systemName: "bell") } else { Label("\(c.alerts.count)", systemImage: "bell.badge").labelStyle(.titleAndIcon) }
+        }
+        .menuIndicator(.hidden).fixedSize().help(L("Price alerts"))
+    }
+
+    private func soundPicker(_ cur: String, _ set: @escaping (String) -> Void) -> some View {
+        let c = store.state.chart
+        return Picker(L("Sound"), selection: Binding(get: { cur }, set: set)) {
+            ForEach(c.sounds, id: \.self) { s in Text(s.last ?? "").tag(s.first ?? "") }
+        }
+        .pickerStyle(.inline)
     }
 
     private func tool(_ id: String, _ icon: String, _ help: String, _ c: ChartCtl) -> some View {
@@ -170,6 +227,35 @@ struct MaSettings: View {
         .padding(14)
     }
     private func set(_ i: Int, _ v: [String: Any]) { Store.shared.call("chart", v.merging(["ma_line": i]) { a, _ in a }) }
+}
+
+/// RSI, MACD and Bollinger inputs.
+struct IndSettings: View {
+    let ind: ChartCtl.Ind
+    var body: some View {
+        Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
+            GridRow { Text("RSI"); num(ind.rsi) { ["rsi": $0] } }
+            GridRow {
+                Text("MACD")
+                HStack { ForEach(0..<3, id: \.self) { k in num(ind.macd[k]) { v in var m = ind.macd; m[k] = v; return ["macd": m] } } }
+            }
+            GridRow {
+                Text(L("Bollinger bands"))
+                HStack {
+                    num(ind.bb_n) { ["bb_n": $0] }
+                    Stepper(value: Binding(get: { ind.bb_k }, set: { set(["bb_k": $0]) }), in: 0.1...10, step: 0.1) { Text(String(format: "%.1f σ", ind.bb_k)).monospacedDigit() }
+                }
+            }
+        }
+        .controlSize(.small)
+        .padding(14)
+    }
+    private func num(_ v: Int, _ make: @escaping (Int) -> [String: Any]) -> some View {
+        Stepper(value: Binding(get: { v }, set: { set(make($0)) }), in: 1...500) {
+            TextField("", value: Binding(get: { v }, set: { set(make($0)) }), format: .number).frame(width: 44).multilineTextAlignment(.trailing)
+        }
+    }
+    private func set(_ v: [String: Any]) { Store.shared.call("chart", ["ind": v]) }
 }
 
 extension Color {

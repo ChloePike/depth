@@ -92,15 +92,44 @@ struct HeatCache {
 struct TexGeom { t0: i64, ms: i64, lo: i64, bins: usize, cols: usize }
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-enum Tool { HLine, Trend, Ray, Fib, Rect }
+enum Tool { HLine, Trend, Ray, Fib, Rect, Channel, Text, Measure }
 
 impl Tool {
-    fn id(self) -> &'static str { match self { Tool::HLine => "hline", Tool::Trend => "trend", Tool::Ray => "ray", Tool::Fib => "fib", Tool::Rect => "rect" } }
-    fn parse(s: &str) -> Option<Tool> { [Tool::HLine, Tool::Trend, Tool::Ray, Tool::Fib, Tool::Rect].into_iter().find(|t| t.id() == s) }
+    const ALL: [Tool; 8] = [Tool::HLine, Tool::Trend, Tool::Ray, Tool::Fib, Tool::Rect, Tool::Channel, Tool::Text, Tool::Measure];
+    fn id(self) -> &'static str {
+        match self {
+            Tool::HLine => "hline", Tool::Trend => "trend", Tool::Ray => "ray", Tool::Fib => "fib", Tool::Rect => "rect",
+            Tool::Channel => "channel", Tool::Text => "text", Tool::Measure => "measure",
+        }
+    }
+    fn parse(s: &str) -> Option<Tool> { Tool::ALL.into_iter().find(|t| t.id() == s) }
+    /// clicks needed to place it
+    fn points(self) -> usize { match self { Tool::HLine | Tool::Text => 1, Tool::Channel => 3, _ => 2 } }
 }
+
+/// `hot` part of a locked drawing: right-click opens its menu, nothing moves it.
+const LOCKED: u8 = 9;
+
+/// What the right-click menu is for: a drawing (index, focus its text field), or the empty plot (point).
+#[derive(Clone, Copy)]
+enum Menu { Drawing(usize, bool), Chart((i64, f64)) }
+
+/// Bar replay: bars after `at` are hidden (None = picking the start bar); while playing it steps
+/// `SPEEDS[speed]` bars per second.
+#[derive(Clone, Copy)]
+struct Replay { at: Option<i64>, playing: bool, speed: usize, last: f64 }
+const SPEEDS: [f64; 4] = [1.0, 3.0, 10.0, 30.0];
+impl Replay { fn new(at: Option<i64>, now: f64) -> Self { Replay { at, playing: false, speed: 0, last: now } } }
+
+/// Indicator inputs (TradingView defaults).
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Ind { pub rsi: usize, pub macd: [usize; 3], pub bb_n: usize, pub bb_k: f64 }
+impl Default for Ind { fn default() -> Self { Ind { rsi: 14, macd: [12, 26, 9], bb_n: 20, bb_k: 2.0 } } }
 
 /// A price line from the account: entry of a position or a resting order.
 /// Drawn dashed with a tag at the left edge ("tag | sub") and the price on the axis.
+#[derive(Clone)]
 pub struct ChartLine { pub price: f64, pub tag: String, pub sub: String, pub col: Color32 }
 
 /// One moving average line: period, color (0xRRGGBB), exponential instead of simple, shown.
@@ -191,13 +220,43 @@ fn dashed(painter: &egui::Painter, x0: f32, x1: f32, y: f32, col: Color32) {
 }
 
 /// A user drawing anchored in (bar time ms, price), so it survives timeframe changes.
-/// `col` 0xRRGGBB (0 = the accent), `dash` 0 solid / 1 dashed / 2 dotted.
+/// `col` 0xRRGGBB (0 = the accent), `dash` 0 solid / 1 dashed / 2 dotted; `c` is a channel's third
+/// point (on its parallel line), `text` a note's text; `alert` = armed price alert with this sound.
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-struct Drawing { tool: Tool, a: (i64, f64), b: (i64, f64), #[serde(default)] col: u32, #[serde(default)] dash: u8 }
+struct Drawing {
+    tool: Tool, a: (i64, f64), b: (i64, f64),
+    #[serde(default)] col: u32, #[serde(default)] dash: u8,
+    #[serde(default)] c: (i64, f64), #[serde(default)] text: String, #[serde(default)] locked: bool,
+    #[serde(default)] alert: Option<String>,
+}
 
 impl Drawing {
-    fn new(tool: Tool, a: (i64, f64), b: (i64, f64)) -> Self { Drawing { tool, a, b, col: 0, dash: 0 } }
+    fn new(tool: Tool, a: (i64, f64), b: (i64, f64)) -> Self { Drawing { tool, a, b, col: 0, dash: 0, c: a, text: String::new(), locked: false, alert: None } }
     fn color(&self) -> Color32 { if self.col == 0 { accent() } else { rgb(self.col) } }
+    /// the a-b line's price at time t (None when a and b share a time)
+    fn line_at(&self, t: i64) -> Option<f64> {
+        let (ta, tb) = (self.a.0, self.b.0);
+        (ta != tb).then(|| self.a.1 + (self.b.1 - self.a.1) * (t - ta) as f64 / (tb - ta) as f64)
+    }
+    /// a channel's parallel line, as a price offset from the a-b line
+    fn offset(&self) -> f64 { self.c.1 - self.line_at(self.c.0).unwrap_or(self.a.1) }
+    /// third point stored halfway along the parallel line, so its handle sits there
+    fn with_c(mut self, c: (i64, f64)) -> Self {
+        let off = c.1 - self.line_at(c.0).unwrap_or(self.a.1);
+        let mt = (self.a.0 + self.b.0) / 2;
+        self.c = (mt, self.line_at(mt).unwrap_or(self.a.1) + off);
+        self
+    }
+    fn alertable(&self) -> bool { matches!(self.tool, Tool::HLine | Tool::Trend | Tool::Ray) }
+    /// the line's price at time t, for alerts: a trend line only within its two points, a ray from its start on
+    fn level_at(&self, t: i64) -> Option<f64> {
+        match self.tool {
+            Tool::HLine => Some(self.a.1),
+            Tool::Trend if t >= self.a.0.min(self.b.0) && t <= self.a.0.max(self.b.0) => self.line_at(t),
+            Tool::Ray if (t - self.a.0).signum() * (self.b.0 - self.a.0).signum() >= 0 => self.line_at(t),
+            _ => None,
+        }
+    }
 }
 
 /// Swatches of the drawing context menu (TradingView's default palette row).
@@ -231,8 +290,14 @@ pub struct Chart {
     breakouts: bool,
     /// session VWAP with sigma bands
     vwap: bool,
-    /// Bollinger bands (20, 2) on the close
+    /// Bollinger bands on the close
     bb: bool,
+    /// indicator inputs
+    ind: Ind,
+    /// drawings hidden (alerts still fire)
+    hide: bool,
+    /// sound of new alerts
+    alert_sound: String,
     /// overlay defaults generation: settings from before 2 get the calmer defaults once
     #[serde(default)]
     style: u32,
@@ -252,8 +317,8 @@ pub struct Chart {
     /// last heatmap column time the walls were computed for, and the (bid, ask) walls shown
     #[serde(skip)] walls_at: (i64, Vec<(f64, f64)>, Vec<(f64, f64)>),
     #[serde(skip)] tool: Option<Tool>,
-    /// first point of a two-point drawing in progress
-    #[serde(skip)] pending: Option<(i64, f64)>,
+    /// points placed so far of the drawing in progress
+    #[serde(skip)] pending: Vec<(i64, f64)>,
     /// drawing part under the pointer last frame (index, 0 = point a, 1 = point b, 2 = whole), and
     /// the one being dragged: a drag that starts on a drawing edits it instead of panning
     #[serde(skip)] hot: Option<(usize, u8)>,
@@ -264,15 +329,24 @@ pub struct Chart {
     #[serde(skip)] committed: Option<(String, Vec<Drawing>)>,
     #[serde(skip)] undo: Vec<Vec<Drawing>>,
     #[serde(skip)] redo: Vec<Vec<Drawing>>,
-    /// drawing whose context menu (color, line style, delete) is open
-    #[serde(skip)] menu: Option<usize>,
+    /// open right-click menu and where it was opened
+    #[serde(skip)] menu: Option<(Menu, Pos2)>,
+    #[serde(skip)] replay: Option<Replay>,
+    /// last price seen per base, to detect alert crossings
+    #[serde(skip)] alert_px: std::collections::HashMap<String, f64>,
+    /// alerts that fired since the host last asked: (title, body)
+    #[serde(skip)] pub fired: Vec<(String, String)>,
+    /// banner of the last alert and until when it shows
+    #[serde(skip)] toast: Option<(String, std::time::Instant)>,
+    /// one cell of a multi-chart layout: the legend names the interval
+    #[serde(skip)] pub multi: bool,
 }
 
 impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: None, hot: None, drag: None, fling: 0.0, committed: None, undo: vec![], redo: vec![], menu: None, ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
             panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false)],
         }
     }
@@ -597,7 +671,7 @@ impl Chart {
             ui.centered_and_justified(|ui| ui.label(t("chart.loading")));
             return;
         };
-        let raw: Vec<Bar> = series.bars.iter().cloned().collect();
+        let mut raw: Vec<Bar> = series.bars.iter().cloned().collect();
         let mut bars = resample(&raw, self.tf);
         // native-interval history, resampled when the interval is built from a smaller one
         let nt = native_tf(self.tf);
@@ -606,6 +680,29 @@ impl Chart {
         let loading_tf = nt > 1 && tf_hist.is_none();
         if let (Some(h), Some(first)) = (tf_hist.as_deref(), raw.first()) { bars = stitch(h, bars, first.t, self.tf); }
         if bars.is_empty() { ui.centered_and_justified(|ui| ui.label(t("chart.empty"))); return; }
+        // bar replay: advance while playing, then hide every bar after the replay bar
+        let now = ui.input(|i| i.time);
+        let mut next_t = None;
+        if let Some(r) = self.replay.as_mut() {
+            if let (Some(mut at), true) = (r.at, r.playing) {
+                let step = 1.0 / SPEEDS[r.speed];
+                while now - r.last >= step {
+                    r.last += step;
+                    match bars.iter().find(|b| b.t > at) { Some(b) => at = b.t, None => { r.playing = false; break; } }
+                }
+                r.at = Some(at);
+                // one repaint per step, not every frame
+                if r.playing { ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((r.last + step - now).max(0.0))); }
+            } else { r.last = now; }
+            next_t = r.at.and_then(|at| bars.iter().find(|b| b.t > at).map(|b| b.t));
+        }
+        // live-only overlays (book, liquidation map, account lines, bid / ask) are off in a replay
+        let live = !self.replay.is_some_and(|r| r.at.is_some());
+        if let Some(at) = self.replay.and_then(|r| r.at) {
+            bars.truncate(bars.partition_point(|b| b.t <= at).max(1));
+            let end = bars.last().map_or(at, |b| b.t) + self.tf * 60_000;
+            raw.truncate(raw.partition_point(|b| b.t < end));
+        }
 
         let rect = ui.available_rect_before_wrap();
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
@@ -622,7 +719,7 @@ impl Chart {
         // a drag that starts on the price axis scales prices instead of panning time
         let on_axis = resp.interact_pointer_pos().is_some_and(|p| p.x > main.right() && p.y < main.bottom());
         // a drag that starts on a drawing (hit-tested last frame) moves it instead of the chart
-        if resp.drag_started() { self.drag = if on_axis { None } else { self.hot }; self.fling = 0.0; }
+        if resp.drag_started() { self.drag = if on_axis { None } else { self.hot.filter(|h| h.1 != LOCKED) }; self.fling = 0.0; }
         let editing = self.drag.is_some();
         let dt = ui.input(|i| i.stable_dt).clamp(0.001, 0.05);
         if resp.dragged() && !on_axis && !editing { self.right += resp.drag_delta().x / self.bar_w; }
@@ -722,7 +819,7 @@ impl Chart {
             painter.with_clip_rect(main_plot).image(tex, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         };
         // heatmap (cross-venue book, USDT) behind candles
-        if self.heat && self.src.is_none() {
+        if self.heat && self.src.is_none() && live {
             if let Some(h) = a.heat.get(&smarket) {
                 self.cache.update(h, self.tf, smarket);
                 // recorded live from the book: on long intervals it starts as the current bar only
@@ -731,7 +828,7 @@ impl Chart {
         }
         // estimated liquidation map: horizontal profile on the right edge of the price plot,
         // longs (below price) red, shorts (above) green, merged into ~2px rows
-        if self.liqmap && smarket == Market::Perp {
+        if self.liqmap && smarket == Market::Perp && live {
             // estimated from the 1m series whatever the interval: finer OI steps, same levels
             if let Some(m) = self.liq.get(&raw, 1) {
                 let row = ((hi - lo) / main_plot.height() as f64 * 2.0).max(m.bin);
@@ -760,7 +857,7 @@ impl Chart {
         // label moves up or down until it overlaps none of them (place())
         let last_bar = bars.last().unwrap();
         let last_ly = y(last_bar.c);
-        let ba = bid_ask(a, self.src, smarket, last_bar.c);
+        let ba = if live { bid_ask(a, self.src, smarket, last_bar.c) } else { None };
         let ba_rect = ba.map(|(bid, ask)| {
             let (ka, kb) = (t("tr.ask"), t("tr.bid"));
             let lw = painter.layout_no_wrap(ka.to_string(), prop(10.0), fg()).size().x.max(painter.layout_no_wrap(kb.to_string(), prop(10.0), fg()).size().x);
@@ -922,7 +1019,7 @@ impl Chart {
         }
         // liquidity walls: resting size that stood far above the book's typical level for most of
         // the last minute (heatmap columns), so walls neither flicker nor include flashed orders
-        if self.walls && self.src.is_none() {
+        if self.walls && self.src.is_none() && live {
             if let (Some(mid), Some(h)) = (a.mid(smarket), a.heat.get(&smarket)) {
                 let ts = h.cols.back().map_or(0, |c| c.0);
                 if ts != self.walls_at.0 {
@@ -966,7 +1063,10 @@ impl Chart {
             if pts.len() > 1 { painter.with_clip_rect(main_plot).add(egui::Shape::line(pts, Stroke::new(1.2, col))); }
         }
         if self.bb {
-            let bb = bollinger(&closes, 20, 2.0);
+            let bb = bollinger(&closes, self.ind.bb_n.max(1), self.ind.bb_k);
+            if let Some((m, w)) = bb.last().copied().flatten() {
+                legend3.push((format!("BB {} {}", self.ind.bb_n, self.ind.bb_k), format!("{} – {} – {}", fmt_px(m - w), fmt_px(m), fmt_px(m + w)), rgb(0x2962ff)));
+            }
             let pts = |f: &dyn Fn(f64, f64) -> f64| -> Vec<Pos2> { (i0..=i1).filter_map(|i| { let (m, w) = bb[i]?; Some(pos2(fr.x(i as f32), y(f(m, w)))) }).collect() };
             let (up_, mid, lo_) = (pts(&|m, w| m + w), pts(&|m, _| m), pts(&|m, w| m - w));
             let clip = painter.with_clip_rect(main_plot);
@@ -1006,7 +1106,7 @@ impl Chart {
         }
 
         // account lines: positions and resting orders of this symbol
-        for l in &self.lines {
+        for l in self.lines.iter().filter(|_| live) {
             if !(l.price > lo && l.price < hi) { continue; }
             let ly = y(l.price);
             dashed(&painter, main.left(), main.right(), ly, l.col.linear_multiply(0.8));
@@ -1036,7 +1136,7 @@ impl Chart {
         painter.rect_filled(lab, 3, lc);
         painter.text(pos2(lab.left() + 6.0, ly), Align2::LEFT_CENTER, fmt_px(last.c), mono(11.5), Color32::WHITE);
         let left_ms = last.t + self.tf * 60_000 - depth::now_ms();
-        painter.text(pos2(lab.left() + 6.0, ly + 15.0), Align2::LEFT_CENTER, countdown(left_ms), mono(10.5), Color32::from_white_alpha(210));
+        if live { painter.text(pos2(lab.left() + 6.0, ly + 15.0), Align2::LEFT_CENTER, countdown(left_ms), mono(10.5), Color32::from_white_alpha(210)); }
         if let (Some((bid, ask)), Some(bx)) = (ba, ba_rect) {
             let (ka, kb) = (t("tr.ask"), t("tr.bid"));
             let w = bx.width();
@@ -1049,7 +1149,7 @@ impl Chart {
         }
 
         // mark price: the charted venue's, or the OI-weighted mark across perp venues (USDT) on the aggregate
-        if self.mark && smarket == Market::Perp {
+        if self.mark && smarket == Market::Perp && live {
             let mark = match self.src {
                 Some(e) => a.venues.get(&(e, Market::Perp)).and_then(|v| v.mark),
                 None => {
@@ -1161,7 +1261,12 @@ impl Chart {
             painter.text(pos2(r.right() + 5.0, yy), Align2::LEFT_CENTER, v, mono(11.5), col).right() + 12.0
         };
         let y1 = main.top() + 12.0;
-        let mut lx = painter.text(pos2(main.left() + 8.0, y1), Align2::LEFT_CENTER, fmt_time_full(b.t), mono(11.5), mu()).right() + 12.0;
+        let mut lx = main.left() + 8.0;
+        if self.multi {
+            let tf = TFS.iter().find(|(m, _)| *m == self.tf).map_or("", |x| x.1);
+            lx = painter.text(pos2(lx, y1), Align2::LEFT_CENTER, tf, prop(12.5), fg()).right() + 10.0;
+        }
+        lx = painter.text(pos2(lx, y1), Align2::LEFT_CENTER, fmt_time_full(b.t), mono(11.5), mu()).right() + 12.0;
         for (k, v) in [("chart.o", b.o), ("chart.h", b.h), ("chart.l", b.l), ("chart.c", b.c)] { lx = kv(lx, y1, t(k), fmt_px(v), c); }
         lx = kv(lx, y1, t("chart.chg"), format!("{chg:+.2}%"), c);
         kv(lx, y1, t("chart.range"), format!("{range:.2}%"), c);
@@ -1182,6 +1287,49 @@ impl Chart {
         if loading_tf {
             painter.text(pos2(main.left() + 8.0, main.top() + 76.0), Align2::LEFT_CENTER, t("chart.loading"), prop(11.0), WARN);
         }
+        self.replay_ui(ui, &resp, &painter, main_plot, &fr, hover.map(|_| bars[hi_idx].t), next_t, now);
+        if let Some((msg, until)) = self.toast.clone() {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if !left.is_zero() {
+                let g = painter.layout_no_wrap(msg, prop(13.0), Color32::WHITE);
+                let r = Rect::from_center_size(pos2(main_plot.center().x, main_plot.top() + 20.0), g.size() + vec2(24.0, 12.0));
+                painter.rect_filled(r, 6, accent());
+                painter.galley(r.center() - g.size() / 2.0, g, Color32::WHITE);
+                ui.ctx().request_repaint_after(left);
+            } else { self.toast = None; }
+        }
+    }
+
+    /// Replay: picking the start bar (vertical line under the pointer, click to start), then the
+    /// play / step / speed / exit bar at the bottom of the plot; Right arrow steps one bar.
+    #[allow(clippy::too_many_arguments)]
+    fn replay_ui(&mut self, ui: &mut Ui, resp: &egui::Response, painter: &egui::Painter, plot: Rect, fr: &Frame, hover_t: Option<i64>, next_t: Option<i64>, now: f64) {
+        let Some(r) = self.replay.as_mut() else { return };
+        if r.at.is_none() {
+            if let (Some(p), Some(ht)) = (resp.hover_pos().filter(|p| plot.contains(*p)), hover_t) {
+                let x = fr.x(fr.idx(p.x).round());
+                painter.vline(x, plot.top()..=plot.bottom(), Stroke::new(1.5, accent()));
+                painter.rect_filled(Rect::from_min_max(pos2(x, plot.top()), plot.right_bottom()), 0, panel().gamma_multiply(0.6));
+                if resp.clicked() { r.at = Some(ht); r.last = now; self.right = 0.0; }
+            }
+        } else if resp.hovered() && ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+            if let Some(n) = next_t { r.at = Some(n); }
+        }
+        let bar = Rect::from_center_size(pos2(plot.center().x, plot.bottom() - 24.0), vec2(if r.at.is_some() { 236.0 } else { 300.0 }, 32.0));
+        painter.rect_filled(bar, 8, panel2());
+        painter.rect_stroke(bar, 8, Stroke::new(1.0, line()), egui::StrokeKind::Inside);
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(10.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        let mut exit = false;
+        if r.at.is_some() {
+            if child.button(if r.playing { "❚❚" } else { "▶" }).on_hover_text(t("replay.play")).clicked() { r.playing = !r.playing; r.last = now; }
+            if child.button("▶|").on_hover_text(t("replay.step")).clicked() { if let Some(n) = next_t { r.at = Some(n); } }
+            if child.button(format!("{}x", SPEEDS[r.speed])).on_hover_text(t("replay.speed")).clicked() { r.speed = (r.speed + 1) % SPEEDS.len(); }
+            child.label(RichText::new(t("replay.title")).color(mu()));
+        } else {
+            child.label(RichText::new(t("replay.pick")).color(fg()));
+        }
+        child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if ui.button("✕").on_hover_text(t("replay.exit")).clicked() { exit = true; } });
+        if exit { self.replay = None; }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1309,18 +1457,19 @@ impl Chart {
             // oscillators run over every loaded bar so the left edge is warmed up
             Pane::Rsi => {
                 let closes: Vec<f64> = bars.iter().map(|b| b.c).collect();
-                let v = rsi(&closes, 14);
+                let v = rsi(&closes, self.ind.rsi.max(1));
                 let (lo, hi_) = (0.0, 100.0);
                 let (y70, y30) = (y_of(70.0, lo, hi_, inner), y_of(30.0, lo, hi_, inner));
                 painter.rect_filled(Rect::from_x_y_ranges(r.left()..=r.right(), y70..=y30), 0, PURPLE.gamma_multiply(0.07));
                 for yy in [y70, y30, y_of(50.0, lo, hi_, inner)] { painter.hline(r.left()..=r.right(), yy, Stroke::new(1.0, super::theme::line())); }
                 line((i0..=i1).filter_map(|i| Some((i - i0, v[i]?))).collect(), lo, hi_, PURPLE, false);
-                if let Some(x) = v[hi] { label(format!("14  {x:.2}"), PURPLE, lx); }
+                if let Some(x) = v[hi] { label(format!("{}  {x:.2}", self.ind.rsi), PURPLE, lx); }
                 axis(lo, hi_, &|x| format!("{x:.0}"));
             }
             Pane::Macd => {
                 let closes: Vec<f64> = bars.iter().map(|b| b.c).collect();
-                let m = macd(&closes, 12, 26, 9);
+                let [mf, ms, mg] = self.ind.macd.map(|x| x.max(1));
+                let m = macd(&closes, mf, ms, mg);
                 let seen: Vec<(f64, f64, f64)> = m[i0..=i1].iter().flatten().copied().collect();
                 if seen.is_empty() { return None; }
                 let max = seen.iter().fold(0.0f64, |a, (l, s, h)| a.max(l.abs()).max(s.abs()).max(h.abs())).max(1e-12);
@@ -1340,7 +1489,7 @@ impl Chart {
                 line((i0..=i1).filter_map(|i| Some((i - i0, m[i]?.1))).collect(), lo, hi_, rgb(0xff6d00), false);
                 if let Some((l, s, h)) = m[hi] {
                     let f = |v: f64| fmt_dp(v, (3.0 - max.log10().floor()).clamp(0.0, 8.0) as usize);
-                    lx = label("12 26 9".into(), mu(), lx);
+                    lx = label(format!("{mf} {ms} {mg}"), mu(), lx);
                     lx = label(f(h), if h >= 0.0 { up() } else { dn() }, lx);
                     lx = label(f(l), rgb(0x2962ff), lx);
                     label(f(s), rgb(0xff6d00), lx);
@@ -1392,9 +1541,10 @@ impl Chart {
         self.menu = None;
     }
 
-    /// Place, draw, edit and delete drawings. Click places points for the armed tool; drag a
-    /// handle to move that point or the drawing's body to move all of it; right-click or Delete
-    /// removes the drawing under the pointer; Escape disarms.
+    /// Place, draw, edit and delete drawings. Click places points for the armed tool (one for a
+    /// horizontal line or a note, three for a channel, two otherwise); drag a handle to move that
+    /// point or the body to move all of it; right-click opens the drawing's menu (color, style,
+    /// alert, lock, delete) or, on the empty plot, the chart menu; Delete removes; Escape disarms.
     #[allow(clippy::too_many_arguments)]
     fn drawings_ui(&mut self, ui: &Ui, resp: &egui::Response, painter: &egui::Painter, bars: &[Bar], fr: &Frame, main: Rect, ps: PScale, base: &str) {
         let ms = self.tf * 60_000;
@@ -1402,19 +1552,28 @@ impl Chart {
         let y = |v: f64| ps.y(v);
         let to_screen = |(t, p): (i64, f64)| pos2(fr.x(idx_of(bars, t, ms)), y(p));
         let to_point = |p: Pos2| (time_of(bars, fr.idx(p.x), ms), ps.v(p.y));
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) { self.tool = None; self.pending = None; self.menu = None; }
-        self.undo_redo(ui, base);
+        let typing = ui.ctx().egui_wants_keyboard_input();
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) { self.tool = None; self.pending.clear(); }
+        if !typing { self.undo_redo(ui, base); }
 
-        let list = self.drawings.entry(base.to_string()).or_default();
         let ptr = resp.hover_pos().filter(|p| plot.contains(*p));
+        let (hidden, sound) = (self.hide, self.alert_sound.clone());
+        let list = self.drawings.entry(base.to_string()).or_default();
+        // a channel's middle handle: halfway along its parallel line
+        let mid_c = |d: &Drawing| ((d.a.0 + d.b.0) / 2, (d.a.1 + d.b.1) / 2.0 + d.offset());
 
         // editing: the part grabbed at drag start follows the pointer
         if let (Some((i, part)), true) = (self.drag, resp.dragged()) {
             if let Some(d) = list.get_mut(i) {
                 let delta = resp.drag_delta();
                 let mv = |pt: (i64, f64)| to_point(to_screen(pt) + delta);
-                match part { 0 => d.a = mv(d.a), 1 => d.b = mv(d.b), _ => { d.a = mv(d.a); d.b = mv(d.b); } }
-                if d.tool == Tool::HLine { d.b = d.a; }
+                match part {
+                    0 => d.a = mv(d.a),
+                    1 => d.b = mv(d.b),
+                    3 => { let m = mid_c(d); d.c = (m.0, mv(m).1); }
+                    _ => { d.a = mv(d.a); d.b = mv(d.b); if d.tool == Tool::Channel { d.c = mv(d.c); } }
+                }
+                if matches!(d.tool, Tool::HLine | Tool::Text) { d.b = d.a; }
             }
         }
 
@@ -1423,64 +1582,127 @@ impl Chart {
             let (a, b) = (to_screen(d.a), to_screen(d.b));
             match d.tool {
                 Tool::HLine => vec![(pos2(main.left(), a.y), pos2(main.right(), a.y))],
-                Tool::Trend => vec![(a, b)],
+                Tool::Trend | Tool::Measure => vec![(a, b)],
                 Tool::Ray => { let dir = b - a; let k = if dir.length() > 0.0 { 4000.0 / dir.length() } else { 0.0 }; vec![(a, a + dir * k)] }
                 Tool::Rect => { let r = Rect::from_two_pos(a, b); vec![(r.left_top(), r.right_top()), (r.right_top(), r.right_bottom()), (r.right_bottom(), r.left_bottom()), (r.left_bottom(), r.left_top())] }
                 Tool::Fib => FIB.iter().map(|f| { let yy = y(d.b.1 + (d.a.1 - d.b.1) * f); (pos2(a.x.min(b.x), yy), pos2(a.x.max(b.x), yy)) }).collect(),
+                Tool::Channel => { let o = d.offset(); vec![(a, b), (to_screen((d.a.0, d.a.1 + o)), to_screen((d.b.0, d.b.1 + o)))] }
+                Tool::Text => vec![],
             }
         };
-        // part under the pointer: a handle first, then the nearest line (or a rectangle's inside)
-        let hot = ptr.filter(|_| self.tool.is_none()).and_then(|p| {
-            for (i, d) in list.iter().enumerate().rev() {
-                if d.tool == Tool::HLine { continue; }
-                for (k, q) in [(0u8, d.a), (1, d.b)] { if (to_screen(q) - p).length() < 7.0 { return Some((i, k)); } }
+        let note = |d: &Drawing| painter.layout_no_wrap(if d.text.is_empty() { t("draw.text_hint").to_string() } else { d.text.clone() }, prop(13.0), d.color());
+        let note_rect = |d: &Drawing, g: &egui::Galley| { let a = to_screen(d.a); Rect::from_min_size(pos2(a.x, a.y - g.size().y), g.size()).expand(4.0) };
+        let handles = |d: &Drawing| -> Vec<(u8, Pos2)> {
+            match d.tool {
+                Tool::HLine | Tool::Text => vec![],
+                Tool::Channel => vec![(0, to_screen(d.a)), (1, to_screen(d.b)), (3, to_screen(mid_c(d)))],
+                _ => vec![(0, to_screen(d.a)), (1, to_screen(d.b))],
+            }
+        };
+        // part under the pointer: a handle first, then the nearest line (or a box's inside); locked
+        // drawings only answer right-clicks
+        let hot = ptr.filter(|_| self.tool.is_none() && !hidden).and_then(|p| {
+            for (i, d) in list.iter().enumerate().rev().filter(|(_, d)| !d.locked) {
+                for (k, q) in handles(d) { if (q - p).length() < 7.0 { return Some((i, k)); } }
             }
             list.iter().enumerate().filter_map(|(i, d)| {
                 let dist = segs(d).iter().map(|(a, b)| dist_to_segment(p, *a, *b)).fold(f32::MAX, f32::min);
-                let inside = d.tool == Tool::Rect && Rect::from_two_pos(to_screen(d.a), to_screen(d.b)).contains(p);
+                let inside = match d.tool {
+                    Tool::Rect | Tool::Measure => Rect::from_two_pos(to_screen(d.a), to_screen(d.b)).contains(p),
+                    Tool::Text => note_rect(d, &note(d)).contains(p),
+                    _ => false,
+                };
                 (dist < 6.0 || inside).then_some((i, if inside { 5.9 } else { dist }))
-            }).min_by(|x, z| x.1.total_cmp(&z.1)).map(|(i, _)| (i, 2))
+            }).min_by(|x, z| x.1.total_cmp(&z.1)).map(|(i, _)| (i, if list[i].locked { LOCKED } else { 2 }))
         });
         let hot = self.drag.or(hot);
 
-        if let (Some(tool), true, Some(p)) = (self.tool, resp.clicked(), resp.interact_pointer_pos().filter(|p| plot.contains(*p))) {
-            let pt = to_point(p);
-            match (tool, self.pending) {
-                (Tool::HLine, _) => { list.push(Drawing::new(tool, pt, pt)); self.tool = None; }
-                (_, None) => self.pending = Some(pt),
-                (_, Some(a)) => { list.push(Drawing::new(tool, a, pt)); self.tool = None; self.pending = None; }
+        let click = resp.interact_pointer_pos().filter(|p| plot.contains(*p));
+        if let (Some(tool), true, Some(p)) = (self.tool, resp.clicked(), click) {
+            self.pending.push(to_point(p));
+            if self.pending.len() >= tool.points() {
+                let pts = std::mem::take(&mut self.pending);
+                let mut d = Drawing::new(tool, pts[0], *pts.get(1).unwrap_or(&pts[0]));
+                if let Some(c) = pts.get(2) { d = d.with_c(*c); }
+                list.push(d);
+                self.tool = None;
+                // a note is typed right away
+                if tool == Tool::Text { self.menu = Some((Menu::Drawing(list.len() - 1, true), p)); }
             }
-        } else if let (Some((i, _)), None) = (hot, self.drag) {
-            if resp.secondary_clicked() { self.menu = Some(i); }
-            if ui.input(|x| x.key_pressed(egui::Key::Delete) || x.key_pressed(egui::Key::Backspace)) {
+        } else if resp.secondary_clicked() {
+            if self.tool.is_some() { self.tool = None; self.pending.clear(); }
+            else if let Some(p) = click {
+                self.menu = Some((match hot { Some((i, _)) => Menu::Drawing(i, false), None => Menu::Chart(to_point(p)) }, p));
+            }
+        } else if let (Some((i, part)), None, false) = (hot, self.drag, typing) {
+            if part != LOCKED && ui.input(|x| x.key_pressed(egui::Key::Delete) || x.key_pressed(egui::Key::Backspace)) {
                 list.remove(i);
                 self.hot = None;
+                self.menu = None;
                 return;
             }
         }
-        if let Some(i) = self.menu.filter(|i| *i < list.len()) {
-            let shown = resp.context_menu(|ui| {
-                ui.set_min_width(170.0);
-                let d = &mut list[i];
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    for c in DRAW_COLORS {
-                        let (r, sw) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
-                        ui.painter().rect_filled(r.shrink(1.0), 3, rgb(c));
-                        if d.color() == rgb(c) { ui.painter().rect_stroke(r, 3, Stroke::new(1.5, fg()), egui::StrokeKind::Inside); }
-                        if sw.clicked() { d.col = c; }
+
+        // the right-click menu (egui's menu popup, so the sound submenu does not close it)
+        if let Some((m, at)) = self.menu {
+            let mut open = true;
+            let mut del = false;
+            egui::Popup::menu(resp).id(ui.id().with("chart_menu")).at_position(at).open_bool(&mut open)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                ui.set_min_width(200.0);
+                match m {
+                    Menu::Drawing(i, focus) => {
+                        let Some(d) = list.get_mut(i) else { ui.close(); return };
+                        if d.tool == Tool::Text {
+                            let r = ui.add(egui::TextEdit::singleline(&mut d.text).hint_text(t("draw.text_hint")).desired_width(200.0));
+                            if focus { r.request_focus(); }
+                            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) { ui.close(); }
+                        }
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            for c in DRAW_COLORS {
+                                let (r, sw) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
+                                ui.painter().rect_filled(r.shrink(1.0), 3, rgb(c));
+                                if d.color() == rgb(c) { ui.painter().rect_stroke(r, 3, Stroke::new(1.5, fg()), egui::StrokeKind::Inside); }
+                                if sw.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { d.col = c; }
+                            }
+                        });
+                        if !matches!(d.tool, Tool::Text | Tool::Measure) {
+                            ui.horizontal(|ui| {
+                                for (k, lab) in [(0u8, "draw.solid"), (1, "draw.dashed"), (2, "draw.dotted")] {
+                                    if ui.selectable_label(d.dash == k, t(lab)).clicked() { d.dash = k; }
+                                }
+                            });
+                        }
+                        if d.alertable() {
+                            ui.separator();
+                            let mut on = d.alert.is_some();
+                            if ui.checkbox(&mut on, t("alert.on")).on_hover_text(t("alert.tip")).changed() { d.alert = on.then(|| sound.clone()); }
+                            if let Some(s) = &mut d.alert { sound_menu(ui, s); }
+                        }
+                        ui.separator();
+                        ui.checkbox(&mut d.locked, t("draw.lock"));
+                        if ui.button(t("draw.delete")).clicked() { del = true; ui.close(); }
+                        if focus { self.menu = Some((Menu::Drawing(i, false), at)); }
                     }
-                });
-                ui.horizontal(|ui| {
-                    for (k, lab) in [(0u8, "draw.solid"), (1, "draw.dashed"), (2, "draw.dotted")] {
-                        if ui.selectable_label(d.dash == k, t(lab)).clicked() { d.dash = k; }
+                    Menu::Chart((ts, px)) => {
+                        if ui.button(format!("{}  {}", t("alert.add_at"), fmt_px(px))).clicked() {
+                            let mut d = Drawing::new(Tool::HLine, (ts, px), (ts, px));
+                            d.alert = Some(sound.clone());
+                            list.push(d);
+                            ui.close();
+                        }
+                        if ui.button(format!("{}  {}", t("draw.hline_at"), fmt_px(px))).clicked() { list.push(Drawing::new(Tool::HLine, (ts, px), (ts, px))); ui.close(); }
+                        if ui.button(t("replay.from_here")).clicked() { self.replay = Some(Replay::new(Some(ts), ui.input(|i| i.time))); ui.close(); }
+                        ui.separator();
+                        if ui.button(t("chart.reset")).clicked() { self.right = 0.0; self.bar_w = 7.0; self.y_range = None; ui.close(); }
                     }
-                });
-                ui.separator();
-                if ui.button(t("draw.delete")).clicked() { list.remove(i); ui.close(); }
+                }
             });
-            if shown.is_none() { self.menu = None; }
-        } else { self.menu = None; }
+            if del { if let Some((Menu::Drawing(i, _), _)) = self.menu { if i < list.len() { list.remove(i); } } }
+            if !open || del { self.menu = None; }
+        }
+        if hidden { self.hot = None; return; }
 
         let clip = painter.with_clip_rect(plot);
         let draw = |d: &Drawing, emph: bool, alpha: f32| {
@@ -1511,39 +1733,120 @@ impl Chart {
                     }
                     clip.extend(egui::Shape::dashed_line(&[a, b], Stroke::new(1.0, mu().linear_multiply(0.6 * alpha)), 4.0, 4.0));
                 }
+                Tool::Channel => {
+                    let l = segs(d);
+                    let (p, q) = (l[0], l[1]);
+                    clip.add(egui::Shape::convex_polygon(vec![p.0, p.1, q.1, q.0], col.linear_multiply(0.08), Stroke::NONE));
+                    seg(p.0, p.1, s);
+                    seg(q.0, q.1, s);
+                    clip.extend(egui::Shape::dashed_line(&[p.0 + (q.0 - p.0) / 2.0, p.1 + (q.1 - p.1) / 2.0], Stroke::new(1.0, col.linear_multiply(0.6)), 4.0, 4.0));
+                }
+                Tool::Measure => {
+                    // TradingView's measure: change, percent, bars and time between the two points
+                    let r = Rect::from_two_pos(a, b);
+                    let dp = d.b.1 - d.a.1;
+                    let mc = if dp >= 0.0 { up() } else { dn() }.linear_multiply(alpha);
+                    clip.rect_filled(r, 0, mc.linear_multiply(0.15));
+                    clip.extend([egui::Shape::line_segment([pos2(r.center().x, a.y), pos2(r.center().x, b.y)], Stroke::new(1.2, mc)),
+                                 egui::Shape::line_segment([pos2(a.x, r.center().y), pos2(b.x, r.center().y)], Stroke::new(1.2, mc))]);
+                    let n = ((d.b.0 - d.a.0) as f64 / ms as f64).round() as i64;
+                    let pct = if d.a.1 != 0.0 { dp / d.a.1 * 100.0 } else { 0.0 };
+                    let txt = format!("{}{} ({pct:+.2}%)\n{n} {} · {}", if dp >= 0.0 { "+" } else { "" }, fmt_px(dp), t("draw.bars"), span(n.abs() * ms));
+                    let g = painter.layout(txt, mono(11.0), Color32::WHITE, 260.0);
+                    let below = b.y >= a.y;
+                    let lr = Rect::from_min_size(pos2(r.center().x - g.size().x / 2.0 - 6.0, if below { r.bottom() + 6.0 } else { r.top() - g.size().y - 14.0 }), g.size() + vec2(12.0, 8.0));
+                    // kept inside the plot so neither line is clipped
+                    let lr = lr.translate(vec2(0.0, (plot.top() + 2.0 - lr.top()).max(0.0) + (plot.bottom() - 2.0 - lr.bottom()).min(0.0)));
+                    clip.rect_filled(lr, 4, mc.linear_multiply(0.9));
+                    clip.galley(lr.min + vec2(6.0, 4.0), g, Color32::WHITE);
+                }
+                Tool::Text => {
+                    let g = note(d);
+                    let r = note_rect(d, &g);
+                    if emph { clip.rect_stroke(r, 3, Stroke::new(1.0, col.linear_multiply(0.6)), egui::StrokeKind::Inside); }
+                    clip.galley(r.min + vec2(4.0, 4.0), g, col);
+                }
                 _ => for (p0, p1) in segs(d) { seg(p0, p1, s); },
+            }
+            // an armed alert: bell tag where the line meets the axis side of the plot
+            if let (true, Some(lv)) = (d.alert.is_some(), d.level_at(bars.last().map_or(0, |b| b.t))) {
+                let ay = y(lv);
+                let g = painter.layout_no_wrap(format!("⏰ {}", fmt_px(lv)), mono(10.5), Color32::WHITE);
+                let r = Rect::from_min_size(pos2(main.right() - g.size().x - 14.0, ay - 9.0), vec2(g.size().x + 10.0, 18.0));
+                clip.rect_filled(r, 3, col);
+                clip.galley(r.min + vec2(5.0, (18.0 - g.size().y) / 2.0), g, Color32::WHITE);
             }
             if d.tool == Tool::HLine {
                 let lab = Rect::from_min_size(pos2(main.right() + 1.0, a.y - 9.0), vec2(AXIS_W - 2.0, 18.0));
                 painter.rect_filled(lab, 2, d.color());
                 painter.text(lab.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, fmt_px(d.a.1), mono(11.0), Color32::BLACK);
-            } else if emph {
+            } else if emph && !d.locked {
                 // handles show on hover: hollow, as in TradingView
-                for p in [a, b] { clip.circle(p, 4.0, panel2(), Stroke::new(1.5, d.color())); }
+                for (_, p) in handles(d) { clip.circle(p, 4.0, panel2(), Stroke::new(1.5, d.color())); }
             }
         };
         for (i, d) in list.iter().enumerate() { draw(d, hot.is_some_and(|h| h.0 == i), 1.0); }
         // preview of a drawing in progress
         if let (Some(tool), Some(p)) = (self.tool, ptr) {
             let pt = to_point(p);
-            match (tool, self.pending) {
-                (Tool::HLine, _) => draw(&Drawing::new(tool, pt, pt), false, 0.6),
-                (_, Some(a)) => draw(&Drawing::new(tool, a, pt), false, 0.6),
-                _ => {}
-            }
+            let pv = match self.pending.as_slice() {
+                [] if tool.points() == 1 => Some(Drawing::new(tool, pt, pt)),
+                [a] => Some(Drawing::new(tool, *a, pt).with_c(pt)),
+                [a, b, ..] => Some(Drawing::new(tool, *a, *b).with_c(pt)),
+                _ => None,
+            };
+            if let Some(d) = pv { draw(&d, false, 0.6); }
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
         match hot {
-            Some((_, 0 | 1)) => ui.ctx().set_cursor_icon(egui::CursorIcon::Grab),
-            Some(_) => { ui.ctx().set_cursor_icon(egui::CursorIcon::Move); if self.drag.is_none() { resp.clone().on_hover_text(t("draw.delete_tip")); } }
+            Some((_, 0 | 1 | 3)) => ui.ctx().set_cursor_icon(egui::CursorIcon::Grab),
+            Some((_, LOCKED)) => {}
+            Some(_) => { ui.ctx().set_cursor_icon(egui::CursorIcon::Move); if self.drag.is_none() && self.menu.is_none() { resp.clone().on_hover_text(t("draw.delete_tip")); } }
             None => {}
         }
         self.hot = hot;
     }
 
+    /// Multi-chart layout: every cell shows the same drawings and alerts; an edit in one reaches all.
+    pub fn adopt_drawings(&mut self, from: &Chart) {
+        if self.drawings != from.drawings { self.drawings = from.drawings.clone(); }
+        self.hide = from.hide;
+    }
+
+    /// Bases with an armed alert.
+    pub fn alert_bases(&self) -> Vec<String> {
+        self.drawings.iter().filter(|(_, v)| v.iter().any(|d| d.alert.is_some())).map(|(b, _)| b.clone()).collect()
+    }
+
+    /// The chart's live price for alerts: the composite, or the charted venue's own mid.
+    pub fn price(&self, a: &Agg, market: Market) -> Option<f64> {
+        let m = if market == Market::Margin || market == Market::Option { Market::Spot } else { market };
+        match self.src { None => a.mid(m), Some(e) => a.venues.get(&(e, m)).and_then(|v| v.mid()) }
+    }
+
+    /// Fires every armed alert whose line the price crossed since the last check (once: the alert
+    /// disarms, the line stays). `px` holds the latest price per base.
+    pub fn check_alerts(&mut self, px: &std::collections::HashMap<String, f64>) {
+        let ts = depth::now_ms();
+        for (base, list) in self.drawings.iter_mut() {
+            let Some(&p) = px.get(base) else { continue };
+            let Some(prev) = self.alert_px.insert(base.clone(), p) else { continue };
+            for d in list.iter_mut() {
+                let (Some(sound), Some(lv)) = (d.alert.clone(), d.level_at(ts)) else { continue };
+                if (prev < lv) == (p < lv) { continue; }
+                d.alert = None;
+                let title = format!("{base} {} {}", if p >= lv { "↑" } else { "↓" }, fmt_px(lv));
+                let body = format!("{} {}", t("alert.crossed"), fmt_px(p));
+                play_sound(&sound);
+                self.toast = Some((format!("⏰ {title} · {body}"), std::time::Instant::now() + std::time::Duration::from_secs(8)));
+                self.fired.push((title, body));
+            }
+        }
+    }
+
     /// Back to auto-fit at the live edge: a manual price range from one symbol is meaningless for
     /// another (BTC at 80k vs a coin at 0.3 would leave the chart empty).
-    pub fn reset_view(&mut self) { self.y_range = None; self.right = 0.0; self.pending = None; self.liq = LiqCache::default(); self.cache = HeatCache::default(); }
+    pub fn reset_view(&mut self) { self.y_range = None; self.right = 0.0; self.pending.clear(); self.liq = LiqCache::default(); self.cache = HeatCache::default(); }
 
     /// Chart controls for the native toolbar.
     pub fn native_json(&self, a: &Agg, market: Market, base: &str) -> serde_json::Value {
@@ -1551,6 +1854,12 @@ impl Chart {
         let mut venues: Vec<String> = a.series.keys().filter(|(e, m)| *m == market && e.is_some()).filter_map(|(e, _)| e.map(|e| format!("{e:?}"))).collect();
         venues.sort();
         let tool = self.tool.map(Tool::id);
+        // armed alerts, the current symbol first
+        let mut alerts: Vec<serde_json::Value> = self.drawings.iter().flat_map(|(b, l)| l.iter().enumerate().filter_map(move |(i, d)| {
+            let s = d.alert.as_ref()?;
+            Some(serde_json::json!({"base": b, "i": i, "px": d.level_at(depth::now_ms()), "kind": d.tool.id(), "sound": s, "sound_name": sound_name(s)}))
+        })).collect();
+        alerts.sort_by(|x, y| (x["base"].as_str() != Some(base), x["base"].as_str()).cmp(&(y["base"].as_str() != Some(base), y["base"].as_str())));
         serde_json::json!({
             "tf": self.tf, "tfs": TFS.iter().map(|(m, l)| serde_json::json!([m, l])).collect::<Vec<_>>(), "quick": TF_QUICK,
             "src": self.src.map(|e| format!("{e:?}")), "venues": venues,
@@ -1558,6 +1867,10 @@ impl Chart {
                 .map(|(p, on)| serde_json::json!({"key": p.key(), "label": t(p.key()), "on": on})).collect::<Vec<_>>(),
             "ma": self.ma, "heat": self.heat, "liqmap": self.liqmap, "sr": self.sr, "walls": self.walls, "mark": self.mark, "breakouts": self.breakouts, "vwap": self.vwap, "bb": self.bb, "cone": self.cone, "perp": market == Market::Perp,
             "mas": self.mas.iter().map(|m| serde_json::json!({"n": m.n, "col": format!("#{:06x}", m.col), "ema": m.ema, "on": m.on})).collect::<Vec<_>>(), "magnet": self.magnet,
+            "ind": self.ind, "hide": self.hide, "alert_sound": self.alert_sound,
+            "replay": match self.replay { None => "off", Some(Replay { at: None, .. }) => "pick", Some(_) => "on" },
+            "sounds": sounds(),
+            "alerts": alerts,
             "tool": tool, "drawings": self.drawings.get(base).map_or(0, |v| v.len()), "panned": self.right.abs() > 0.5 || self.bar_w != 7.0,
         })
     }
@@ -1579,6 +1892,24 @@ impl Chart {
         if let Some(b) = v["cone"].as_bool() { self.cone = b; }
         if let Some(b) = v["bb"].as_bool() { self.bb = b; }
         if let Some(b) = v["magnet"].as_bool() { self.magnet = b; }
+        if let Some(b) = v["hide"].as_bool() { self.hide = b; }
+        // {ind: {rsi?, macd?: [f, s, g], bb_n?, bb_k?}}
+        let ind = &v["ind"];
+        if let Some(n) = ind["rsi"].as_u64() { self.ind.rsi = (n as usize).clamp(1, 500); }
+        if let Some(m) = ind["macd"].as_array() { for (k, x) in m.iter().take(3).enumerate() { if let Some(n) = x.as_u64() { self.ind.macd[k] = (n as usize).clamp(1, 500); } } }
+        if let Some(n) = ind["bb_n"].as_u64() { self.ind.bb_n = (n as usize).clamp(1, 500); }
+        if let Some(k) = ind["bb_k"].as_f64() { self.ind.bb_k = k.clamp(0.1, 10.0); }
+        if let Some(b) = v["replay"].as_bool() { self.replay = b.then(|| Replay::new(None, 0.0)); }
+        if let Some(s) = v["alert_sound"].as_str() { self.alert_sound = s.to_string(); play_sound(s); }
+        if let Some(s) = v["play"].as_str() { play_sound(s); }
+        // {alert: {base, i, sound?: id, off?: true}}
+        let al = &v["alert"];
+        if let (Some(b), Some(i)) = (al["base"].as_str(), al["i"].as_u64()) {
+            if let Some(d) = self.drawings.get_mut(b).and_then(|l| l.get_mut(i as usize)) {
+                if let Some(s) = al["sound"].as_str() { d.alert = Some(s.to_string()); play_sound(s); }
+                if al["off"].as_bool() == Some(true) { d.alert = None; }
+            }
+        }
         // {ma_line: i, n?, col?: "#rrggbb", ema?, on?}
         if let Some(m) = v["ma_line"].as_u64().and_then(|i| self.mas.get_mut(i as usize)) {
             if let Some(n) = v["n"].as_u64() { m.n = (n as usize).clamp(1, 1000); }
@@ -1588,7 +1919,7 @@ impl Chart {
         }
         if v.get("tool").is_some() {
             self.tool = v["tool"].as_str().and_then(Tool::parse);
-            self.pending = None;
+            self.pending.clear();
         }
         if v["clear_drawings"].as_bool() == Some(true) { self.drawings.remove(base); }
         if v["reset_view"].as_bool() == Some(true) { self.right = 0.0; self.bar_w = 7.0; self.y_range = None; }
@@ -1639,19 +1970,33 @@ impl Chart {
                     }
                 }
                 ui.checkbox(&mut self.bb, t("chart.bb"));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("BB").color(mu()));
+                    ui.add(egui::DragValue::new(&mut self.ind.bb_n).range(1..=500).speed(0.3));
+                    ui.add(egui::DragValue::new(&mut self.ind.bb_k).range(0.1..=10.0).speed(0.05).fixed_decimals(1));
+                    ui.label(RichText::new("RSI").color(mu()));
+                    ui.add(egui::DragValue::new(&mut self.ind.rsi).range(1..=500).speed(0.3));
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("MACD").color(mu()));
+                    for x in self.ind.macd.iter_mut() { ui.add(egui::DragValue::new(x).range(1..=500).speed(0.3)); }
+                });
                 ui.checkbox(&mut self.magnet, t("chart.magnet"));
                 ui.checkbox(&mut self.heat, t("chart.heatmap"));
                 if market == Market::Perp { ui.checkbox(&mut self.liqmap, t("chart.liqmap")).on_hover_text(t("chart.liqmap_tip")); }
             });
             ui.separator();
-            for (tool, key) in [(Tool::HLine, "draw.hline"), (Tool::Trend, "draw.trend"), (Tool::Ray, "draw.ray"), (Tool::Fib, "draw.fib"), (Tool::Rect, "draw.rect")] {
+            for (tool, key) in [(Tool::HLine, "draw.hline"), (Tool::Trend, "draw.trend"), (Tool::Ray, "draw.ray"), (Tool::Channel, "draw.channel"), (Tool::Fib, "draw.fib"), (Tool::Rect, "draw.rect"), (Tool::Text, "draw.text"), (Tool::Measure, "draw.measure")] {
                 if tool_button(ui, Some(tool), self.tool == Some(tool)).on_hover_text(t(key)).clicked() {
                     self.tool = if self.tool == Some(tool) { None } else { Some(tool) };
-                    self.pending = None;
+                    self.pending.clear();
                 }
             }
             let n = self.drawings.get(base).map_or(0, |v| v.len());
             if n > 0 && tool_button(ui, None, false).on_hover_text(format!("{} ({n})", t("draw.clear"))).clicked() { self.drawings.remove(base); }
+            if n > 0 && tab(ui, t("draw.hide"), self.hide, 11.5).clicked() { self.hide = !self.hide; }
+            ui.separator();
+            if tab(ui, t("replay.title"), self.replay.is_some(), 11.5).clicked() { self.replay = if self.replay.is_some() { None } else { Some(Replay::new(None, 0.0)) }; }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if self.right.abs() > 0.5 || self.bar_w != 7.0 {
                     if tab(ui, t("chart.reset"), false, 11.5).clicked() { self.right = 0.0; self.bar_w = 7.0; }
@@ -1691,6 +2036,18 @@ fn tool_button(ui: &mut Ui, tool: Option<Tool>, on: bool) -> egui::Response {
             for (k, dy) in [-6.0f32, -2.0, 2.0, 6.0].into_iter().enumerate() { p.hline(egui::Rangef::new(c.x - 8.0, c.x + 8.0 - k as f32 * 2.0), c.y + dy, Stroke::new(1.2, col)); }
         }
         Some(Tool::Rect) => { p.rect_stroke(Rect::from_center_size(c, vec2(15.0, 11.0)), 1, s, egui::StrokeKind::Middle); }
+        Some(Tool::Channel) => {
+            p.line_segment([c + vec2(-8.0, 2.0), c + vec2(6.0, -7.0)], s);
+            p.line_segment([c + vec2(-6.0, 7.0), c + vec2(8.0, -2.0)], s);
+        }
+        Some(Tool::Text) => { p.text(c, Align2::CENTER_CENTER, "T", prop(14.0), col); }
+        Some(Tool::Measure) => {
+            p.vline(c.x, egui::Rangef::new(c.y - 7.0, c.y + 7.0), s);
+            p.line_segment([c + vec2(0.0, -7.0), c + vec2(-3.0, -4.0)], s);
+            p.line_segment([c + vec2(0.0, -7.0), c + vec2(3.0, -4.0)], s);
+            p.line_segment([c + vec2(0.0, 7.0), c + vec2(-3.0, 4.0)], s);
+            p.line_segment([c + vec2(0.0, 7.0), c + vec2(3.0, 4.0)], s);
+        }
         None => {
             // trash can
             p.hline(egui::Rangef::new(c.x - 6.0, c.x + 6.0), c.y - 5.0, s);
@@ -1701,6 +2058,57 @@ fn tool_button(ui: &mut Ui, tool: Option<Tool>, on: bool) -> egui::Response {
         }
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Alert sounds: "none", macOS system sounds ("sys:Glass") and the bundled ones ("depth:chime").
+const SYS_SOUNDS: [&str; 14] = ["Basso", "Blow", "Bottle", "Frog", "Funk", "Glass", "Hero", "Morse", "Ping", "Pop", "Purr", "Sosumi", "Submarine", "Tink"];
+/// (id, i18n key, wav)
+const OWN_SOUNDS: [(&str, &str, &[u8]); 4] = [
+    ("chime", "sound.chime", include_bytes!("../../assets/sounds/chime.wav")), ("bell", "sound.bell", include_bytes!("../../assets/sounds/bell.wav")),
+    ("alarm", "sound.alarm", include_bytes!("../../assets/sounds/alarm.wav")), ("pulse", "sound.pulse", include_bytes!("../../assets/sounds/pulse.wav")),
+];
+
+/// (id, display name) of every alert sound, bundled first.
+pub fn sounds() -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = OWN_SOUNDS.iter().map(|(k, key, _)| (format!("depth:{k}"), t(key).to_string())).collect();
+    if cfg!(target_os = "macos") { v.extend(SYS_SOUNDS.iter().map(|n| (format!("sys:{n}"), n.to_string()))); }
+    v.push(("none".into(), t("sound.none").to_string()));
+    v
+}
+
+fn sound_name(id: &str) -> String { sounds().into_iter().find(|(k, _)| k == id).map_or_else(|| id.to_string(), |(_, n)| n) }
+
+/// Plays an alert sound without blocking.
+/// ponytail: macOS only (afplay); Windows / Linux stay silent until a host plays it natively.
+pub fn play_sound(id: &str) {
+    if !cfg!(target_os = "macos") { return; }
+    let path = if let Some(n) = id.strip_prefix("sys:") {
+        Some(std::path::PathBuf::from(format!("/System/Library/Sounds/{n}.aiff")))
+    } else if let Some((k, _, wav)) = id.strip_prefix("depth:").and_then(|n| OWN_SOUNDS.iter().find(|(k, _, _)| *k == n)) {
+        // written once to the cache folder: afplay needs a file
+        depth::sys::cache_dir().map(|d| d.join("sounds").join(format!("{k}.wav"))).filter(|p| p.exists() || {
+            p.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::write(p, wav).is_ok()
+        })
+    } else { None };
+    if let Some(p) = path {
+        if let Ok(mut c) = std::process::Command::new("afplay").arg(p).spawn() { std::thread::spawn(move || { let _ = c.wait(); }); }
+    }
+}
+
+/// Sound picker as a submenu (keeps the right-click menu open); choosing one plays it.
+fn sound_menu(ui: &mut Ui, cur: &mut String) {
+    ui.menu_button(format!("{}: {}", t("alert.sound"), sound_name(cur)), |ui| {
+        for (id, name) in sounds() {
+            if ui.selectable_label(*cur == id, name).clicked() { play_sound(&id); *cur = id; }
+        }
+    });
+}
+
+/// "3d 4h", "2h 15m", "45m" for a duration in ms.
+fn span(ms: i64) -> String {
+    let m = ms / 60_000;
+    let (d, h, mm) = (m / 1440, m / 60 % 24, m % 60);
+    if d > 0 { format!("{d}d {h}h") } else if h > 0 { format!("{h}h {mm}m") } else { format!("{mm}m") }
 }
 
 /// One venue's line in the premium pane.
@@ -1795,6 +2203,32 @@ mod tests {
         // k = 2 / (3 + 1) = 0.5
         assert_eq!(e[3], Some(3.0));
         assert_eq!(Tool::parse("fib").map(Tool::id), Some("fib"));
+    }
+
+    #[test]
+    fn alerts_fire_once_on_crossing() {
+        let mut c = Chart::default();
+        let mut d = Drawing::new(Tool::HLine, (0, 100.0), (0, 100.0));
+        d.alert = Some("none".into());
+        c.drawings.insert("BTC".into(), vec![d]);
+        let px = |p: f64| std::collections::HashMap::from([("BTC".to_string(), p)]);
+        c.check_alerts(&px(99.0));
+        c.check_alerts(&px(99.5));
+        assert!(c.fired.is_empty());
+        c.check_alerts(&px(100.0));
+        assert_eq!(c.fired.len(), 1);
+        assert!(c.drawings["BTC"][0].alert.is_none());
+        c.check_alerts(&px(98.0));
+        assert_eq!(c.fired.len(), 1);
+        assert_eq!(c.alert_bases(), Vec::<String>::new());
+        // a ray alerts from its start on, a trend line only between its points
+        let r = Drawing::new(Tool::Ray, (1000, 10.0), (2000, 20.0));
+        assert_eq!((r.level_at(500), r.level_at(3000)), (None, Some(30.0)));
+        let t = Drawing { tool: Tool::Trend, ..r.clone() };
+        assert_eq!((t.level_at(1500), t.level_at(3000)), (Some(15.0), None));
+        // a channel keeps its third point halfway along the parallel line
+        let ch = Drawing::new(Tool::Channel, (0, 10.0), (100, 20.0)).with_c((100, 25.0));
+        assert_eq!((ch.c, ch.offset()), ((50, 20.0), 5.0));
     }
 
     #[test]

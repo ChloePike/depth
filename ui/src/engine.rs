@@ -180,6 +180,11 @@ pub struct Engine {
     streams: HashMap<Exchange, tokio::task::JoinHandle<()>>,
     /// result of the last "test connection" per venue: (ok, message)
     pub key_tests: Arc<Mutex<HashMap<Exchange, (bool, String)>>>,
+    /// price alerts on symbols not on screen: one venue's spot stream per base, on its own runtime
+    watch_rt: Option<tokio::runtime::Runtime>,
+    watching: HashMap<String, Vec<tokio::task::JoinHandle<()>>>,
+    /// last trade price per watched base (USDT)
+    pub watched: Arc<Mutex<HashMap<String, f64>>>,
 }
 
 impl Engine {
@@ -188,7 +193,7 @@ impl Engine {
             let mut a = Account::default();
             for ex in trade::TRADABLE { if let Some(k) = trade::keychain(ex) { a.keys.insert(ex, k); } }
             Arc::new(Mutex::new(a))
-        }, wants_options: Default::default(), off: Default::default(), acct_rt: None, acct_tx: None, streams: HashMap::new(), key_tests: Default::default() }
+        }, wants_options: Default::default(), off: Default::default(), acct_rt: None, acct_tx: None, streams: HashMap::new(), key_tests: Default::default(), watch_rt: None, watching: HashMap::new(), watched: Default::default() }
     }
 
     /// (Re)subscribe everything for `base`: spot + perp live and history, USDT/USD, heatmap sampling.
@@ -369,6 +374,35 @@ impl Engine {
 
         self.tx = Some(tx);
         self.rt = Some(rt);
+    }
+
+    /// Keeps a live price for each base in `bases` (alerts on symbols not on screen): the first
+    /// enabled of Binance / Bybit / OKX spot, trades only. Spot, because perp connectors also poll
+    /// open interest over REST every few seconds per symbol.
+    /// ponytail: spot last price (a few bp from the perp / composite), and a perp-only coin gets no
+    /// price; a venue-native mini-ticker subscription would cover both.
+    pub fn watch(&mut self, bases: &[String]) {
+        self.watching.retain(|b, hs| {
+            let keep = bases.contains(b);
+            if !keep { for h in hs.iter() { h.abort(); } }
+            keep
+        });
+        self.watched.lock().unwrap().retain(|b, _| bases.contains(b));
+        let Some(ex) = [Exchange::Binance, Exchange::Bybit, Exchange::Okx].into_iter().find(|e| !self.off.contains(e)) else { return };
+        let new: Vec<String> = bases.iter().filter(|b| !self.watching.contains_key(*b)).cloned().collect();
+        for b in &new {
+            let rt = self.watch_rt.get_or_insert_with(|| tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().expect("watch runtime"));
+            let _g = rt.enter();
+            let (tx, mut rx) = unbounded_channel::<Msg>();
+            let mut hs = ex::spawn(ex, &Sub { market: Market::Spot, base: b.clone(), quote: "USDT".into() }, tx);
+            let (px, base) = (self.watched.clone(), b.clone());
+            hs.push(rt.spawn(async move {
+                while let Some(m) = rx.recv().await {
+                    if let Event::Trade { px: p, .. } = m.ev { if p > 0.0 { px.lock().unwrap().insert(base.clone(), p); } }
+                }
+            }));
+            self.watching.insert(b.clone(), hs);
+        }
     }
 
     pub fn venues(&self) -> Vec<Exchange> { Exchange::ALL.into_iter().filter(|e| !self.off.contains(e)).collect() }
