@@ -116,6 +116,9 @@ fn on_msg(e: &Emit, sym: &str, mult: f64, st: &mut St, gap: &mpsc::UnboundedSend
                 }
                 st.seq = d["seqId"].as_i64();
                 e.send(sym, ts, Event::Book { snapshot, bids: lv(&d["bids"]), asks: lv(&d["asks"]) });
+                // the 4th field is the number of orders on the level: drives the L3 inference (agg)
+                let cnt = |x: &Value| x.as_array().map(|a| a.iter().map(|l| (num(&l[0]), num(&l[1]) * mult, num(&l[3]) as u32)).collect::<Vec<_>>()).unwrap_or_default();
+                e.send(sym, ts, Event::Counts { snapshot, bids: cnt(&d["bids"]), asks: cnt(&d["asks"]) });
             }
             "bbo-tbt" => {
                 let (b, a) = (&d["bids"][0], &d["asks"][0]);

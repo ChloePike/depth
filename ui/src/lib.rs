@@ -785,6 +785,7 @@ impl App {
         let tfs: Vec<i64> = self.others.iter().filter(|o| o.0 < n).map(|o| o.1.tf).collect();
         for tf in tfs { self.eng.ensure_tf(chart::native_tf(tf) as u32, &ctx); }
         if self.eng.wants_options.swap(false, std::sync::atomic::Ordering::Relaxed) { self.eng.ensure(Market::Option); }
+        if self.eng.wants_l3.swap(false, std::sync::atomic::Ordering::Relaxed) { self.eng.ensure_l3(); }
     }
 }
 

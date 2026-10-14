@@ -1,5 +1,6 @@
 //! Depth data layer: every exchange feed is normalized into `Msg` and sent over one channel.
 pub mod agg;
+pub mod l3;
 pub mod algo;
 pub mod ex;
 pub mod insure;
@@ -65,6 +66,12 @@ pub enum Event {
     OptionInfo { underlying: String, expiry_ms: i64, strike: f64, call: bool },
     /// annualized borrow rate
     BorrowRate { asset: String, apr: f64 },
+    /// the book levels just sent in `Book`, with how many orders rest on each (OKX): L3 inference
+    Counts { snapshot: bool, bids: Vec<(f64, f64, u32)>, asks: Vec<(f64, f64, u32)> },
+    /// the venue's best resting orders with ids, a full replacement of the top of each side (exact L3)
+    Orders { bids: Vec<l3::Resting>, asks: Vec<l3::Resting> },
+    /// a trade against the resting order `id` (its maker side)
+    OrderFill { id: u64, qty: f64 },
 }
 
 impl Event {
@@ -74,6 +81,7 @@ impl Event {
             Event::Mark { .. } => "mark", Event::OpenInterest { .. } => "oi", Event::Liquidation { .. } => "liq",
             Event::LongShort { .. } => "ls", Event::Greeks { .. } => "greeks", Event::OptionInfo { .. } => "optinfo",
             Event::BorrowRate { .. } => "borrow", Event::Forward { .. } => "forward",
+            Event::Counts { .. } => "counts", Event::Orders { .. } => "orders", Event::OrderFill { .. } => "orderfill",
         }
     }
 }

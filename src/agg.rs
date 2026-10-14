@@ -523,6 +523,8 @@ pub struct Agg {
     pub tf: HashMap<u32, TfSet>,
     /// footprint per (venue or None = cross-venue in USDT, market)
     pub fp: HashMap<(Option<Exchange>, Market), Footprint>,
+    /// order-by-order books: exact (Lighter) or inferred from order counts (OKX), native prices
+    pub l3: HashMap<(Exchange, Market), crate::l3::L3Book>,
 }
 
 /// History at one chart timeframe: per-venue bars and the cross-venue bars built from them.
@@ -571,7 +573,7 @@ impl Agg {
         }
         let (ex, mk, ts) = (m.ex, m.market, m.ts);
         let k_usdt = self.usdt(ex, mk);
-        let Agg { venues, series, cvd, seeded, trades, big, fp, .. } = self;
+        let Agg { venues, series, cvd, seeded, trades, big, fp, l3, .. } = self;
         let v = venues.entry((ex, mk)).or_default();
         if v.symbol.is_none() { v.symbol = Some(m.symbol.clone()); }
         v.ts = ts;
@@ -598,6 +600,8 @@ impl Agg {
                     }
                 }
                 fp.entry((Some(ex), mk)).or_default().add(ts, *px, *qty, *side);
+                // taker volume per level for the L3 inference (only books that infer)
+                if let Some(b) = l3.get_mut(&(ex, mk)).filter(|_| ex == Exchange::Okx) { b.trade(*px, *qty, *side == Side::Buy); }
                 fp.entry((None, mk)).or_default().add(ts, px * k_usdt, *qty, *side);
                 // the cross-venue bar is in USDT; the venue bar stays in native quote
                 v.last = Some(*px);
@@ -674,6 +678,14 @@ impl Agg {
                 }
             }
             Event::BorrowRate { asset, apr } => { v.borrow_apr.insert(asset.clone(), *apr); }
+            Event::Counts { snapshot, bids, asks } => {
+                let b = l3.entry((ex, mk)).or_default();
+                if *snapshot { b.infer_reset(); }
+                for (bid, lv) in [(true, bids), (false, asks)] { for &(px, q, n) in lv.iter() { b.infer_level(bid, px, q, n, ts); } }
+                if *snapshot { b.infer_started(); }
+            }
+            Event::Orders { bids, asks } => { l3.entry((ex, mk)).or_default().exact_snapshot(bids, asks, ts); }
+            Event::OrderFill { id, qty } => { if let Some(b) = l3.get_mut(&(ex, mk)) { b.exact_fill(*id, *qty, ts); } }
             _ => {}
         }
         if matches!(m.ev, Event::Trade { .. } | Event::Bbo { .. }) { self.touch_index(mk, ts); }
@@ -836,6 +848,7 @@ impl Agg {
         self.venues.retain(|(e, _), _| *e != ex);
         self.series.retain(|(e, _), _| *e != Some(ex));
         self.fp.retain(|(e, _), _| *e != Some(ex));
+        self.l3.retain(|(e, _), _| *e != ex);
         self.pending.retain(|(e, _), _| *e != ex);
         self.seeded.retain(|(e, _)| *e != ex);
         for set in self.tf.values_mut() { set.venues.retain(|(e, _), _| *e != ex); }

@@ -49,6 +49,32 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
     }
 }
 
+/// Exact L3: the best resting orders of each side with their ids, every 2 s (the endpoint allows
+/// 60 requests a minute); between polls `OrderFill` from the trade stream keeps sizes exact.
+/// Started only when the L3 view is open (`Engine::ensure_l3`).
+pub fn spawn_l3(sub: &Sub, tx: Tx) -> JoinHandle<()> {
+    let e = Emit { ex: Exchange::Lighter, market: sub.market, tx };
+    let base = sub.base.to_uppercase();
+    tokio::spawn(async move {
+        let id = loop {
+            match market_id(&base).await { Ok(Some(id)) => break id, Ok(None) => return, Err(_) => tokio::time::sleep(std::time::Duration::from_secs(10)).await }
+        };
+        let sym = format!("{base}");
+        crate::ws::poll("lighter l3".into(), std::time::Duration::from_secs(2), move || {
+            let (e, sym) = (e.clone(), sym.clone());
+            async move {
+                let v = crate::ws::get_json(&format!("{REST}/orderBookOrders?market_id={id}&limit=100")).await?;
+                let side = |k: &str| v[k].as_array().into_iter().flatten().map(|o| crate::l3::Resting {
+                    id: o["order_index"].as_u64().unwrap_or(0), px: num(&o["price"]), qty: num(&o["remaining_base_amount"]),
+                    initial: num(&o["initial_base_amount"]), seq: o["order_index"].as_u64().unwrap_or(0),
+                }).collect::<Vec<_>>();
+                e.send(&sym, 0, Event::Orders { bids: side("bids"), asks: side("asks") });
+                Ok(())
+            }
+        }).await
+    })
+}
+
 async fn market_id(base: &str) -> anyhow::Result<Option<i64>> {
     let v = ws::get_json(&format!("{REST}/orderBooks")).await?;
     Ok(v["order_books"].as_array().into_iter().flatten()
@@ -85,7 +111,11 @@ fn on_msg(e: &Emit, sym: &str, st: &mut (Option<i64>, Book), gap: &Notify, f: Fr
             // is_maker_ask: the seller was the maker, so the aggressor bought
             let side = |t: &Value| if t["is_maker_ask"] == true { Side::Buy } else { Side::Sell };
             for t in v["trades"].as_array().into_iter().flatten() {
-                e.send(sym, t["timestamp"].as_i64().unwrap_or(ts), Event::Trade { px: num(&t["price"]), qty: num(&t["size"]), side: side(t) });
+                let (tts, q) = (t["timestamp"].as_i64().unwrap_or(ts), num(&t["size"]));
+                e.send(sym, tts, Event::Trade { px: num(&t["price"]), qty: q, side: side(t) });
+                // the maker's order id: exact fills for the L3 book
+                let maker = if t["is_maker_ask"] == true { &t["ask_id"] } else { &t["bid_id"] };
+                if let Some(id) = maker.as_u64().or_else(|| maker.as_str().and_then(|s| s.parse().ok())) { e.send(sym, tts, Event::OrderFill { id, qty: q }); }
             }
             // the liquidated account is the taker, so its order side is the aggressor side
             // (a liquidated short buys back: Buy). `trades` only holds type "trade" fills, so

@@ -187,6 +187,10 @@ pub struct Engine {
     pub account: Arc<Mutex<Account>>,
     /// set by the insurance panel: option chains are needed
     pub wants_options: std::sync::atomic::AtomicBool,
+    /// set by the L3 view: start the exact order feeds (Lighter's order snapshots are REST polls,
+    /// so they run only once someone looks)
+    pub wants_l3: std::sync::atomic::AtomicBool,
+    l3_started: bool,
     /// venues switched off in the status bar: never connected (applied on `start`)
     pub off: std::collections::HashSet<Exchange>,
     /// private account streams live on their own runtime so base switches don't drop them
@@ -209,7 +213,7 @@ impl Engine {
             let mut a = Account::default();
             for ex in trade::TRADABLE { if let Some(k) = trade::keychain(ex) { a.keys.insert(ex, k); } }
             Arc::new(Mutex::new(a))
-        }, wants_options: Default::default(), off: Default::default(), acct_rt: None, acct_tx: None, streams: HashMap::new(), key_tests: Default::default(), watch_rt: None, watching: HashMap::new(), watched: Default::default() }
+        }, wants_options: Default::default(), wants_l3: Default::default(), l3_started: false, off: Default::default(), acct_rt: None, acct_tx: None, streams: HashMap::new(), key_tests: Default::default(), watch_rt: None, watching: HashMap::new(), watched: Default::default() }
     }
 
     /// (Re)subscribe everything for `base`: spot + perp live and history, USDT/USD, heatmap sampling.
@@ -222,6 +226,7 @@ impl Engine {
         self.started = vec![];
         self.tfs = vec![];
         self.venue_tasks.clear();
+        self.l3_started = false;
         let _guard = rt.enter();
 
         // pump: apply messages in batches under one lock
@@ -533,6 +538,16 @@ impl Engine {
         }
     }
 
+    /// Exact L3 feeds for the current base (Lighter perp), once.
+    pub fn ensure_l3(&mut self) {
+        if self.l3_started || self.off.contains(&Exchange::Lighter) { return; }
+        let (Some(rt), Some(tx)) = (self.rt.as_ref(), self.tx.clone()) else { return };
+        let _guard = rt.enter();
+        self.l3_started = true;
+        let h = depth::ex::lighter::spawn_l3(&self.sub(Market::Perp), tx);
+        self.venue_tasks.entry(Exchange::Lighter).or_default().push(h);
+    }
+
     /// Switch one venue off (its connections close, its data leaves the cross-venue views) or on
     /// (it connects and loads its own history); every other venue keeps its connections.
     pub fn set_venue(&mut self, e: Exchange, on: bool, ctx: &eframe::egui::Context) {
@@ -541,6 +556,7 @@ impl Engine {
             self.off.insert(e);
             for h in self.venue_tasks.remove(&e).unwrap_or_default() { h.abort(); }
             self.agg.lock().unwrap().drop_venue(e);
+            if e == Exchange::Lighter { self.l3_started = false; }
             return;
         }
         self.off.remove(&e);
