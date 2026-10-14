@@ -92,10 +92,13 @@ impl App {
             let f = funds.get(&(p.ex, p.symbol.clone()));
             // a positive rate: longs pay shorts
             let pay = f.map(|f| -(if p.side == Side::Buy { 1.0 } else { -1.0 }) * p.qty * p.mark * f.rate);
+            // funding since open (received positive); since 0 = open time unknown, lower = the position is older than since
+            let paid = acc.funding_paid.get(&(p.ex, p.symbol.clone(), p.side)).and_then(|s| s.val);
             json!({
                 "ex": ex_name(p.ex), "symbol": p.symbol, "side": side_name(p.side), "qty": p.qty, "entry": p.entry, "mark": p.mark,
                 "liq": p.liq, "upnl": p.upnl, "lev": p.lev, "margin": p.margin, "cross": p.cross,
                 "funding_rate": f.map(|f| f.rate), "funding_interval_h": f.map(|f| f.interval_h), "next_funding_ms": f.map(|f| f.next_ms), "funding_est": pay,
+                "funding_paid": paid.map(|x| x.amount), "funding_since": paid.map(|x| x.since).filter(|t| *t > 0), "funding_since_lower": paid.map(|x| x.lower),
             })
         }).collect();
         let orders: Vec<Value> = acc.orders.iter().map(|o| json!({

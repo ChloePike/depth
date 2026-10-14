@@ -38,6 +38,8 @@ pub struct Account {
     pub wallets_loading: std::collections::HashSet<Exchange>,
     /// active TP/SL (whole-position and partial) across venues, pushed by the private streams
     pub tpsl: Vec<trade::tpsl::TpSl>,
+    /// funding paid / received since open per open position (venue, symbol, side); see `funding_due`
+    pub funding_paid: HashMap<(Exchange, String, depth::Side), FundingSlot>,
     /// client-side execution jobs (TWAP), newest last
     pub algos: Vec<AlgoJob>,
     /// venue maximum leverage per (venue, symbol), read when the leverage sheet opens
@@ -131,6 +133,36 @@ async fn place_logged(account: &Arc<Mutex<Account>>, ex: Exchange, req: &OrderRe
         }
         Err(e) => { a.note(format!("FAIL {what}: {e:#}"), false); None }
     }
+}
+
+/// Funding-since-open of one position: the last result (None until fetched, or on venues that do not
+/// report it), the size it was fetched at, when it was fetched and when it is due again (local ms).
+#[derive(Clone, Debug)]
+pub struct FundingSlot { pub val: Option<trade::FundingPaid>, qty: f64, at: i64, due: i64 }
+
+/// Positions whose funding-since-open is due: never fetched, size changed (at most once per 60 s), or
+/// ~20 s after a settlement. Marks them fetched now and drops the slots of closed positions.
+fn funding_due(a: &mut Account, fund: &HashMap<(Exchange, String), VenueFunding>, now: i64) -> Vec<(Keys, Position)> {
+    let live: std::collections::HashSet<_> = a.positions.iter().map(|p| (p.ex, p.symbol.clone(), p.side)).collect();
+    a.funding_paid.retain(|k, _| live.contains(k));
+    let mut out = vec![];
+    for p in a.positions.iter().filter(|p| p.qty > 0.0) {
+        let Some(k) = a.keys.get(&p.ex) else { continue };
+        let key = (p.ex, p.symbol.clone(), p.side);
+        let old = a.funding_paid.get(&key);
+        if old.is_some_and(|s| now < s.due && (s.qty == p.qty || now - s.at < 60_000)) { continue; }
+        let slot = FundingSlot { val: old.and_then(|s| s.val), qty: p.qty, at: now, due: next_settle(fund.get(&(p.ex, p.symbol.clone())), now) + 20_000 };
+        a.funding_paid.insert(key, slot);
+        out.push((k.clone(), p.clone()));
+    }
+    out
+}
+
+/// Next funding settlement after `now`: the listed time rolled forward by the interval when stale;
+/// venues without a listed rate assume the common 00/08/16 UTC schedule.
+fn next_settle(f: Option<&VenueFunding>, now: i64) -> i64 {
+    let (next, iv) = f.map_or((0, 8 * 3_600_000), |f| (f.next_ms, ((f.interval_h * 3_600_000.0) as i64).max(3_600_000)));
+    if next > now { next } else { now + iv - (now - next).rem_euclid(iv) }
 }
 
 /// Funding of one venue's perp: rate per settlement, settlement interval (hours), next settlement (ms).
@@ -457,7 +489,7 @@ impl Engine {
             self.streams.insert(*ex, rt.spawn(trade::stream(*ex, k.clone(), tx.clone())));
         }
         self.acct_tx = Some(tx.clone());
-        let (account, ctx) = (self.account.clone(), ctx.clone());
+        let (account, funding, ctx) = (self.account.clone(), self.funding.clone(), ctx.clone());
         rt.spawn(async move {
             let mut buf = Vec::with_capacity(1024);
             let mut dirty: std::collections::HashSet<Exchange> = Default::default();
@@ -501,6 +533,19 @@ impl Engine {
                         if changed { ctx.request_repaint(); }
                     }
                     _ = bal_tick.tick() => {
+                        // funding since open: in-memory check each tick, a REST fetch only when `funding_due` says so
+                        let due = { let mut a = account.lock().unwrap(); let f = funding.lock().unwrap(); funding_due(&mut a, &f, now_ms()) };
+                        for (k, p) in due {
+                            let (acc, ctx) = (account.clone(), ctx.clone());
+                            tokio::spawn(async move {
+                                let r = trade::funding_paid(p.ex, &k, &p).await;
+                                if let Err(e) = &r { depth::sys::append_log("trade.log", &format!("{:?} {} funding paid: {e:#}\n", p.ex, p.symbol)); }
+                                let mut a = acc.lock().unwrap();
+                                let Some(s) = a.funding_paid.get_mut(&(p.ex, p.symbol.clone(), p.side)) else { return };
+                                match r { Ok(v) => s.val = v, Err(_) => s.due = s.due.min(now_ms() + 300_000) }
+                                ctx.request_repaint();
+                            });
+                        }
                         let due: Vec<Exchange> = pos_dirty.iter().copied().filter(|e| last_pos.get(e).is_none_or(|t| t.elapsed() >= Duration::from_secs(3))).collect();
                         for ex in due {
                             pos_dirty.remove(&ex);
@@ -1249,6 +1294,27 @@ mod tests {
 
     fn pos(side: Side, qty: f64) -> Position {
         Position { ex: Exchange::Binance, symbol: "BTCUSDT".into(), side, qty, entry: 100.0, mark: 0.0, liq: None, upnl: 0.0, lev: 0.0, margin: 0.0, cross: None }
+    }
+
+    #[test]
+    fn funding_fetch_only_when_due() {
+        let mut a = Account::default();
+        a.keys.insert(Exchange::Binance, Keys { key: "k".into(), secret: "s".into(), extra: None });
+        a.positions.push(pos(Side::Buy, 1.0));
+        let fund = HashMap::from([((Exchange::Binance, "BTCUSDT".to_string()), VenueFunding { rate: 0.0, interval_h: 8.0, next_ms: 1_000_000 })]);
+        assert_eq!(funding_due(&mut a, &fund, 0).len(), 1);
+        assert!(funding_due(&mut a, &fund, 1_000).is_empty());
+        // size change: debounced 60 s from the last fetch
+        a.positions[0].qty = 2.0;
+        assert!(funding_due(&mut a, &fund, 30_000).is_empty());
+        assert_eq!(funding_due(&mut a, &fund, 60_000).len(), 1);
+        // 20 s after the settlement, then the next one (stale listed time rolled forward 8h)
+        assert!(funding_due(&mut a, &fund, 1_019_000).is_empty());
+        assert_eq!(funding_due(&mut a, &fund, 1_020_000).len(), 1);
+        assert_eq!(a.funding_paid.values().next().unwrap().due, 1_000_000 + 8 * 3_600_000 + 20_000);
+        // closed: slot dropped
+        a.positions.clear();
+        assert!(funding_due(&mut a, &fund, 1_030_000).is_empty() && a.funding_paid.is_empty());
     }
 
     #[test]

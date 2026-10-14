@@ -194,6 +194,14 @@ pub async fn positions(k: &Keys) -> Result<Vec<Position>> {
     Ok(out)
 }
 
+/// Funding since the position opened: `pnl_fund` (funding PnL, positive = received) and
+/// `open_time` (first open, unix seconds) of its row.
+pub async fn funding_paid(k: &Keys, p: &Position) -> Result<Option<FundingPaid>> {
+    let v = gate(k, reqwest::Method::GET, "/futures/usdt/positions", "holding=true&limit=100", None).await?;
+    Ok(v.as_array().into_iter().flatten().find(|r| r["contract"] == native(&p.symbol).as_str() && position(r, 1.0).side == p.side)
+        .map(|r| FundingPaid { amount: z(&r["pnl_fund"]), since: (z(&r["open_time"]) * 1000.0) as i64, lower: false }))
+}
+
 fn order(o: &Value, mult: f64, dual: bool) -> OpenOrder {
     let size = z(&o["size"]);
     let side = if size < 0.0 { Side::Sell } else { Side::Buy };

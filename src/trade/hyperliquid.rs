@@ -280,6 +280,15 @@ pub async fn positions(k: &Keys) -> Result<Vec<Position>> {
     Ok(positions_of(&info(json!({"type": "clearinghouseState", "user": user(k)})).await?))
 }
 
+/// Funding since the position opened: `cumFunding.sinceOpen` is what the user PAID (positive =
+/// paid), so it is negated. The open time is not in the state.
+// ponytail: since = 0 (unknown); walk userFills like Binance if the date is wanted
+pub async fn funding_paid(k: &Keys, p: &Position) -> Result<Option<FundingPaid>> {
+    let cs = info(json!({"type": "clearinghouseState", "user": user(k)})).await?;
+    Ok(cs["assetPositions"].as_array().into_iter().flatten().map(|a| &a["position"]).find(|r| unified(r["coin"].as_str().unwrap_or_default()) == p.symbol)
+        .and_then(|r| crate::opt_num(&r["cumFunding"]["sinceOpen"]).map(|x| FundingPaid { amount: -x, since: 0, lower: false })))
+}
+
 fn open_order(o: &Value) -> OpenOrder {
     let (orig, left) = (f(&o["origSz"]), f(&o["sz"]));
     OpenOrder {

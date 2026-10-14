@@ -391,15 +391,13 @@ pub struct Chart {
     /// set by the app: its chart layout; the toolbar's choice goes back through `layout_req`
     #[serde(skip)] pub layout: String,
     #[serde(skip)] pub layout_req: Option<String>,
-    /// set by the app: the toolbar sits in the window's title bar, not above the chart
-    #[serde(skip)] pub toolbar_in_header: bool,
 }
 
 impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, toolbar_in_header: false, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, whale_usd: 100_000.0, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, whale_usd: 100_000.0, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
             panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false), (Pane::Delta, false)],
         }
     }
@@ -541,8 +539,12 @@ impl HeatCache {
 const LEVERAGE: [(f64, f64); 6] = [(3.0, 0.15), (5.0, 0.2), (10.0, 0.25), (20.0, 0.2), (50.0, 0.15), (100.0, 0.05)];
 const MMR: f64 = 0.005;
 
-/// Price of bin i is (lo + i) * bin; quantities in base units.
-struct LiqMap { bin: f64, lo: i64, long: Vec<f32>, short: Vec<f32> }
+/// Price of bin i is (lo + i) * bin; quantities in base units. `segs`: every level's open mass over
+/// time, for the time x price heatmap (a level is drawn from when it formed until price swept it).
+struct LiqMap { bin: f64, lo: i64, long: Vec<f32>, short: Vec<f32>, segs: Vec<LiqSeg> }
+
+/// One level's mass between two changes: bin index, side, [t0, t1) in ms (t1 = MAX while open).
+struct LiqSeg { i: usize, t0: i64, t1: i64, q: f32 }
 
 fn liq_levels(bars: &[Bar]) -> Option<LiqMap> {
     let last = bars.last()?;
@@ -554,20 +556,50 @@ fn liq_levels(bars: &[Bar]) -> Option<LiqMap> {
     let bins = (hi - lo + 1) as usize;
     if bins > 200_000 { return None; }
     let (mut long, mut short) = (vec![0f32; bins], vec![0f32; bins]);
+    // the open segment per bin and side (long: 0..bins, short: bins..2 bins in `open`)
+    let mut open: Vec<Option<usize>> = vec![None; 2 * bins];
+    let mut segs: Vec<LiqSeg> = vec![];
     let at = |p: f64| ((p / bin).round() as i64 - lo).clamp(0, bins as i64 - 1) as usize;
     for b in bars {
         // price traded through: longs at or above the low and shorts at or below the high are gone
-        long[at(b.l)..].iter_mut().for_each(|q| *q = 0.0);
-        short[..=at(b.h)].iter_mut().for_each(|q| *q = 0.0);
+        let (lk, sk) = (at(b.l), at(b.h));
+        for (k, q) in long.iter_mut().enumerate().skip(lk) { if *q > 0.0 { *q = 0.0; if let Some(s) = open[k].take() { segs[s].t1 = b.t; } } }
+        for (k, q) in short.iter_mut().enumerate().take(sk + 1) { if *q > 0.0 { *q = 0.0; if let Some(s) = open[bins + k].take() { segs[s].t1 = b.t; } } }
         if b.vol > 0.0 {
             let p = (b.h + b.l + b.c) / 3.0;
+            // formed by the end of this minute (a sweep acts from its start)
+            let t = b.t + 59_999;
             for (lev, w) in LEVERAGE {
-                long[at(p * (1.0 - 1.0 / lev + MMR))] += (b.vol * w / 2.0) as f32;
-                short[at(p * (1.0 + 1.0 / lev - MMR))] += (b.vol * w / 2.0) as f32;
+                let q = (b.vol * w / 2.0) as f32;
+                for (k, side, o) in [(at(p * (1.0 - 1.0 / lev + MMR)), &mut long, 0), (at(p * (1.0 + 1.0 / lev - MMR)), &mut short, bins)] {
+                    side[k] += q;
+                    if let Some(s) = open[o + k] { segs[s].t1 = t; }
+                    open[o + k] = Some(segs.len());
+                    segs.push(LiqSeg { i: o + k, t0: t, t1: i64::MAX, q: side[k] });
+                }
             }
         }
     }
-    Some(LiqMap { bin, lo, long, short })
+    Some(LiqMap { bin, lo, long, short, segs })
+}
+
+impl LiqMap {
+    /// Open mass (longs + shorts) per cell: `cols` columns of `ms` from `t0` (each column shows the
+    /// state at its end), `rows` rows from the bottom; `row` maps a price to its row (any scale).
+    fn grid(&self, t0: i64, ms: i64, cols: usize, rows: usize, row: impl Fn(f64) -> Option<usize>) -> Vec<f32> {
+        let mut g = vec![0f32; cols * rows];
+        let n = self.long.len();
+        if cols == 0 || rows == 0 { return g; }
+        let span = cols as i64 * ms;
+        for s in &self.segs {
+            let Some(r) = row((self.lo + (s.i % n) as i64) as f64 * self.bin) else { continue };
+            // column c (end te = t0 + (c+1) ms - 1) shows the segment when t0_seg <= te < t1_seg
+            let c0 = ((s.t0 - t0 + 1).max(0) + ms - 1) / ms - 1;
+            let c1 = (s.t1.min(t0 + span) - t0).div_euclid(ms) - 1;
+            for c in c0.max(0)..=c1.min(cols as i64 - 1) { g[c as usize * rows + r.min(rows - 1)] += s.q; }
+        }
+        g
+    }
 }
 
 /// A volume level: centre price, half-width (one profile bin), strength (volume / POC volume).
@@ -656,17 +688,54 @@ fn broken_levels(bars: &[Bar], levels: &[SrLevel], within: usize) -> Vec<(SrLeve
 
 #[derive(Default)]
 struct LiqCache {
-    /// (tf, bar count, last bar time, last volume bits): recomputed only when one of them changes
+    /// (tf, bar count, last bar time, last volume bits): recomputed only when one of them changes,
+    /// at most once a second (every trade changes the live bar's volume)
     key: (i64, usize, i64, u64),
+    at: Option<std::time::Instant>,
     map: Option<LiqMap>,
+    ver: u64,
+    /// heatmap texture and what it was drawn for (map version, view)
+    tex: Option<((u64, i64, i64, usize, u64, u64, usize), egui::TextureHandle)>,
 }
 
 impl LiqCache {
     fn get(&mut self, bars: &[Bar], tf: i64) -> Option<&LiqMap> {
         let last = bars.last()?;
         let key = (tf, bars.len(), last.t, last.vol.to_bits());
-        if key != self.key { self.key = key; self.map = liq_levels(bars); }
+        let stale = self.at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) || key.1 != self.key.1 || key.0 != self.key.0;
+        if key != self.key && (stale || self.map.is_none()) {
+            self.key = key; self.map = liq_levels(bars); self.at = Some(std::time::Instant::now()); self.ver += 1;
+        }
         self.map.as_ref()
+    }
+
+    /// The time x price heatmap texture for a view (rebuilt when the map or the view changes).
+    /// Cells scale to the 99th percentile so one stacked level does not wash out the rest.
+    #[allow(clippy::too_many_arguments)]
+    /// `view` identifies the price mapping (range and scale) for the cache.
+    fn texture(&mut self, ctx: &egui::Context, t0: i64, ms: i64, cols: usize, rows: usize, view: (u64, u64, u8), row: impl Fn(f64) -> Option<usize>) -> Option<egui::TextureId> {
+        let k = (self.ver, t0, ms, cols, view.0, view.1 ^ ((view.2 as u64) << 60), rows);
+        if let Some((kk, t)) = &self.tex { if *kk == k { return Some(t.id()); } }
+        let m = self.map.as_ref()?;
+        let g = m.grid(t0, ms, cols, rows, row);
+        let mut nz: Vec<f32> = g.iter().copied().filter(|v| *v > 0.0).collect();
+        if nz.is_empty() { self.tex = None; return None; }
+        let p = (nz.len() * 99 / 100).min(nz.len() - 1);
+        let top = *nz.select_nth_unstable_by(p, f32::total_cmp).1;
+        let (cold, hot) = (Color32::from_rgb(0x8a, 0x4b, 0x0f), Color32::from_rgb(0xff, 0xd6, 0x0a));
+        let mut img = egui::ColorImage::filled([cols, rows], Color32::TRANSPARENT);
+        for c in 0..cols {
+            for r in 0..rows {
+                let v = g[c * rows + r];
+                if v <= 0.0 { continue; }
+                let t = (v / top).min(1.0).sqrt();
+                img.pixels[(rows - 1 - r) * cols + c] = lerp(cold, hot, t).gamma_multiply(0.12 + 0.6 * t);
+            }
+        }
+        let tex = match self.tex.take() { Some((_, mut t)) => { t.set(img, egui::TextureOptions::NEAREST); t } None => ctx.load_texture("liqheat", img, egui::TextureOptions::NEAREST) };
+        let id = tex.id();
+        self.tex = Some((k, tex));
+        Some(id)
     }
 }
 
@@ -724,8 +793,7 @@ impl Chart {
         for p in [Pane::Premium, Pane::Ofi, Pane::BookFlow, Pane::Rsi, Pane::Macd, Pane::Delta] { if !self.panes.iter().any(|x| x.0 == p) { self.panes.push((p, false)); } }
         let smarket = if market == Market::Margin { Market::Spot } else { market };
         // hosted: the native toolbar above the chart drives these through native_set
-        // the plain app draws the toolbar in its title bar (toolbar_in_header); hosted, the native toolbar
-        if !native() && !self.toolbar_in_header { self.toolbar(ui, a, smarket, base); }
+        if !native() { self.toolbar(ui, a, smarket, base); }
         self.base_unit = base.to_string();
         let Some(series) = a.series.get(&(self.src, smarket)) else {
             ui.centered_and_justified(|ui| ui.label(t("chart.loading")));
@@ -914,6 +982,17 @@ impl Chart {
         let mut liq_legend: Option<Color32> = None;
         if self.liqmap && smarket == Market::Perp && live {
             // estimated from the 1m series whatever the interval: finer OI steps, same levels
+            // time x price: each estimated level from when it formed until price swept it (2 px rows)
+            if self.liq.get(&raw, 1).is_some() {
+                let rows = ((main_plot.height() / 2.0) as usize).clamp(1, 1000);
+                let ms = self.tf * 60_000;
+                let (bot, h) = (main_plot.bottom(), main_plot.height());
+                let row = |px: f64| { let v = (bot - y(px)) / h * rows as f32; (v >= 0.0 && v < rows as f32).then_some(v as usize) };
+                if let Some(id) = self.liq.texture(ui.ctx(), bars[i0].t, ms, i1 - i0 + 1, rows, (lo.to_bits(), hi.to_bits(), self.scale as u8), row) {
+                    let r = Rect::from_min_max(pos2(fr.x(i0 as f32) - self.bar_w / 2.0, main_plot.top()), pos2(fr.x(i1 as f32) + self.bar_w / 2.0, main_plot.bottom()));
+                    painter.with_clip_rect(main_plot).image(id, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                }
+            }
             if let Some(m) = self.liq.get(&raw, 1) {
                 let row = ((hi - lo) / main_plot.height() as f64 * 2.0).max(m.bin);
                 let mut rows: std::collections::BTreeMap<i64, (f32, f32)> = Default::default();
@@ -2256,12 +2335,10 @@ impl Chart {
         if v["reset_view"].as_bool() == Some(true) { self.right = 0.0; self.bar_w = 7.0; self.y_range = None; }
     }
 
-    pub(crate) fn toolbar(&mut self, ui: &mut Ui, a: &Agg, market: Market, base: &str) {
+    fn toolbar(&mut self, ui: &mut Ui, a: &Agg, market: Market, base: &str) {
         // design: a 40 px bar over a hairline; compact interval pills, outlined menus, tools on a strip
         let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
-        // in the title bar the width is short: no hairline, every drawing tool behind one button
-        let compact = self.toolbar_in_header;
-        if !compact { ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, line())); }
+        ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, line()));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(0.0, 6.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
         let ui = &mut child;
         ui.spacing_mut().item_spacing.x = 2.0;
@@ -2300,7 +2377,7 @@ impl Chart {
             // the drawing tools on one subtle strip; the everyday ones as buttons, the rest behind "⋯"
             const QUICK: [(Tool, &str); 5] = [(Tool::Rect, "draw.rect"), (Tool::Fib, "draw.fib"), (Tool::Ray, "draw.ray"), (Tool::Trend, "draw.trend"), (Tool::HLine, "draw.hline")];
             const MORE: [(Tool, &str); 4] = [(Tool::Channel, "draw.channel"), (Tool::Text, "draw.text"), (Tool::Measure, "draw.measure"), (Tool::Position, "draw.position")];
-            let (quick, more): (&[(Tool, &str)], Vec<(Tool, &str)>) = if compact { (&[], QUICK.iter().chain(&MORE).copied().collect()) } else { (&QUICK, MORE.to_vec()) };
+            let (quick, more) = (&QUICK, MORE.to_vec());
             let in_more = more.iter().find(|(k, _)| self.tool == Some(*k)).map(|x| x.0);
             let n = self.drawings.get(base).map_or(0, |v| v.len());
             egui::Frame::new().fill(panel2()).corner_radius(5).inner_margin(2).show(ui, |ui| {
@@ -2889,6 +2966,13 @@ mod tests {
     #[test]
     fn liq_levels_open_and_sweep() {
         let bar = |t: i64, c: f64, vol: f64| Bar { t, o: c, h: c, l: c, c, vol, ..Default::default() };
+        // time x price grid: column 0 (first bar's minute) holds all 20; the second bar trades down
+        // to 60 and sweeps every long level above it, so column 1 keeps only the shorts (10)
+        {
+            let m = liq_levels(&[bar(0, 100.0, 20.0), Bar { t: 60_000, o: 100.0, h: 100.0, l: 60.0, c: 100.0, vol: 0.0, ..Default::default() }]).unwrap();
+            let g = m.grid(0, 60_000, 2, 1, |_| Some(0));
+            assert!((g[0] - 20.0).abs() < 1e-3 && (g[1] - 10.0).abs() < 1e-3, "{g:?}");
+        }
         let total = |m: &LiqMap| m.long.iter().chain(&m.short).sum::<f32>();
         // 20 traded at 100: 10 of long levels below, 10 of short levels above
         let m = liq_levels(&[bar(0, 100.0, 20.0)]).unwrap();

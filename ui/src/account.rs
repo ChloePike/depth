@@ -635,21 +635,41 @@ impl AccountPanel {
                             ui.interact(Rect::from_min_max(egui::pos2(tr.right() - w, tr.top()), tr.max), ui.id().with(("tpt", &key)), egui::Sense::hover()).on_hover_text(tip);
                         }
                     }
-                    9 => match p["funding_rate"].as_f64() {
-                        Some(rate) => {
-                            let cd = p["next_funding_ms"].as_i64().map(|n| { let sec = ((n - now) / 1000).max(0); format!("  {:02}:{:02}:{:02}", sec / 3600, sec % 3600 / 60, sec % 60) }).unwrap_or_default();
-                            let (top, bot) = halves(r);
-                            let est = p["funding_est"].as_f64();
-                            let top = if est.is_some() { top } else { r };
-                            rich_right(ui, top, &[(format!("{:+.4}%", rate * 100.0), pnl_col(rate)), (cd, mu())], mono_m(12.5));
-                            if let Some(e) = est { txt(ui, bot, format!("{} {} USDT", l("next"), signed(e)), mono(11.0), pnl_col(e), true); }
-                            if let Some(h) = p["funding_interval_h"].as_f64() { ui.interact(r, ui.id().with(("fund", &key)), egui::Sense::hover()).on_hover_text(format!("{} {h}h", l("Settles every"))); }
-                        }
-                        None => {
+                    9 => {
+                        let rate = p["funding_rate"].as_f64();
+                        let est = rate.and(p["funding_est"].as_f64());
+                        let paid = p["funding_paid"].as_f64();
+                        // rate + countdown, next estimated payment, paid since open: one line per figure known
+                        let n = rate.is_some() as usize + est.is_some() as usize + paid.is_some() as usize;
+                        if n == 0 {
                             let tr = txt(ui, r, "—", mono(12.5), dim(), true);
                             ui.interact(tr.expand(4.0), ui.id().with(("fund", &key)), egui::Sense::hover()).on_hover_text(l("Funding is shown for Binance, Bybit and Hyperliquid positions"));
+                            return;
                         }
-                    },
+                        let line = |i: usize| match n {
+                            1 => r,
+                            2 => if i == 0 { halves(r).0 } else { halves(r).1 },
+                            _ => Rect::from_center_size(egui::pos2(r.center().x, r.center().y + (i as f32 - 1.0) * 13.0), egui::vec2(r.width(), 13.0)),
+                        };
+                        let mut i = 0;
+                        let mut tip = vec![];
+                        if let Some(rate) = rate {
+                            let cd = p["next_funding_ms"].as_i64().map(|n| { let sec = ((n - now) / 1000).max(0); format!("  {:02}:{:02}:{:02}", sec / 3600, sec % 3600 / 60, sec % 60) }).unwrap_or_default();
+                            rich_right(ui, line(i), &[(format!("{:+.4}%", rate * 100.0), pnl_col(rate)), (cd, mu())], mono_m(if n == 3 { 11.5 } else { 12.5 }));
+                            if let Some(h) = p["funding_interval_h"].as_f64() { tip.push(format!("{} {h}h", l("Settles every"))); }
+                            i += 1;
+                        }
+                        if let Some(e) = est { txt(ui, line(i), format!("{} {} USDT", l("next"), signed(e)), mono(11.0), pnl_col(e), true); i += 1; }
+                        if let Some(v) = paid {
+                            txt(ui, line(i), format!("{} {} USDT", if v < 0.0 { l("paid") } else { l("received") }, signed(v)), mono(11.0), pnl_col(v), true);
+                            tip.push(match p["funding_since"].as_i64() {
+                                Some(t) if p["funding_since_lower"] == true => format!("{} {} ({})", l("Funding paid since"), time(t), l("the position is older; earlier fills are not available")),
+                                Some(t) => format!("{} ({})", l("Funding paid since the position opened"), time(t)),
+                                None => l("Funding paid since the position opened").to_string(),
+                            });
+                        }
+                        if !tip.is_empty() { ui.interact(r, ui.id().with(("fund", &key)), egui::Sense::hover()).on_hover_text(tip.join("\n")); }
+                    }
                     _ => {
                         let b = Rect::from_min_max(egui::pos2(r.left(), r.center().y - 13.0), egui::pos2(r.right(), r.center().y + 13.0));
                         if at(ui, b, |ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| kit::button(ui, l("Reverse"), Look::Secondary, 26.0, None, true)).inner).on_hover_text(l("Close at market and open the same size on the other side (asks to confirm)")).clicked() { acts.push(Act::Confirm(PosAct::Reverse(p.clone()))); }

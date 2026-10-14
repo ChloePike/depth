@@ -224,6 +224,15 @@ pub async fn positions(k: &Keys) -> Result<Vec<Position>> {
     Ok(rows.iter().filter_map(|p| position(p, cached)).map(|(p, _)| p).filter(|p| p.qty > 0.0).collect())
 }
 
+/// Funding since the position opened: `fundingFee` (accumulated, OKX fee sign: negative = paid)
+/// and `cTime` (position creation, ms) of its row.
+pub async fn funding_paid(k: &Keys, p: &Position) -> Result<Option<FundingPaid>> {
+    let d = okx(k, None, &format!("/api/v5/account/positions?instId={}", native(&p.symbol))).await?;
+    let side = |r: &Value| match r["posSide"].as_str() { Some("long") => Side::Buy, Some("short") => Side::Sell, _ => if z(&r["pos"]) < 0.0 { Side::Sell } else { Side::Buy } };
+    Ok(d.as_array().into_iter().flatten().find(|r| z(&r["pos"]) != 0.0 && side(r) == p.side)
+        .and_then(|r| crate::opt_num(&r["fundingFee"]).map(|f| FundingPaid { amount: f, since: z(&r["cTime"]) as i64, lower: false })))
+}
+
 /// Pending swap orders.
 // ponytail: first page only (100 orders); paginate with `after` if anyone keeps more open
 pub async fn open_orders(k: &Keys) -> Result<Vec<OpenOrder>> {

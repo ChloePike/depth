@@ -1068,6 +1068,133 @@ pub async fn history(ex: Exchange, k: &Keys, symbols: &[String]) -> Result<Histo
     Ok(h)
 }
 
+/// Funding a position has paid or received since it opened, in its quote.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FundingPaid {
+    /// received positive, paid negative
+    pub amount: f64,
+    /// open time (ms); 0 when the venue does not say
+    pub since: i64,
+    /// the fills ran out before the open was found: `since` is the oldest fill seen, the position is older
+    pub lower: bool,
+}
+
+/// When the current position opened: undo fills (newest first, signed base qty: + buys, - sells)
+/// from the current signed size until it reaches zero or flips sign; that fill opened it.
+/// (time, false) when found, (oldest fill time, true) as a lower bound when the fills run out.
+pub fn open_time(cur: f64, fills: &[(i64, f64)]) -> Option<(i64, bool)> {
+    let eps = cur.abs() * 1e-9;
+    let mut s = cur;
+    for &(t, q) in fills {
+        s -= q;
+        if s.abs() <= eps || s.signum() != cur.signum() { return Some((t, false)); }
+    }
+    fills.last().map(|f| (f.0, true))
+}
+
+/// Binance userTrades rows as signed fills, newest first. Hedge mode: only the position's own
+/// positionSide counts (one-way rows say BOTH).
+fn binance_fills(rows: &Value, side: Side) -> Vec<(i64, f64)> {
+    let want = if side == Side::Buy { "LONG" } else { "SHORT" };
+    let mut v: Vec<(i64, i64, f64)> = rows.as_array().into_iter().flatten()
+        .filter(|f| matches!(f["positionSide"].as_str(), None | Some("BOTH")) || f["positionSide"] == want)
+        .map(|f| (f["time"].as_i64().unwrap_or(0), f["id"].as_i64().unwrap_or(0), if f["side"] == "SELL" { -n(&f["qty"]) } else { n(&f["qty"]) })).collect();
+    v.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+    v.into_iter().map(|(t, _, q)| (t, q)).collect()
+}
+
+/// Bybit execution rows (newest first) as signed fills of the `side` position. Rows carry no
+/// positionIdx, so closedSize splits each fill: a same-side fill adds execQty - closedSize, an
+/// opposite one removes closedSize. That holds in hedge mode (a fill only opens or only closes, the
+/// other side's fills count 0) and one-way (a flip closes closedSize, opens the rest).
+fn bybit_fills(rows: &[Value], side: Side) -> Vec<(i64, f64)> {
+    rows.iter().filter(|f| !matches!(f["execType"].as_str(), Some("Funding" | "Settle"))).map(|f| {
+        let (q, closed) = (n(&f["execQty"]), n(&f["closedSize"]));
+        let same = (f["side"] == "Sell") == (side == Side::Sell);
+        let delta = if same { q - closed } else { -closed };
+        (n(&f["execTime"]) as i64, if side == Side::Buy { delta } else { -delta })
+    }).collect()
+}
+
+const WEEK_MS: i64 = 7 * 86_400_000;
+
+/// Funding paid / received by an open position since it opened. Never on a timer: the engine
+/// fetches once per position, after a size change (debounced) and after each settlement.
+/// Binance: userTrades 5 + income 30 (per 1000 rows); Bybit: execution/list and
+/// transaction-log, a few pages per 7-day window. Ok(None) on venues that do not report it.
+pub async fn funding_paid(ex: Exchange, k: &Keys, p: &Position) -> Result<Option<FundingPaid>> {
+    let cur = if p.side == Side::Buy { p.qty } else { -p.qty };
+    let now = crate::now_ms();
+    match ex {
+        Exchange::Binance => {
+            let pm = binance_pm(k).await?;
+            let (base, trades, income) = if pm { (papi_url(), "/papi/v1/um/userTrades", "/papi/v1/um/income") } else { (binance_url(), "/fapi/v1/userTrades", "/fapi/v1/income") };
+            // without startTime: the last 7 days, newest 1000 fills
+            let t = binance_at(k, base, reqwest::Method::GET, trades, &[("symbol", p.symbol.clone()), ("limit", "1000".into())]).await?;
+            let (since, lower) = open_time(cur, &binance_fills(&t, p.side)).unwrap_or((now - WEEK_MS, true));
+            // ponytail: hedge mode sums both sides' FUNDING_FEE rows (income rows carry no positionSide)
+            let (mut amount, mut start) = (0.0, since);
+            for _ in 0..5 {
+                let v = binance_at(k, base, reqwest::Method::GET, income, &[("symbol", p.symbol.clone()), ("incomeType", "FUNDING_FEE".into()),
+                    ("startTime", start.to_string()), ("limit", "1000".into())]).await?;
+                let rows = v.as_array().cloned().unwrap_or_default();
+                // income is signed for the account: positive = received
+                amount += rows.iter().map(|r| n(&r["income"])).sum::<f64>();
+                match rows.iter().filter_map(|r| r["time"].as_i64()).max() { Some(t) if rows.len() == 1000 => start = t + 1, _ => break }
+            }
+            Ok(Some(FundingPaid { amount, since, lower }))
+        }
+        Exchange::Bybit => {
+            let mut fills = vec![];
+            let mut found = None;
+            'w: for w in 0..4 {
+                let end = now - w * WEEK_MS;
+                let mut cursor = String::new();
+                for _ in 0..10 {
+                    let mut q = json!({"category": "linear", "symbol": p.symbol, "startTime": (end - WEEK_MS).to_string(), "endTime": end.to_string(), "limit": "100"});
+                    if !cursor.is_empty() { q["cursor"] = cursor.clone().into(); }
+                    let v = bybit(k, true, "/v5/execution/list", q).await?;
+                    let rows = v["list"].as_array().cloned().unwrap_or_default();
+                    fills.extend(bybit_fills(&rows, p.side));
+                    if let Some((t, false)) = open_time(cur, &fills) { found = Some(t); break 'w; }
+                    cursor = v["nextPageCursor"].as_str().unwrap_or_default().into();
+                    if cursor.is_empty() || rows.is_empty() { break; }
+                }
+            }
+            let (since, lower) = match found { Some(t) => (t, false), None => (fills.last().map_or(now - 4 * WEEK_MS, |f| f.0), true) };
+            let mut amount = 0.0;
+            let mut start = since;
+            while start < now {
+                let end = (start + WEEK_MS).min(now);
+                let mut cursor = String::new();
+                for _ in 0..20 {
+                    let mut q = json!({"accountType": "UNIFIED", "category": "linear", "type": "SETTLEMENT", "startTime": start.to_string(), "endTime": end.to_string(), "limit": "50"});
+                    if let Some(b) = p.symbol.strip_suffix("USDT") { q["baseCoin"] = b.into(); }
+                    if !cursor.is_empty() { q["cursor"] = cursor.clone().into(); }
+                    let v = bybit(k, true, "/v5/account/transaction-log", q).await?;
+                    let rows = v["list"].as_array().cloned().unwrap_or_default();
+                    // `change` is the wallet movement (positive = received) whatever sign convention `funding`
+                    // uses; settlement rows carry no cashFlow or fee. Assumption: `side` is the position's
+                    // side (Buy = long), so hedge mode keeps its own side; rows without a side count.
+                    amount += rows.iter().filter(|r| r["symbol"] == p.symbol.as_str())
+                        .filter(|r| match r["side"].as_str() { Some("Buy") => p.side == Side::Buy, Some("Sell") => p.side == Side::Sell, _ => true })
+                        .map(|r| n(&r["change"])).sum::<f64>();
+                    cursor = v["nextPageCursor"].as_str().unwrap_or_default().into();
+                    if cursor.is_empty() || rows.is_empty() { break; }
+                }
+                start = end;
+            }
+            Ok(Some(FundingPaid { amount, since, lower }))
+        }
+        Exchange::Okx => okx::funding_paid(k, p).await,
+        Exchange::Gate => gate::funding_paid(k, p).await,
+        Exchange::Hyperliquid => hyperliquid::funding_paid(k, p).await,
+        // ponytail: Bitget (all-position totalFee: sign undocumented), Kraken and Lighter not read; add once a
+        // real account confirms the field and sign
+        _ => Ok(None),
+    }
+}
+
 /// Group closing fills (realized != 0) by (symbol, second, side) into closes: a Sell that realizes
 /// PnL closed a long. Entry is implied from exit and PnL per unit.
 fn closes_from_fills(fills: &[Fill]) -> Vec<ClosedPnl> {
@@ -1368,6 +1495,34 @@ mod tests {
         assert_eq!(a.len(), 36);
         assert_eq!(a.split('-').map(|p| p.len()).collect::<Vec<_>>(), vec![8, 4, 4, 4, 12]);
         assert!(a.chars().all(|c| c == '-' || c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn open_time_walks_fills_back_to_zero() {
+        // long 3 built by buys at t=10 (2) and t=20 (1): opened at 10, the older round trip is ignored
+        assert_eq!(open_time(3.0, &[(20, 1.0), (10, 2.0), (5, -4.0), (1, 4.0)]), Some((10, false)));
+        // short 1 after a flip: the sell at t=30 took a long 2 through zero, so that fill opened it
+        assert_eq!(open_time(-1.0, &[(30, -3.0), (20, 2.0)]), Some((30, false)));
+        // fills run out before zero: oldest fill, lower bound
+        assert_eq!(open_time(5.0, &[(20, 1.0), (10, 1.0)]), Some((10, true)));
+        assert_eq!(open_time(5.0, &[]), None);
+        // hedge mode: the SHORT fill in between belongs to the other position
+        let rows = json!([
+            {"time": 10, "id": 1, "side": "BUY", "qty": "2", "positionSide": "LONG"},
+            {"time": 15, "id": 2, "side": "SELL", "qty": "5", "positionSide": "SHORT"},
+            {"time": 20, "id": 3, "side": "SELL", "qty": "1", "positionSide": "LONG"},
+            {"time": 25, "id": 4, "side": "BUY", "qty": "2", "positionSide": "LONG"}]);
+        assert_eq!(binance_fills(&rows, Side::Buy), vec![(25, 2.0), (20, -1.0), (10, 2.0)]);
+        assert_eq!(open_time(3.0, &binance_fills(&rows, Side::Buy)), Some((10, false)));
+        assert_eq!(open_time(-5.0, &binance_fills(&rows, Side::Sell)), Some((15, false)));
+        // Bybit (newest first): a one-way flip buy closes the 1 short and opens 2 long; in hedge mode a sell
+        // that opens a short (closedSize 0) does not touch the long
+        let rows = [json!({"execTime": "30", "side": "Sell", "execQty": "4", "closedSize": "0", "execType": "Trade"}),
+            json!({"execTime": "25", "side": "Buy", "execQty": "1", "closedSize": "0", "execType": "Funding"}),
+            json!({"execTime": "20", "side": "Buy", "execQty": "3", "closedSize": "1", "execType": "Trade"}),
+            json!({"execTime": "10", "side": "Sell", "execQty": "1", "closedSize": "0", "execType": "Trade"})];
+        assert_eq!(bybit_fills(&rows, Side::Buy), vec![(30, 0.0), (20, 2.0), (10, 0.0)]);
+        assert_eq!(open_time(2.0, &bybit_fills(&rows, Side::Buy)), Some((20, false)));
     }
 
     #[test]
