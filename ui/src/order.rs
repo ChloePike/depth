@@ -2,8 +2,9 @@
 //! LeverageSheet and OrderTpSl. It reads the same state document (`App::state_json`) and sends the
 //! same ops (`App::call`), so routing, validation and placement are identical in both hosts.
 //! Prices always come from the trade venue's own book (`trade.bid/ask`), never the composite.
+use super::kit::{self, Look, Tone, H, H_LG, H_SM};
 use super::{fmt_dp, fmt_px, fmt_qty, l, lf, theme::*};
-use eframe::egui::{self, Color32, RichText, Ui};
+use eframe::egui::{self, Align2, Color32, Rect, Response, RichText, Sense, Stroke, Ui};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
@@ -165,66 +166,43 @@ fn kind_text(k: &str) -> String {
     }
 }
 
-// ---- widgets ----
+// ---- widgets: everything is kit.rs; the few primitives the kit has no equivalent for live here ----
 
-/// Bordered input with the label inside on the left, right-aligned digits and a unit; Enter
-/// returns true.
-fn field(ui: &mut Ui, label: &str, text: &mut String, unit: &str, id: &str) -> (egui::Response, bool) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
-    let eid = ui.id().with(("field", id));
-    let focused = ui.memory(|m| m.has_focus(eid));
-    ui.painter().rect(rect, 5, panel2(), egui::Stroke::new(1.0, if focused { accent() } else { line() }), egui::StrokeKind::Inside);
-    let lw = ui.painter().text(rect.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, label, prop(12.0), dim()).width();
-    let uw = ui.painter().text(rect.right_center() - egui::vec2(10.0, 0.0), egui::Align2::RIGHT_CENTER, unit, prop(11.5), mu()).width();
-    let edit = egui::Rect::from_min_max(egui::pos2(rect.left() + lw + 18.0, rect.top() + 4.0), egui::pos2(rect.right() - uw - 18.0, rect.bottom() - 4.0));
-    let r = ui.put(edit, egui::TextEdit::singleline(text).id(eid).frame(egui::Frame::NONE).font(mono(13.5)).horizontal_align(egui::Align::RIGHT).vertical_align(egui::Align::Center));
-    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-    (r, enter)
+/// Account card helpers kept for account.rs (it imports them from here); new code calls kit directly.
+pub(crate) fn big_button(ui: &mut Ui, text: &str, fill: Color32, enabled: bool) -> bool { kit::button(ui, text, Look::Fill(fill), H_LG, Some(f32::INFINITY), enabled).clicked() }
+pub(crate) fn note(ui: &mut Ui, text: &str, col: Color32) { kit::note(ui, text, col) }
+pub(crate) fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    kit::panel_frame(12).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 10.0;
+        add(ui)
+    }).inner
 }
 
-/// Full-width segmented control.
-pub(crate) fn segments<T: PartialEq + Copy>(ui: &mut Ui, sel: &mut T, items: &[(T, &str)]) -> bool {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 6, panel2());
-    let w = rect.width() / items.len() as f32;
-    let mut changed = false;
-    // the selected thumb slides to its segment (~150 ms) instead of jumping
-    if let Some(k) = items.iter().position(|(v, _)| *v == *sel) {
-        let x = ui.ctx().animate_value_with_time(ui.id().with(("seg_thumb", items.len(), items[0].1)), k as f32, 0.15);
-        let r = egui::Rect::from_min_size(egui::pos2(rect.left() + w * x, rect.top()), egui::vec2(w, rect.height())).shrink(2.0);
-        ui.painter().rect(r, 5, hl(), egui::Stroke::new(1.0, edge()), egui::StrokeKind::Inside);
-    }
-    for (i, (v, name)) in items.iter().enumerate() {
-        let r = egui::Rect::from_min_size(egui::pos2(rect.left() + w * i as f32, rect.top()), egui::vec2(w, rect.height())).shrink(2.0);
-        let resp = ui.interact(r, ui.id().with(("seg", name, i)), egui::Sense::click());
-        let on = *sel == *v;
-        let hv = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered() && !on, 0.1);
-        if hv > 0.0 { ui.painter().rect_filled(r, 5, hl().linear_multiply(0.5 * hv)); }
-        let tc = ui.ctx().animate_bool_with_time(resp.id.with("on"), on, 0.15);
-        ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, *name, prop(12.5), lerp(mu(), fg(), tc.max(hv)));
-        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !on { *sel = *v; changed = true; }
-    }
-    changed
-}
-
-/// Size slider 0..=1 with notches at quarters; returns true when moved.
-fn slider(ui: &mut Ui, v: &mut f32) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width() - 44.0, 22.0), egui::Sense::click_and_drag());
-    let track = egui::Rect::from_min_max(egui::pos2(rect.left() + 6.0, rect.center().y - 2.0), egui::pos2(rect.right() - 6.0, rect.center().y + 2.0));
+/// Slider 0..=1 (Components spec: 2 px track, diamond notches at quarters, 12 px white knob with an
+/// accent ring), `right` printed after it in 12 grey numbers; snaps near the notches. True when moved.
+fn slider(ui: &mut Ui, v: &mut f32, right: &str) -> bool {
+    let (row, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), Sense::hover());
+    let rect = Rect::from_min_max(row.min, egui::pos2(row.right() - if right.is_empty() { 0.0 } else { 44.0 }, row.bottom()));
+    let resp = ui.interact(rect, ui.id().with(("slider", right.is_empty())), Sense::click_and_drag());
+    let tr = Rect::from_min_max(egui::pos2(rect.left() + 6.0, rect.center().y - 1.0), egui::pos2(rect.right() - 6.0, rect.center().y + 1.0));
+    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() || resp.dragged(), 0.1);
     let p = ui.painter();
-    p.rect_filled(track, 2, hl());
-    let x = track.left() + track.width() * v.clamp(0.0, 1.0);
-    p.rect_filled(egui::Rect::from_min_max(track.min, egui::pos2(x, track.max.y)), 2, accent());
+    p.rect_filled(tr, 1, track());
+    let x = tr.left() + tr.width() * v.clamp(0.0, 1.0);
+    p.rect_filled(Rect::from_min_max(tr.min, egui::pos2(x, tr.max.y)), 1, accent());
     for q in 0..=4 {
-        let c = egui::pos2(track.left() + track.width() * q as f32 / 4.0, track.center().y);
+        let c = egui::pos2(tr.left() + tr.width() * q as f32 / 4.0, tr.center().y);
         let on = *v >= q as f32 / 4.0 - 1e-4;
-        p.add(egui::Shape::convex_polygon(vec![c + egui::vec2(0.0, -5.0), c + egui::vec2(5.0, 0.0), c + egui::vec2(0.0, 5.0), c + egui::vec2(-5.0, 0.0)],
-            if on { accent() } else { panel2() }, egui::Stroke::new(1.5, if on { accent() } else { dim() })));
+        p.add(egui::Shape::convex_polygon(vec![c + egui::vec2(0.0, -4.0), c + egui::vec2(4.0, 0.0), c + egui::vec2(0.0, 4.0), c + egui::vec2(-4.0, 0.0)],
+            if on { accent() } else { track() }, Stroke::NONE));
     }
-    p.circle(egui::pos2(x, track.center().y), 7.0, fg(), egui::Stroke::new(2.0, accent()));
-    p.text(egui::pos2(rect.right() + 42.0, rect.center().y), egui::Align2::RIGHT_CENTER, format!("{:.0}%", *v * 100.0), mono(11.5), mu());
+    let k = egui::pos2(x, tr.center().y);
+    if hv > 0.0 { p.circle_filled(k, 6.0 + 4.0 * hv, accent().gamma_multiply(0.18 * hv)); }
+    p.circle(k, 6.0, Color32::WHITE, Stroke::new(1.0, accent()));
+    if !right.is_empty() { p.text(row.right_center(), Align2::RIGHT_CENTER, right, mono_m(12.0), mu()); }
     if let Some(pos) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
-        let mut x = ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0);
+        let mut x = ((pos.x - tr.left()) / tr.width()).clamp(0.0, 1.0);
         for q in [0.0, 0.25, 0.5, 0.75, 1.0] { if (x - q).abs() < 0.03 { x = q; } }
         *v = x;
         return true;
@@ -232,45 +210,105 @@ fn slider(ui: &mut Ui, v: &mut f32) -> bool {
     false
 }
 
-pub(crate) fn big_button(ui: &mut Ui, text: &str, fill: Color32, enabled: bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
-    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hov"), enabled && resp.hovered(), 0.1);
-    let col = if !enabled { fill.linear_multiply(0.3) } else if resp.is_pointer_button_down_on() { fill.linear_multiply(0.8) } else { lerp(fill, fill.gamma_multiply(1.18), hv) };
-    ui.painter().rect_filled(rect, 6, col);
-    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, prop(14.5), if enabled { Color32::WHITE } else { Color32::from_white_alpha(110) });
-    enabled && resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+/// Compact toggle pill (24 px): selected = hl solid, 600, strong; otherwise grey, hl fading in on hover.
+fn pill(ui: &mut Ui, text: &str, on: bool) -> Response {
+    let font = if on { prop_s(12.0) } else { prop_m(12.0) };
+    let g = ui.painter().layout_no_wrap(text.to_string(), prop_s(12.0), fg());
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(g.size().x + 16.0, H_SM), Sense::click());
+    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() && !on, 0.1);
+    let t = ui.ctx().animate_bool_with_time(resp.id.with("on"), on, 0.12);
+    let fill = if t > 0.0 { hl().gamma_multiply(t.max(0.6 * hv)) } else { hl().gamma_multiply(0.6 * hv) };
+    ui.painter().rect_filled(r, kit::R, fill);
+    ui.painter().text(r.center(), Align2::CENTER_CENTER, text, font, lerp(mu(), fg_strong(), t.max(hv * 0.7)));
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn chip(ui: &mut Ui, text: &str, enabled: bool) -> egui::Response {
-    let g = ui.painter().layout_no_wrap(text.to_string(), prop(11.5), if enabled { fg() } else { mu() });
-    let (r, resp) = ui.allocate_exact_size(g.size() + egui::vec2(16.0, 8.0), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
-    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered() && enabled, 0.1);
-    ui.painter().rect(r, 4, lerp(panel2(), hl(), hv), egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside);
-    ui.painter().galley(r.center() - g.size() / 2.0, g, if enabled { fg() } else { mu() });
-    if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
-}
-
-pub(crate) fn kv(ui: &mut Ui, k: &str, v: String, col: Color32) {
+/// "label ........ [controls]" row: label 12 grey on the left, `add` laid out from the right edge.
+fn row<R>(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(k).font(prop(11.5)).color(dim()));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label(RichText::new(v).font(mono(11.5)).color(col)); });
+        ui.set_min_height(H_SM);
+        ui.label(RichText::new(label).font(prop(12.0)).color(mu()));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add).inner
+    })
+}
+
+/// A labelled switch row (replaces checkboxes): label 12.5 in fg, switch on the right.
+fn switch_row(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+    ui.horizontal(|ui| {
+        ui.set_min_height(H_SM);
+        ui.add(egui::Label::new(RichText::new(label).font(prop(12.0)).color(fg())).wrap());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { kit::switch(ui, on); });
+    }).response
+}
+
+/// Secondary button that reads as active (accent border) when `on`.
+fn secondary(ui: &mut Ui, text: &str, h: f32, w: Option<f32>, on: bool, enabled: bool) -> Response {
+    let r = kit::button(ui, text, Look::Secondary, h, w, enabled);
+    if on { ui.painter().rect_stroke(r.rect, kit::R, Stroke::new(1.0, accent()), egui::StrokeKind::Inside); }
+    r
+}
+
+/// Thin progress bar (3 px, accent on the track grey).
+fn progress(ui: &mut Ui, frac: f32, col: Color32) {
+    let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 3.0), Sense::hover());
+    ui.painter().rect_filled(r, 1, track());
+    ui.painter().rect_filled(Rect::from_min_size(r.min, egui::vec2(r.width() * frac.clamp(0.0, 1.0), r.height())), 1, col);
+}
+
+/// Dialog frame: popup surface, radius 6, hairline, soft shadow, 20 px padding.
+fn dialog(id: &str) -> egui::Modal {
+    egui::Modal::new(egui::Id::new(id)).backdrop_color(Color32::from_black_alpha(140)).frame(egui::Frame::new().fill(popup_bg()).corner_radius(6)
+        .stroke(Stroke::new(1.0, line())).inner_margin(20).shadow(egui::Shadow { offset: [0, 12], blur: 32, spread: 0, color: Color32::from_black_alpha(110) }))
+}
+
+/// Dialog title row: 16 semibold, a grey subtitle beside it, an optional tag on the right.
+fn dialog_title(ui: &mut Ui, title: &str, sub: &str, tag: Option<(&str, Tone)>) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.label(RichText::new(title).font(prop_s(16.0)).color(fg_strong()));
+        if !sub.is_empty() { ui.label(RichText::new(sub).font(prop(12.5)).color(mu())); }
+        if let Some((t, tone)) = tag { ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { kit::chip(ui, t, tone); }); }
     });
 }
 
-pub(crate) fn note(ui: &mut Ui, text: &str, col: Color32) {
-    ui.add(egui::Label::new(RichText::new(text).font(prop(11.0)).color(col)).wrap());
+/// Dialog footer: Cancel (secondary) and the primary action side by side; returns (cancel, ok).
+fn dialog_buttons(ui: &mut Ui, cancel: &str, ok: &str, col: Color32, enabled: bool) -> (bool, bool) {
+    ui.add_space(4.0);
+    let (mut c, mut o) = (false, false);
+    ui.columns(2, |cols| {
+        c = kit::button(&mut cols[0], cancel, Look::Secondary, H_LG, Some(f32::INFINITY), true).clicked();
+        o = kit::button(&mut cols[1], ok, Look::Fill(col), H_LG, Some(f32::INFINITY), enabled).clicked();
+    });
+    (c, o)
 }
 
-/// Card: rounded panel with a hairline, like the native glass cards.
-pub(crate) fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    egui::Frame::new().fill(panel2()).stroke(egui::Stroke::new(1.0, line())).corner_radius(10).inner_margin(12).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = 8.0;
-        add(ui)
-    }).inner
+/// Two "label .... value" cells side by side, 8 px apart (under the buy / sell buttons: 11.5, label
+/// dim; `big` in dialogs: label 12 grey, value 12.5); values tabular, right-aligned in their colour.
+fn pair_row(ui: &mut Ui, cells: [(&str, String, Color32); 2], big: bool) {
+    let (h, gap, lf, vf, lc) = if big { (18.0, 16.0, prop(12.0), mono_m(12.5), mu()) } else { (16.0, 8.0, prop(11.5), mono_m(11.5), dim()) };
+    let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), Sense::hover());
+    let w = (r.width() - gap) / 2.0;
+    for (i, (k, v, c)) in cells.into_iter().enumerate() {
+        let x = r.left() + i as f32 * (w + gap);
+        ui.painter().text(egui::pos2(x, r.center().y), Align2::LEFT_CENTER, k, lf.clone(), lc);
+        ui.painter().text(egui::pos2(x + w, r.center().y), Align2::RIGHT_CENTER, v, vf.clone(), c);
+    }
 }
 
-pub(crate) fn checkbox(ui: &mut Ui, on: &mut bool, text: &str) -> bool { ui.checkbox(on, RichText::new(text).font(prop(12.0))).changed() }
+/// Small close glyph button (painted, no font dependency).
+fn close_x(ui: &mut Ui, size: f32) -> Response {
+    kit::icon_button(ui, size, false, |p, r, c| {
+        let (c0, d) = (r.center(), 3.5);
+        p.line_segment([c0 + egui::vec2(-d, -d), c0 + egui::vec2(d, d)], Stroke::new(1.3, c));
+        p.line_segment([c0 + egui::vec2(-d, d), c0 + egui::vec2(d, -d)], Stroke::new(1.3, c));
+    })
+}
+
+/// Tighter rows inside a dialog group (kit::kv rows follow interact_size).
+fn tight(ui: &mut Ui) { ui.spacing_mut().interact_size.y = 18.0; ui.spacing_mut().item_spacing.y = 6.0; }
+
+/// Overline caption above a group in a dialog.
+fn caption(ui: &mut Ui, text: &str) { ui.add_space(2.0); kit::overline(ui, text); }
 
 impl OrderPanel {
     /// The whole order column. `st` is the app's state document, `call` sends ops.
@@ -317,88 +355,92 @@ impl OrderPanel {
         let max_qty = if self.close { held("long").max(held("short")) } else if ref_px > 0.0 { f(&t["available"]).unwrap_or(0.0) * lev / ref_px } else { 0.0 };
 
         let mut enter = false;
-        {
-            card(ui, |ui| {
-                self.header(ui, t, &venue, smart, has_key, call);
-                // the venue's own touch on its own row: bid left, spread centre, ask right; a click
-                // puts that price in the limit field
-                if let (Some(b), Some(k)) = (bid, ask) {
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
-                    ui.painter().rect_filled(r, 6, panel2());
-                    let half = r.width() / 2.0;
-                    for (i, (lab, v, col)) in [(l("Bid"), b, up()), (l("Ask"), k, dn())].into_iter().enumerate() {
-                        let cell = egui::Rect::from_min_size(egui::pos2(r.left() + half * i as f32, r.top()), egui::vec2(half, r.height()));
-                        let resp = ui.interact(cell, ui.id().with(("touch", i)), egui::Sense::click());
-                        if resp.hovered() { ui.painter().rect_filled(cell.shrink(2.0), 5, hl()); }
-                        let (al, x) = if i == 0 { (egui::Align2::LEFT_CENTER, cell.left() + 10.0) } else { (egui::Align2::RIGHT_CENTER, cell.right() - 10.0) };
-                        let g = ui.painter().layout_no_wrap(lab.to_string(), prop(11.0), dim());
-                        let (lx, vx) = if i == 0 { (x, x + g.size().x + 6.0) } else { (x, x - g.size().x - 6.0) };
-                        ui.painter().text(egui::pos2(lx, cell.center().y), al, lab, prop(11.0), dim());
-                        ui.painter().text(egui::pos2(vx, cell.center().y), al, fmt_px(v), mono(12.5), col);
-                        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(l("Use this price")).clicked() && self.kind != Kind::Market {
-                            if self.kind != Kind::Stop { self.kind = Kind::Limit; }
-                            (self.bbo_on, self.price) = (false, px_str(v, tick));
-                        }
+        card(ui, |ui| {
+            self.header(ui, t, &venue, smart, has_key, call);
+            // the venue's own touch on its own row: bid left, spread centre, ask right; a click
+            // puts that price in the limit field
+            if let (Some(b), Some(k)) = (bid, ask) {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), Sense::hover());
+                ui.painter().rect_filled(r, kit::R, panel2());
+                let half = r.width() / 2.0;
+                for (i, (lab, v, col)) in [(l("Bid"), b, up()), (l("Ask"), k, dn())].into_iter().enumerate() {
+                    let cell = Rect::from_min_size(egui::pos2(r.left() + half * i as f32, r.top()), egui::vec2(half, r.height()));
+                    let resp = ui.interact(cell, ui.id().with(("touch", i)), Sense::click());
+                    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered(), 0.1);
+                    if hv > 0.0 { ui.painter().rect_filled(cell.shrink(2.0), kit::R, hl().gamma_multiply(0.7 * hv)); }
+                    let (al, x) = if i == 0 { (Align2::LEFT_CENTER, cell.left() + 10.0) } else { (Align2::RIGHT_CENTER, cell.right() - 10.0) };
+                    let w = ui.painter().text(egui::pos2(x, cell.center().y), al, lab, prop(11.0), dim()).width();
+                    let vx = if i == 0 { x + w + 5.0 } else { x - w - 5.0 };
+                    ui.painter().text(egui::pos2(vx, cell.center().y), al, fmt_px(v), mono_m(12.5), col);
+                    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(l("Use this price")).clicked() && self.kind != Kind::Market {
+                        if self.kind != Kind::Stop { self.kind = Kind::Limit; }
+                        (self.bbo_on, self.price) = (false, px_str(v, tick));
                     }
-                    let mid = (b + k) / 2.0;
-                    if mid > 0.0 { ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, format!("{:.1}bp", (k - b) / mid * 1e4), mono(10.0), dim()); }
                 }
-                if segments(ui, &mut self.close, &[(false, l("Open")), (true, l("Close"))]) { (self.pct, self.qty, self.error) = (0.0, String::new(), None); }
-                self.type_tabs(ui, caps);
-                ui.separator();
-                // available margin, with the transfer shortcut
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(l("Avbl")).font(prop(12.0)).color(dim()));
-                    ui.label(RichText::new(f(&t["available"]).map(|a| format!("{} USDT", usd(a))).unwrap_or("–".into())).font(mono(12.0)));
-                    if has_key && link(ui, "⇄").on_hover_text(l("Move funds between accounts on this venue")).clicked() { self.open_transfer = Some(venue.clone()); }
+                let mid = (b + k) / 2.0;
+                if mid > 0.0 { ui.painter().text(r.center(), Align2::CENTER_CENTER, format!("{:.1}bp", (k - b) / mid * 1e4), mono(11.0), dim()); }
+            }
+            if kit::segments(ui, &mut self.close, &[(false, l("Open")), (true, l("Close"))], 34.0) { (self.pct, self.qty, self.error) = (0.0, String::new(), None); }
+            self.type_tabs(ui, caps);
+            // available margin, with the transfer shortcut
+            ui.horizontal(|ui| {
+                ui.set_min_height(18.0);
+                ui.label(RichText::new(l("Available")).font(prop(12.0)).color(mu()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    if has_key && kit::button(ui, "⇄", Look::Link, 18.0, Some(18.0), true).on_hover_text(l("Move funds between accounts on this venue")).clicked() { self.open_transfer = Some(venue.clone()); }
+                    ui.label(RichText::new(f(&t["available"]).map(|a| format!("{} USDT", usd(a))).unwrap_or("–".into())).font(mono_m(12.0)).color(fg()));
                 });
-                enter |= self.kind_fields(ui, t, &venue, &bbo_levels, use_bbo, tick);
-                let (r, e) = field(ui, l("Size"), &mut self.qty, &base, "qty");
-                enter |= e;
-                if r.changed() { self.pct = if max_qty > 0.0 { (parse(&self.qty).unwrap_or(0.0) / max_qty).min(1.0) as f32 } else { 0.0 }; }
-                ui.horizontal(|ui| {
-                    if slider(ui, &mut self.pct) { self.qty = if self.pct > 0.0 { qty_str(max_qty * self.pct as f64, step) } else { String::new() }; }
-                }).response.on_hover_text(if self.close { l("Share of the position") } else { l("Share of available margin × leverage") });
-                ui.separator();
-                if !self.close && matches!(self.kind, Kind::Limit | Kind::Market) { enter |= self.tpsl_section(ui); }
-                self.algo_jobs(ui, st, call);
-                // the two sides, with what each can open / close and the margin it costs
-                let (l1, l2) = if self.close { (l("Close Short"), l("Close Long")) } else { (l("Open Long"), l("Open Short")) };
-                let (p1, p2) = if self.close { ("short", "long") } else { ("long", "short") };
-                let mut go = None;
-                ui.columns(2, |c| {
-                    if big_button(&mut c[0], l1, up(), can_trade) { go = Some(p1); }
-                    if big_button(&mut c[1], l2, dn(), can_trade) { go = Some(p2); }
-                    for (i, pos) in [(0, p1), (1, p2)] {
-                        let cu = &mut c[i];
-                        cu.spacing_mut().item_spacing.y = 2.0;
-                        if self.close { kv(cu, l("Max"), format!("{} {base}", fmt_qty(held(pos))), mu()); }
-                        else {
-                            kv(cu, l("Cost"), format!("{} USDT", usd(qty_v * ref_px / lev)), mu());
-                            kv(cu, l("Max"), format!("{} {base}", fmt_qty(max_qty)), mu());
-                        }
-                    }
-                });
-                if read_only { note(ui, &format!("🔒 {}", l("This API key is read-only: trading is disabled. Allow trading for the key on the exchange to place orders.")), WARN); }
-                if let Some(p) = go { self.submit(p, st, ref_px, use_bbo, typed_price, call); }
-                self.summary(ui, t, &base, qty_v * ref_px, use_bbo, has_key, qty_v);
-                if let Some(e) = &self.error { note(ui, &format!("⛔ {e}"), dn()); }
-                let mine: Vec<&Waiting> = self.waiting.iter().filter(|w| w.symbol == symbol).collect();
-                if !mine.is_empty() {
-                    ui.label(RichText::new(l("TP/SL waiting for fill")).font(prop(11.5)).color(dim()));
-                    let mut drop = None;
-                    for (i, w) in mine.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("{} · TP {} · SL {}", w.ex, w.tp.map(fmt_px).unwrap_or("–".into()), w.sl.map(fmt_px).unwrap_or("–".into()))).font(mono(11.0)));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if link(ui, "✕").on_hover_text(l("Forget this TP/SL")).clicked() { drop = Some(i); } });
-                        });
-                    }
-                    if let Some(i) = drop { let id = (mine[i].ex.clone(), mine[i].until); self.waiting.retain(|w| (w.ex.clone(), w.until) != id); }
-                }
             });
-            ui.add_space(8.0);
-            self.account_card(ui, st, t, &venue, has_key);
-        }
+            enter |= self.kind_fields(ui, t, &venue, &bbo_levels, use_bbo, tick);
+            let (r, e) = kit::field(ui, l("Size"), &mut self.qty, &base, "qty", false);
+            enter |= e;
+            if r.changed() { self.pct = if max_qty > 0.0 { (parse(&self.qty).unwrap_or(0.0) / max_qty).min(1.0) as f32 } else { 0.0 }; }
+            let pct = format!("{:.0}%", self.pct * 100.0);
+            ui.scope(|ui| {
+                if slider(ui, &mut self.pct, &pct) { self.qty = if self.pct > 0.0 { qty_str(max_qty * self.pct as f64, step) } else { String::new() }; }
+            }).response.on_hover_text(if self.close { l("Share of the position") } else { l("Share of available margin × leverage") });
+            if !self.close && matches!(self.kind, Kind::Limit | Kind::Market) { enter |= self.tpsl_section(ui); }
+            self.algo_jobs(ui, st, call);
+            // the two sides, with what each can open / close and the margin it costs
+            let (l1, l2) = if self.close { (l("Close Short"), l("Close Long")) } else { (l("Open Long"), l("Open Short")) };
+            let (p1, p2) = if self.close { ("short", "long") } else { ("long", "short") };
+            let mut go = None;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let w = (ui.available_width() - 8.0) / 2.0;
+                if kit::button(ui, l1, Look::Fill(up()), H_LG, Some(w), can_trade).clicked() { go = Some(p1); }
+                if kit::button(ui, l2, Look::Fill(dn()), H_LG, Some(w), can_trade).clicked() { go = Some(p2); }
+            });
+            if self.close { pair_row(ui, [(l("Max"), format!("{} {base}", fmt_qty(held(p1))), fg()), (l("Max"), format!("{} {base}", fmt_qty(held(p2))), fg())], false); }
+            else {
+                let cost = format!("{} USDT", usd(qty_v * ref_px / lev));
+                pair_row(ui, [(l("Cost"), cost.clone(), fg()), (l("Cost"), cost, fg())], false);
+                ui.add_space(-6.0);
+                let mx = format!("{} {base}", fmt_qty(max_qty));
+                pair_row(ui, [(l("Max"), mx.clone(), fg()), (l("Max"), mx, fg())], false);
+            }
+            if read_only { kit::note(ui, l("This API key is read-only: trading is disabled. Allow trading for the key on the exchange to place orders."), WARN); }
+            if let Some(p) = go { self.submit(p, st, ref_px, use_bbo, typed_price, call); }
+            self.summary(ui, t, &base, qty_v * ref_px, use_bbo, has_key, qty_v);
+            if let Some(e) = &self.error { kit::note(ui, e, dn()); }
+            let mine: Vec<&Waiting> = self.waiting.iter().filter(|w| w.symbol == symbol).collect();
+            if !mine.is_empty() {
+                kit::overline(ui, l("TP/SL waiting for fill"));
+                let mut drop = None;
+                for (i, w) in mine.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("{} · TP {} · SL {}", w.ex, w.tp.map(fmt_px).unwrap_or("–".into()), w.sl.map(fmt_px).unwrap_or("–".into()))).font(mono_m(11.5)).color(fg()));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if close_x(ui, 20.0).on_hover_text(l("Forget this TP/SL")).clicked() { drop = Some(i); }
+                        });
+                    });
+                }
+                if let Some(i) = drop { let id = (mine[i].ex.clone(), mine[i].until); self.waiting.retain(|w| (w.ex.clone(), w.until) != id); }
+            }
+        });
+        ui.add_space(8.0);
+        self.account_card(ui, st, t, &venue, has_key);
         if enter {
             match self.last_pos.clone() {
                 Some(p) => self.submit(&p, st, ref_px, use_bbo, typed_price, call),
@@ -415,27 +457,33 @@ impl OrderPanel {
     fn header(&mut self, ui: &mut Ui, t: &Value, venue: &str, smart: bool, has_key: bool, call: &mut Call) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
+            ui.set_min_height(H_SM);
             if let Some(ex) = depth::Exchange::parse(venue) {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), Sense::hover());
                 icon(ui.painter(), ex, r, false);
             }
             // mode and leverage are only known with keys
             if has_key {
                 let mode = match s(&t["mode"]) { "hedge" => Some(l("Hedge")), "" => None, _ => Some(l("One-Way")) };
-                if let Some(m) = mode { chip(ui, m, false).on_hover_text(l("Position mode for this symbol (change it on the exchange)")); }
+                if let Some(m) = mode { kit::chip(ui, m, Tone::Neutral).on_hover_text(l("Position mode for this symbol (change it on the exchange)")); }
                 let lv = f(&t["lev"]).map(|v| format!("{v}x")).unwrap_or(l("Leverage").into());
-                if chip(ui, &lv, true).on_hover_text(l("Change leverage for this symbol")).clicked() {
+                let r = kit::chip(ui, &lv, Tone::Outline);
+                let r = ui.interact(r.rect, ui.id().with("lev_chip"), Sense::click());
+                if r.hovered() { ui.painter().rect_stroke(r.rect, 3, Stroke::new(1.0, edge()), egui::StrokeKind::Inside); }
+                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(l("Change leverage for this symbol")).clicked() {
                     self.lev = Some(f(&t["lev"]).unwrap_or(10.0));
                     let _ = call(json!({"op": "leverage_max"}));
                 }
             }
-            if t["verified"] == false { ui.label(RichText::new("⚠").color(WARN)).on_hover_text(l("Order placement on this venue is not yet verified on a live account: start with the minimum size.")); }
+            if t["verified"] == false { kit::chip(ui, l("Untested"), Tone::Warn).on_hover_text(l("Order placement on this venue is not yet verified on a live account: start with the minimum size.")); }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let name = if smart { format!("⑂ {}", l("Smart")) } else { format!("{venue} ▾") };
-                ui.menu_button(RichText::new(name).font(prop(12.5)).color(accent()), |ui| {
+                let r = kit::button(ui, &name, Look::Link, H_SM, None, true)
+                    .on_hover_text(format!("{} {} · {} {}", l("Push"), ms(f(&t["push_ms"])), l("RTT"), ms(f(&t["rtt_ms"]))));
+                egui::Popup::menu(&r).show(|ui| {
                     if ui.button(l("Order routing…")).clicked() { self.open_settings = Some(2); ui.close(); }
                     if ui.button(l("API keys…")).clicked() { self.open_settings = Some(3); ui.close(); }
-                }).response.on_hover_text(format!("{} {} · {} {}", l("Push"), ms(f(&t["push_ms"])), l("RTT"), ms(f(&t["rtt_ms"]))));
+                });
             });
         });
     }
@@ -449,140 +497,133 @@ impl OrderPanel {
         more.extend([(Kind::Scaled, l("Scaled")), (Kind::Twap, l("TWAP"))]);
         let in_more = more.iter().any(|m| m.0 == self.kind);
         ui.horizontal(|ui| {
-            let w = ui.available_width() - 90.0;
-            ui.allocate_ui(egui::vec2(w, 28.0), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let w = ui.available_width() - 82.0;
+            ui.allocate_ui(egui::vec2(w, 32.0), |ui| {
                 // a More type selected: no segment is lit; clicking one switches back
                 let mut k = (!in_more).then_some(self.kind);
                 let items: Vec<(Option<Kind>, &str)> = main.iter().map(|(k, n)| (Some(*k), *n)).collect();
-                if segments(ui, &mut k, &items) { if let Some(k) = k { self.kind = k; } }
+                if kit::segments(ui, &mut k, &items, 32.0) { if let Some(k) = k { self.kind = k; } }
             });
-            // "More" in the same 28px pill as the segments beside it
             let label = if in_more { more.iter().find(|m| m.0 == self.kind).map_or(l("More"), |m| m.1) } else { l("More") };
-            let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
-            ui.painter().rect(r, 6, if in_more { hl() } else if resp.hovered() { hl().linear_multiply(0.6) } else { panel2() }, egui::Stroke::new(1.0, if in_more { accent() } else { line() }), egui::StrokeKind::Inside);
-            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, format!("{label} ▾"), prop(12.0), if in_more { accent() } else { fg() });
-            egui::Popup::menu(&resp.on_hover_cursor(egui::CursorIcon::PointingHand)).show(|ui| {
+            let r = secondary(ui, &format!("{label} ▾"), 32.0, Some(f32::INFINITY), in_more, true);
+            egui::Popup::menu(&r).show(|ui| {
                 for (k, name) in &more { if ui.selectable_label(self.kind == *k, *name).clicked() { self.kind = *k; ui.close(); } }
             });
         });
     }
 
-    /// The kind-specific inputs between "Avbl" and the size; true when Enter was pressed.
+    /// The kind-specific inputs between "Available" and the size; true when Enter was pressed.
     fn kind_fields(&mut self, ui: &mut Ui, t: &Value, venue: &str, bbo_levels: &[u64], use_bbo: bool, _tick: Option<f64>) -> bool {
         let mut enter = false;
         match self.kind {
             Kind::Limit | Kind::Market => {
                 if self.kind == Kind::Market {
                     let mut m = l("Market price").to_string();
-                    ui.add_enabled_ui(false, |ui| field(ui, l("Price"), &mut m, "", "mkt"));
+                    ui.add_enabled_ui(false, |ui| kit::field(ui, l("Price"), &mut m, "", "mkt", false));
                 } else {
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
                         let w = ui.available_width() - if bbo_levels.is_empty() { 0.0 } else { 54.0 };
-                        ui.allocate_ui(egui::vec2(w, 30.0), |ui| {
+                        ui.allocate_ui(egui::vec2(w, 32.0), |ui| {
                             if use_bbo {
                                 let name = |q: bool, lv: u64| format!("{} {lv}", if q { l("Queue") } else { l("Counterparty") });
-                                ui.spacing_mut().interact_size.y = 30.0;
-                                egui::ComboBox::from_id_salt("bbo_pick").width(w).selected_text(name(self.bbo_queue, self.bbo_level)).show_ui(ui, |ui| {
+                                let r = kit::button(ui, &format!("BBO · {} ▾", name(self.bbo_queue, self.bbo_level)), Look::Secondary, 32.0, Some(f32::INFINITY), true)
+                                    .on_hover_text(if self.bbo_queue { l("Own side of the book: rests as a maker at the best price.") } else { l("Opposite side of the book: fills like a taker at the price the venue sees on arrival.") });
+                                egui::Popup::menu(&r).show(|ui| {
                                     for q in [false, true] {
-                                        ui.label(RichText::new(if q { l("Queue") } else { l("Counterparty") }).small().color(dim()));
+                                        kit::overline(ui, if q { l("Queue") } else { l("Counterparty") });
                                         for lv in bbo_levels { if ui.selectable_label(self.bbo_queue == q && self.bbo_level == *lv, name(q, *lv)).clicked() { self.bbo_queue = q; self.bbo_level = *lv; } }
                                     }
-                                }).response.on_hover_text(if self.bbo_queue { l("Own side of the book: rests as a maker at the best price.") } else { l("Opposite side of the book: fills like a taker at the price the venue sees on arrival.") });
+                                });
                             } else {
-                                enter |= field(ui, l("Price"), &mut self.price, "USDT", "price").1;
+                                enter |= kit::field(ui, l("Price"), &mut self.price, "USDT", "price", false).1;
                             }
                         });
-                        if !bbo_levels.is_empty() {
-                            let b = egui::Button::new(RichText::new("BBO").font(prop(11.5)).color(if self.bbo_on { accent() } else { mu() }))
-                                .fill(if self.bbo_on { hl() } else { panel2() }).stroke(egui::Stroke::new(1.0, if self.bbo_on { accent() } else { line() })).corner_radius(5).min_size(egui::vec2(48.0, 30.0));
-                            if ui.add(b).on_hover_text(l("Priced by the venue's book when the order arrives (Counterparty: opposite side; Queue: own side; number: book level)")).clicked() { self.bbo_on = !self.bbo_on; }
-                        }
+                        if !bbo_levels.is_empty() && secondary(ui, "BBO", 32.0, Some(ui.available_width()), self.bbo_on, true)
+                            .on_hover_text(l("Priced by the venue's book when the order arrives (Counterparty: opposite side; Queue: own side; number: book level)")).clicked() { self.bbo_on = !self.bbo_on; }
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(l("Time in force")).font(prop(12.0)).color(dim()));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let short = |k: &str| match k { "ioc" => "IOC", "fok" => "FOK", "post" => l("Post only"), _ => "GTC" };
-                            ui.add_enabled_ui(!use_bbo, |ui| {
-                                ui.menu_button(RichText::new(if use_bbo { "GTC" } else { short(self.tif) }).font(prop(12.0)), |ui| {
-                                    let mut opts = vec![("gtc", l("GTC · good till cancelled")), ("ioc", l("IOC · fill what's there, cancel the rest"))];
-                                    if t["caps"]["fok"] == true { opts.push(("fok", l("FOK · fill completely or cancel"))); }
-                                    opts.push(("post", l("Post only (ALO) · maker or cancel")));
-                                    for (k, name) in opts { if ui.selectable_label(self.tif == k, name).clicked() { self.tif = k; ui.close(); } }
-                                });
-                            }).response.on_hover_text(if use_bbo { l("BBO orders are good till cancelled") } else { l("How long the order may rest on the book") });
+                    row(ui, l("Time in force"), |ui| {
+                        let short = |k: &str| match k { "ioc" => "IOC", "fok" => "FOK", "post" => l("Post only"), _ => "GTC" };
+                        let r = kit::button(ui, &format!("{} ▾", if use_bbo { "GTC" } else { short(self.tif) }), Look::Ghost, H_SM, None, !use_bbo)
+                            .on_hover_text(if use_bbo { l("BBO orders are good till cancelled") } else { l("How long the order may rest on the book") });
+                        egui::Popup::menu(&r).show(|ui| {
+                            let mut opts = vec![("gtc", l("GTC · good till cancelled")), ("ioc", l("IOC · fill what's there, cancel the rest"))];
+                            if t["caps"]["fok"] == true { opts.push(("fok", l("FOK · fill completely or cancel"))); }
+                            opts.push(("post", l("Post only (ALO) · maker or cancel")));
+                            for (k, name) in opts { if ui.selectable_label(self.tif == k, name).clicked() { self.tif = k; ui.close(); } }
                         });
                     });
                 }
             }
             Kind::Stop => {
-                enter |= field(ui, l("Trigger price"), &mut self.trigger, "USDT", "trigger").1;
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(l("Trigger by")).font(prop(12.0)).color(dim()));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.selectable_value(&mut self.trigger_last, true, l("Last"));
-                        ui.selectable_value(&mut self.trigger_last, false, l("Mark"));
-                    });
+                enter |= kit::field(ui, l("Trigger price"), &mut self.trigger, "USDT", "trigger", false).1;
+                row(ui, l("Trigger by"), |ui| {
+                    ui.allocate_ui(egui::vec2(128.0, H_SM), |ui| kit::segments(ui, &mut self.trigger_last, &[(false, l("Mark")), (true, l("Last"))], H_SM));
                 }).response.on_hover_text(l("Which price must reach the trigger: mark (harder to spike) or last trade"));
-                checkbox(ui, &mut self.stop_limit, l("Limit order when triggered"));
-                if self.stop_limit { enter |= field(ui, l("Limit price"), &mut self.price, "USDT", "stop_px").1; }
-                note(ui, l("Fires once the trigger is reached: above the price it acts as a buy stop / sell take-profit, below it as a sell stop / buy take-profit."), mu());
+                switch_row(ui, &mut self.stop_limit, l("Limit order when triggered"));
+                if self.stop_limit { enter |= kit::field(ui, l("Limit price"), &mut self.price, "USDT", "stop_px", false).1; }
+                kit::note(ui, l("Fires once the trigger is reached: above the price it acts as a buy stop / sell take-profit, below it as a sell stop / buy take-profit."), mu());
             }
             Kind::Trailing => {
                 ui.horizontal(|ui| {
-                    ui.allocate_ui(egui::vec2(ui.available_width() - 40.0, 30.0), |ui| enter |= field(ui, l("Callback rate"), &mut self.callback, "%", "cb").1);
-                    ui.menu_button("▾", |ui| { for v in ["0.5", "1.0", "2.0", "5.0"] { if ui.button(format!("{v}%")).clicked() { self.callback = v.into(); ui.close(); } } });
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.allocate_ui(egui::vec2(ui.available_width() - 38.0, 32.0), |ui| enter |= kit::field(ui, l("Callback rate"), &mut self.callback, "%", "cb", false).1);
+                    let r = kit::button(ui, "▾", Look::Secondary, 32.0, Some(32.0), true);
+                    egui::Popup::menu(&r).show(|ui| { for v in ["0.5", "1.0", "2.0", "5.0"] { if ui.selectable_label(self.callback == v, format!("{v}%")).clicked() { self.callback = v.into(); ui.close(); } } });
                 });
-                enter |= field(ui, l("Activation price (optional)"), &mut self.activation, "USDT", "act").1;
-                note(ui, if venue == "Bybit" { l("Bybit trails an open position: use it from Close. It closes the whole position at market once price retraces by the callback from its best level.") }
+                enter |= kit::field(ui, l("Activation price (optional)"), &mut self.activation, "USDT", "act", false).1;
+                kit::note(ui, if venue == "Bybit" { l("Bybit trails an open position: use it from Close. It closes the whole position at market once price retraces by the callback from its best level.") }
                     else { l("A market order once price retraces by the callback from its best level since activation.") }, mu());
             }
             Kind::Scaled => {
                 ui.columns(2, |c| {
-                    enter |= field(&mut c[0], l("From price"), &mut self.scaled_from, "", "from").1;
-                    enter |= field(&mut c[1], l("To price"), &mut self.scaled_to, "", "to").1;
+                    enter |= kit::field(&mut c[0], l("From price"), &mut self.scaled_from, "", "from", false).1;
+                    enter |= kit::field(&mut c[1], l("To price"), &mut self.scaled_to, "", "to", false).1;
                 });
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(l("Orders")).font(prop(12.0)).color(dim()));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.add(egui::DragValue::new(&mut self.scaled_count).range(2..=50)); });
+                row(ui, l("Orders"), |ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    if kit::button(ui, "+", Look::Secondary, H_SM, Some(H_SM), self.scaled_count < 50).clicked() { self.scaled_count += 1; }
+                    ui.add_sized([28.0, H_SM], egui::Label::new(RichText::new(self.scaled_count.to_string()).font(mono_m(12.5)).color(fg_strong())));
+                    if kit::button(ui, "−", Look::Secondary, H_SM, Some(H_SM), self.scaled_count > 2).clicked() { self.scaled_count -= 1; }
                 });
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(l("Size distribution")).font(prop(12.0)).color(dim()));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(if self.scaled_skew < -0.05 { l("Larger first") } else if self.scaled_skew > 0.05 { l("Larger last") } else { l("Equal") }).font(prop(12.0)));
-                    });
+                row(ui, l("Size distribution"), |ui| {
+                    ui.label(RichText::new(if self.scaled_skew < -0.05 { l("Larger first") } else if self.scaled_skew > 0.05 { l("Larger last") } else { l("Equal") }).font(prop_m(12.0)).color(fg()));
                 });
-                ui.add(egui::Slider::new(&mut self.scaled_skew, -1.0..=1.0).step_by(0.25).show_value(false));
-                checkbox(ui, &mut self.scaled_post, l("Post only (maker or cancel)"));
+                // skew -1..=1 in steps of 0.25 on the 0..=1 slider
+                let mut x = ((self.scaled_skew + 1.0) / 2.0) as f32;
+                if slider(ui, &mut x, "") { self.scaled_skew = (x as f64 * 8.0).round() / 4.0 - 1.0; }
+                switch_row(ui, &mut self.scaled_post, l("Post only (maker or cancel)"));
             }
             Kind::Twap => {
                 let range: Option<(i64, i64)> = t["native_twap"].as_array().filter(|a| a.len() == 2).map(|a| (a[0].as_i64().unwrap_or(0), a[1].as_i64().unwrap_or(0)));
                 if let Some((lo, hi)) = range {
-                    checkbox(ui, &mut self.twap_native, &lf("Run on %@ (keeps running when Depth is closed)", &[venue.into()]));
-                    ui.label("").on_hover_text(lf("%@ slices the order itself; duration %d to %d minutes.", &[venue.into(), lo.to_string(), hi.to_string()]));
+                    switch_row(ui, &mut self.twap_native, &lf("Run on %@ (keeps running when Depth is closed)", &[venue.into()]))
+                        .on_hover_text(lf("%@ slices the order itself; duration %d to %d minutes.", &[venue.into(), lo.to_string(), hi.to_string()]));
                 }
                 if range.is_some() && self.twap_native {
-                    enter |= field(ui, l("Duration (min)"), &mut self.twap_minutes, "", "tm").1;
+                    enter |= kit::field(ui, l("Duration (min)"), &mut self.twap_minutes, "", "tm", false).1;
                     if venue == "Binance" {
-                        enter |= field(ui, l("Price limit (optional)"), &mut self.twap_limit, "USDT", "tl").1;
-                        note(ui, l("Binance runs the TWAP: at least 1,000 USDT notional, 5 minutes to 24 hours. Cancel it here or in the Binance app."), mu());
+                        enter |= kit::field(ui, l("Price limit (optional)"), &mut self.twap_limit, "USDT", "tl", false).1;
+                        kit::note(ui, l("Binance runs the TWAP: at least 1,000 USDT notional, 5 minutes to 24 hours. Cancel it here or in the Binance app."), mu());
                     } else {
-                        checkbox(ui, &mut self.twap_random, l("Randomize slice timing"));
-                        note(ui, l("Hyperliquid runs the TWAP: a slice every 30 seconds, at most 3% slippage each. Cancel it here or on Hyperliquid."), mu());
+                        switch_row(ui, &mut self.twap_random, l("Randomize slice timing"));
+                        kit::note(ui, l("Hyperliquid runs the TWAP: a slice every 30 seconds, at most 3% slippage each. Cancel it here or on Hyperliquid."), mu());
                     }
                 } else {
                     ui.columns(2, |c| {
-                        enter |= field(&mut c[0], l("Duration (min)"), &mut self.twap_minutes, "", "tm").1;
-                        enter |= field(&mut c[1], l("Slices"), &mut self.twap_slices, "", "ts").1;
+                        enter |= kit::field(&mut c[0], l("Duration (min)"), &mut self.twap_minutes, "", "tm", false).1;
+                        enter |= kit::field(&mut c[1], l("Slices"), &mut self.twap_slices, "", "ts", false).1;
                     });
                     ui.columns(2, |c| {
-                        enter |= field(&mut c[0], l("Max slippage (bp)"), &mut self.twap_slip, "", "tsl").1;
-                        enter |= field(&mut c[1], l("Price limit (optional)"), &mut self.twap_limit, "", "tl").1;
+                        enter |= kit::field(&mut c[0], l("Max slippage (bp)"), &mut self.twap_slip, "", "tsl", false).1;
+                        enter |= kit::field(&mut c[1], l("Price limit (optional)"), &mut self.twap_limit, "", "tl", false).1;
                     });
                     let gap = match (parse(&self.twap_minutes), parse(&self.twap_slices)) {
                         (Some(m), Some(n)) if m > 0.0 && n > 0.0 => { let sec = m * 60.0 / n; if sec >= 60.0 { format!("{:.1} min", sec / 60.0) } else { format!("{sec:.0} s") } }
                         _ => "–".into(),
                     };
-                    note(ui, &lf("One IOC order every %@ at the venue's best price ± your slippage; slices wait while the price is beyond your limit. Keep this pair open while it runs.", &[gap]), mu());
+                    kit::note(ui, &lf("One IOC order every %@ at the venue's best price ± your slippage; slices wait while the price is beyond your limit. Keep this pair open while it runs.", &[gap]), mu());
                 }
             }
         }
@@ -592,14 +633,17 @@ impl OrderPanel {
     fn tpsl_section(&mut self, ui: &mut Ui) -> bool {
         let mut enter = false;
         ui.horizontal(|ui| {
-            ui.label(RichText::new(l("TP/SL")).font(prop(12.5)));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { toggle(ui, &mut self.tpsl_on); });
+            ui.set_min_height(H_SM);
+            ui.label(RichText::new(l("TP / SL")).font(prop_m(12.5)).color(fg()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { kit::switch(ui, &mut self.tpsl_on); });
         }).response.on_hover_text(l("Attach a take-profit / stop-loss to the position this order opens"));
         if self.tpsl_on {
-            segments(ui, &mut self.trig_last, &[(false, l("Mark")), (true, l("Last"))]);
-            enter |= field(ui, l("Take profit"), &mut self.tp, "USDT", "tp").1;
-            enter |= field(ui, l("Stop loss"), &mut self.sl, "USDT", "sl").1;
-            note(ui, l("Applies to the whole position once the order fills."), mu());
+            row(ui, l("Trigger by"), |ui| {
+                ui.allocate_ui(egui::vec2(128.0, H_SM), |ui| kit::segments(ui, &mut self.trig_last, &[(false, l("Mark")), (true, l("Last"))], H_SM));
+            });
+            enter |= kit::field(ui, l("Take profit"), &mut self.tp, "USDT", "tp", false).1;
+            enter |= kit::field(ui, l("Stop loss"), &mut self.sl, "USDT", "sl", false).1;
+            kit::note(ui, l("Applies to the whole position once the order fills."), mu());
         }
         enter
     }
@@ -613,28 +657,29 @@ impl OrderPanel {
             !done || now - end < 60_000.0
         }).collect()).unwrap_or_default();
         if jobs.is_empty() { return; }
-        ui.label(RichText::new(l("Running algorithms")).font(prop(11.5)).color(dim()));
+        kit::overline(ui, l("Running algorithms"));
         for j in jobs {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("TWAP {} {}", if j["buy"] == true { l("buy") } else { l("sell") }, fmt_qty(f(&j["total"]).unwrap_or(0.0)))).strong());
-                ui.label(RichText::new(format!("{} · {}", s(&j["ex"]), s(&j["symbol"]))).small().color(dim()));
+                let buy = j["buy"] == true;
+                ui.label(RichText::new(format!("TWAP {} {}", if buy { l("buy") } else { l("sell") }, fmt_qty(f(&j["total"]).unwrap_or(0.0)))).font(prop_s(12.5)).color(if buy { up() } else { dn() }));
+                ui.label(RichText::new(format!("{} · {}", s(&j["ex"]), s(&j["symbol"]))).font(prop(11.5)).color(mu()));
                 if j["cancelled"] != true && s(&j["status"]) != "done" {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if link(ui, l("Cancel")).clicked() { let _ = call(json!({"op": "cancel_algo", "id": j["id"]})); }
+                        if kit::button(ui, l("Cancel"), Look::Danger, H_SM, None, true).clicked() { let _ = call(json!({"op": "cancel_algo", "id": j["id"]})); }
                     });
                 }
             });
             let (started, end) = (f(&j["started_ms"]).unwrap_or(0.0), f(&j["end_ms"]).unwrap_or(0.0));
             if j["native"] == true {
                 let frac = ((now - started) / (end - started).max(1.0)).clamp(0.0, 1.0) as f32;
-                ui.add(egui::ProgressBar::new(frac).desired_height(4.0));
-                ui.label(RichText::new(format!("{} · {}", l(leak(s(&j["status"]))), if frac >= 1.0 { l("time elapsed: check fills in Trade History").to_string() } else { lf("%.0f%% of the time", &[format!("{:.0}", frac * 100.0)]) })).small().color(dim()));
+                progress(ui, frac, accent());
+                ui.label(RichText::new(format!("{} · {}", l(leak(s(&j["status"]))), if frac >= 1.0 { l("time elapsed: check fills in Trade History").to_string() } else { lf("%.0f%% of the time", &[format!("{:.0}", frac * 100.0)]) })).font(prop(11.5)).color(mu()));
             } else {
                 let (done, slices) = (f(&j["done"]).unwrap_or(0.0), f(&j["slices"]).unwrap_or(1.0).max(1.0));
-                ui.add(egui::ProgressBar::new((done / slices) as f32).desired_height(4.0));
+                progress(ui, (done / slices) as f32, accent());
                 let status = s(&j["status"]);
-                ui.label(RichText::new(format!("{done:.0}/{slices:.0} · {} {} · {}", fmt_qty(f(&j["sent"]).unwrap_or(0.0)), l("sent"), l(leak(status)))).small()
-                    .color(if status.starts_with("waiting") || status.starts_with("failed") { WARN } else { dim() }));
+                ui.label(RichText::new(format!("{done:.0}/{slices:.0} · {} {} · {}", fmt_qty(f(&j["sent"]).unwrap_or(0.0)), l("sent"), l(leak(status)))).font(mono(11.5))
+                    .color(if status.starts_with("waiting") || status.starts_with("failed") { WARN } else { mu() }));
             }
         }
     }
@@ -645,16 +690,16 @@ impl OrderPanel {
             || (use_bbo && !self.bbo_queue) || (self.kind == Kind::Limit && matches!(self.tif, "ioc" | "fok"));
         let rate = f(&t["fee"][if taker { "taker" } else { "maker" }]).unwrap_or(0.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{} {:.3}%", if taker { l("Taker") } else { l("Maker") }, rate * 100.0)).font(prop(11.0)).color(dim()));
+            ui.label(RichText::new(format!("{} {:.3}%", if taker { l("Taker") } else { l("Maker") }, rate * 100.0)).font(mono(11.0)).color(dim()));
             if notional > 0.0 {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(format!("{} USDT · {} ≈ {}", usd(notional), l("fee"), fmt_dp(notional * rate, 3))).font(mono(11.0)).color(dim()));
                 });
             }
         });
-        if t["lev"].is_null() && has_key && !self.close { note(ui, &format!("⚠ {}", l("Leverage unknown: max size and cost assume 1x.")), WARN); }
-        if let Some(m) = f(&t["min_qty"]).filter(|m| qty_v > 0.0 && qty_v < *m) { note(ui, &format!("⚠ {} {} {base}", l("Below the minimum size"), fmt_qty(m)), WARN); }
-        else if let Some(m) = f(&t["min_notional"]).filter(|m| notional > 0.0 && notional < *m) { note(ui, &format!("⚠ {} {} USDT", l("Below the minimum order value"), usd(m)), WARN); }
+        if t["lev"].is_null() && has_key && !self.close { kit::note(ui, l("Leverage unknown: max size and cost assume 1x."), WARN); }
+        if let Some(m) = f(&t["min_qty"]).filter(|m| qty_v > 0.0 && qty_v < *m) { kit::note(ui, &format!("{} {} {base}", l("Below the minimum size"), fmt_qty(m)), WARN); }
+        else if let Some(m) = f(&t["min_notional"]).filter(|m| notional > 0.0 && notional < *m) { kit::note(ui, &format!("{} {} USDT", l("Below the minimum order value"), usd(m)), WARN); }
     }
 
     /// Limit close of a position in the form: close tab, limit at the venue's own touch on the
@@ -673,24 +718,23 @@ impl OrderPanel {
         if b.is_none() && has_key { return; }
         card(ui, |ui| {
             let Some(b) = b else {
-                ui.label(RichText::new(format!("🔑 {}", l("No API key for this venue"))).color(WARN));
-                if ui.button(l("Add API keys")).clicked() { self.open_settings = Some(3); }
+                kit::title(ui, l("No API key for this venue"));
+                if kit::button(ui, l("Add API keys"), Look::Secondary, H, None, true).clicked() { self.open_settings = Some(3); }
                 return;
             };
             ui.horizontal(|ui| {
-                ui.label(RichText::new(l("Account")).strong().font(prop(13.5)));
+                ui.label(RichText::new(l("Account")).font(prop_s(14.0)).color(fg_strong()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if link(ui, &format!("⇄ {}", l("Transfer"))).on_hover_text(l("Move funds between this venue's accounts")).clicked() { self.open_transfer = Some(venue.to_string()); }
+                    if kit::button(ui, &format!("⇄ {}", l("Transfer")), Look::Link, H_SM, None, true).on_hover_text(l("Move funds between this venue's accounts")).clicked() { self.open_transfer = Some(venue.to_string()); }
                 });
             });
-            ui.separator();
             // the account-level number that liquidates a unified account, with a risk gauge beside it
             let risk_row = |ui: &mut Ui, k: &str, v: String, col: Color32, risk: f32, tip: &str| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(k).font(prop(11.5)).color(dim()));
+                    ui.label(RichText::new(k).font(prop_m(12.0)).color(mu()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(v).font(mono(14.0)).strong().color(col));
-                        let (r, _) = ui.allocate_exact_size(egui::vec2(20.0, 14.0), egui::Sense::hover());
+                        ui.label(RichText::new(v).font(mono_s(16.0)).color(col));
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(22.0, 14.0), Sense::hover());
                         risk_gauge(ui.painter(), egui::pos2(r.center().x, r.bottom() - 2.0), 8.0, risk);
                     });
                 }).response.on_hover_text(tip);
@@ -700,13 +744,13 @@ impl OrderPanel {
             } else if let Some(r) = f(&b["mm_rate"]) {
                 risk_row(ui, l("Margin ratio"), format!("{:.2}%", r * 100.0), if r > 0.7 { dn() } else if r > 0.4 { WARN } else { up() }, r as f32, l("Maintenance margin / margin balance; liquidation at 100%"));
             }
-            if let Some(m) = f(&b["maint_margin"]) { kv(ui, l("Maintenance margin"), format!("{} USD", usd(m)), fg()); }
-            if let Some(e) = f(&b["adj_equity"]) { kv(ui, l("Adjusted equity"), format!("{} USD", usd(e)), fg()); }
-            kv(ui, l("Equity"), format!("{} USD", usd(f(&b["equity"]).unwrap_or(0.0))), fg());
+            if let Some(m) = f(&b["maint_margin"]) { kit::kv(ui, l("Maintenance margin"), format!("{} USD", usd(m)), fg()); }
+            if let Some(e) = f(&b["adj_equity"]) { kit::kv(ui, l("Adjusted equity"), format!("{} USD", usd(e)), fg()); }
+            kit::kv(ui, l("Equity"), format!("{} USD", usd(f(&b["equity"]).unwrap_or(0.0))), fg());
             let upnl: f64 = st["positions"].as_array().map(|a| a.iter().filter(|p| s(&p["ex"]) == venue).filter_map(|p| f(&p["upnl"])).sum()).unwrap_or(0.0);
-            kv(ui, l("Unrealized PnL"), format!("{} USD", signed(upnl)), if upnl > 0.0 { up() } else if upnl < 0.0 { dn() } else { fg() });
-            if !has_key && ui.button(l("Add API keys")).clicked() { self.open_settings = Some(3); }
-            if let Some(e) = t["error"].as_str() { note(ui, &format!("⛔ {e}"), dn()); }
+            kit::kv(ui, l("Unrealized PnL"), format!("{} USD", signed(upnl)), if upnl > 0.0 { up() } else if upnl < 0.0 { dn() } else { fg() });
+            if !has_key && kit::button(ui, l("Add API keys"), Look::Secondary, H, None, true).clicked() { self.open_settings = Some(3); }
+            if let Some(e) = t["error"].as_str() { kit::note(ui, e, dn()); }
         });
     }
 
@@ -821,63 +865,65 @@ impl OrderPanel {
         let base = s(&st["base"]).to_string();
         let col = if tk.buy() { up() } else { dn() };
         let mut done = None;
-        let m = egui::Modal::new(egui::Id::new("order_confirm")).show(ui.ctx(), |ui| {
+        let m = dialog("order_confirm").show(ui.ctx(), |ui| {
             ui.set_width(440.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{base}USDT")).strong().font(prop(15.0)));
-                ui.label(RichText::new(l("Perp")).color(dim()));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label(RichText::new(tk.title()).strong().color(col)); });
-            });
-            ui.separator();
+            ui.spacing_mut().item_spacing.y = 8.0;
+            dialog_title(ui, &format!("{base}USDT"), l("Perp"), Some((tk.title(), if tk.buy() { Tone::Up } else { Tone::Down })));
             let legs = tk.plan["legs"].as_array().cloned().unwrap_or_default();
-            ui.label(RichText::new(if legs.len() > 1 { format!("{} · {} {}", l("Route"), legs.len(), l("legs")) } else { l("Route").into() }).color(dim()));
-            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+            caption(ui, &if legs.len() > 1 { format!("{} · {} {}", l("Route"), legs.len(), l("legs")) } else { l("Route").into() });
+            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
                 for lg in &legs {
                     let buy = (s(&lg["pos"]) == "long") != (lg["close"] == true);
-                    card(ui, |ui| {
+                    kit::group(ui, |ui| {
+                        tight(ui);
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(s(&lg["ex"])).strong());
-                            ui.label(RichText::new(if buy { l("Buy") } else { l("Sell") }).strong().color(if buy { up() } else { dn() }));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label(RichText::new(format!("{} {base}", fmt_qty(f(&lg["qty"]).unwrap_or(0.0)))).font(mono(12.0))); });
+                            if let Some(ex) = depth::Exchange::parse(s(&lg["ex"])) {
+                                let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
+                                icon(ui.painter(), ex, r, false);
+                            }
+                            ui.label(RichText::new(s(&lg["ex"])).font(prop_s(13.0)).color(fg_strong()));
+                            kit::chip(ui, if buy { l("Buy") } else { l("Sell") }, if buy { Tone::Up } else { Tone::Down });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new(format!("{} {base}", fmt_qty(f(&lg["qty"]).unwrap_or(0.0)))).font(mono_s(13.0)).color(fg_strong()));
+                            });
                         });
-                        ui.columns(2, |c| {
-                            kv(&mut c[0], l("Order"), kind_text(s(&lg["kind"])), fg());
-                            kv(&mut c[1], l("Est. price"), fmt_px(f(&lg["est_px"]).unwrap_or(0.0)), fg());
-                            kv(&mut c[0], l("Est. fee"), fmt_dp(f(&lg["est_fee"]).unwrap_or(0.0), 3), mu());
-                            let slip = f(&lg["slip_bps"]).unwrap_or(0.0);
-                            kv(&mut c[1], l("Slippage"), format!("{slip:.1} bp"), if slip > 5.0 { WARN } else { mu() });
-                        });
+                        pair_row(ui, [(l("Order"), kind_text(s(&lg["kind"])), fg()), (l("Est. price"), fmt_px(f(&lg["est_px"]).unwrap_or(0.0)), fg())], true);
+                        let slip = f(&lg["slip_bps"]).unwrap_or(0.0);
+                        pair_row(ui, [(l("Est. fee"), fmt_dp(f(&lg["est_fee"]).unwrap_or(0.0), 3), fg()), (l("Slippage"), format!("{slip:.1} bp"), if slip > 5.0 { WARN } else { fg() })], true);
                         let after = f(&lg["avail_after"]).unwrap_or(0.0);
-                        kv(ui, l("Available after"), format!("{} USDT", usd(after)), if after < 0.0 { dn() } else { mu() });
+                        kit::kv(ui, l("Available after"), format!("{} USDT", usd(after)), if after < 0.0 { dn() } else { fg() });
                     });
                 }
                 if let Some(ex) = tk.plan["excluded"].as_array().filter(|a| !a.is_empty()) {
-                    ui.label(RichText::new(l("Not used")).color(dim()));
-                    for x in ex { kv(ui, s(&x["ex"]), s(&x["reason"]).into(), mu()); }
+                    caption(ui, l("Not used"));
+                    for x in ex { kit::kv(ui, s(&x["ex"]), s(&x["reason"]).into(), mu()); }
                 }
             });
-            ui.separator();
             let (total, vwap) = (f(&tk.plan["total_qty"]).unwrap_or(0.0), f(&tk.plan["vwap"]).unwrap_or(0.0));
-            if let Some(c) = f(&tk.plan["clamped_from"]) {
-                note(ui, &format!("⚠ {} {} {} {} {base} ({})", l("Size reduced from"), fmt_qty(c), l("to"), fmt_qty(total), if tk.close { l("position size") } else { l("margin limit") }), WARN);
-            }
-            kv(ui, l("Size"), format!("{} {base}", fmt_qty(total)), fg());
-            kv(ui, l("Est. average price"), fmt_px(vwap), fg());
-            kv(ui, l("Order value"), format!("{} USDT", usd(total * vwap)), fg());
-            kv(ui, l("Est. fees"), format!("{} USDT", fmt_dp(f(&tk.plan["fees"]).unwrap_or(0.0), 3)), fg());
-            if tk.tp.is_some() || tk.sl.is_some() {
-                note(ui, &format!("🎯 {} {} · {} {} ({}): {}", l("TP"), tk.tp.map(fmt_px).unwrap_or("–".into()), l("SL"), tk.sl.map(fmt_px).unwrap_or("–".into()),
-                    if tk.trigger == "last" { l("Last") } else { l("Mark") }, l("set for the whole position once the order has filled and the position exists.")), accent());
-            }
-            let unverified = legs.iter().any(|lg| st["keys"].as_array().is_some_and(|k| k.iter().any(|k| k["ex"] == lg["ex"] && k["verified"] == false)));
-            if unverified { note(ui, &format!("⚠ {}", l("Order placement on this venue is not yet verified on a live account: start with the minimum size.")), WARN); }
-            note(ui, l("Prices and sizes are rounded to the venue's tick and step."), mu());
-            if let Some(e) = &tk.err { note(ui, &format!("⛔ {e}"), dn()); }
-            ui.add_space(6.0);
-            ui.columns(2, |c| {
-                if c[0].add_sized([c[0].available_width(), 34.0], egui::Button::new(l("Cancel"))).clicked() || c[0].input(|i| i.key_pressed(egui::Key::Escape)) { done = Some(false); }
-                if big_button(&mut c[1], &format!("{} {}", l("Confirm"), tk.title()), col, true) || c[1].input(|i| i.key_pressed(egui::Key::Enter)) { done = Some(true); }
+            caption(ui, l("Order"));
+            kit::group(ui, |ui| {
+                tight(ui);
+                kit::kv(ui, l("Size"), format!("{} {base}", fmt_qty(total)), fg_strong());
+                kit::kv(ui, l("Est. average price"), fmt_px(vwap), fg_strong());
+                kit::kv(ui, l("Order value"), format!("{} USDT", usd(total * vwap)), fg_strong());
+                kit::kv(ui, l("Est. fees"), format!("{} USDT", fmt_dp(f(&tk.plan["fees"]).unwrap_or(0.0), 3)), fg());
+                if tk.tp.is_some() || tk.sl.is_some() {
+                    kit::kv(ui, &format!("TP / SL ({})", if tk.trigger == "last" { l("Last") } else { l("Mark") }),
+                        format!("{} / {}", tk.tp.map(fmt_px).unwrap_or("–".into()), tk.sl.map(fmt_px).unwrap_or("–".into())), accent());
+                }
             });
+            if let Some(c) = f(&tk.plan["clamped_from"]) {
+                kit::note(ui, &format!("{} {} {} {} {base} ({})", l("Size reduced from"), fmt_qty(c), l("to"), fmt_qty(total), if tk.close { l("position size") } else { l("margin limit") }), WARN);
+            }
+            if tk.tp.is_some() || tk.sl.is_some() { kit::note(ui, &format!("TP / SL: {}", l("set for the whole position once the order has filled and the position exists.")), mu()); }
+            let unverified = legs.iter().any(|lg| st["keys"].as_array().is_some_and(|k| k.iter().any(|k| k["ex"] == lg["ex"] && k["verified"] == false)));
+            if unverified { kit::note(ui, l("Order placement on this venue is not yet verified on a live account: start with the minimum size."), WARN); }
+            kit::note(ui, l("Prices and sizes are rounded to the venue's tick and step."), dim());
+            if let Some(e) = &tk.err { kit::note(ui, e, dn()); }
+            let (c, o) = dialog_buttons(ui, l("Cancel"), &format!("{} {}", l("Confirm"), tk.title()), col, true);
+            if c || ui.input(|i| i.key_pressed(egui::Key::Escape)) { done = Some(false); }
+            if o || ui.input(|i| i.key_pressed(egui::Key::Enter)) { done = Some(true); }
         });
         if m.should_close() && done.is_none() { done = Some(false); }
         match done {
@@ -893,16 +939,15 @@ impl OrderPanel {
     fn algo_modal(&mut self, ui: &mut Ui, t: &Value, call: &mut Call) {
         let Some(a) = &self.algo else { return };
         let mut done = None;
-        egui::Modal::new(egui::Id::new("algo_confirm")).show(ui.ctx(), |ui| {
+        dialog("algo_confirm").show(ui.ctx(), |ui| {
             ui.set_width(380.0);
-            ui.label(RichText::new(&a.title).strong().font(prop(15.0)));
-            note(ui, &a.message, fg());
-            if t["verified"] == false { note(ui, &format!("⚠ {}", l("This venue is untested: start with the minimum size.")), WARN); }
-            ui.add_space(6.0);
-            ui.columns(2, |c| {
-                if c[0].add_sized([c[0].available_width(), 32.0], egui::Button::new(l("Cancel"))).clicked() { done = Some(false); }
-                if big_button(&mut c[1], l("Confirm"), accent(), true) { done = Some(true); }
-            });
+            ui.spacing_mut().item_spacing.y = 10.0;
+            dialog_title(ui, &a.title, "", None);
+            ui.add(egui::Label::new(RichText::new(&a.message).font(prop(13.0)).color(fg())).wrap());
+            if t["verified"] == false { kit::note(ui, l("This venue is untested: start with the minimum size."), WARN); }
+            let (c, o) = dialog_buttons(ui, l("Cancel"), l("Confirm"), accent(), true);
+            if c { done = Some(false); }
+            if o { done = Some(true); }
         });
         if let Some(go) = done {
             let a = self.algo.take().unwrap();
@@ -920,34 +965,43 @@ impl OrderPanel {
         let Some(mut lev) = self.lev else { return };
         let max = f(&t["max_lev"]);
         let mut done = None;
-        egui::Modal::new(egui::Id::new("leverage")).show(ui.ctx(), |ui| {
+        dialog("leverage").show(ui.ctx(), |ui| {
             ui.set_width(400.0);
-            ui.label(RichText::new(l("Leverage")).strong().font(prop(15.0)));
-            kv(ui, l("Symbol"), format!("{} · {}", s(&t["symbol"]), s(&t["venue"])), fg());
-            kv(ui, l("Current"), f(&t["lev"]).map(|v| format!("{v}x")).unwrap_or("–".into()), fg());
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label(l("Leverage"));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label("x"); ui.add(egui::DragValue::new(&mut lev).range(1.0..=max.unwrap_or(200.0)).speed(0.5).fixed_decimals(0)); });
-            });
-            match max {
-                Some(m) => {
-                    ui.add(egui::Slider::new(&mut lev, 1.0..=m.max(1.0)).step_by(1.0).show_value(false));
-                    ui.horizontal_wrapped(|ui| {
-                        for v in [1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 50.0, 100.0, 125.0].into_iter().filter(|v| *v <= m) {
-                            if ui.selectable_label(lev == v, format!("{v}x")).clicked() { lev = v; }
-                        }
+            ui.spacing_mut().item_spacing.y = 10.0;
+            dialog_title(ui, l("Leverage"), &format!("{} · {}", s(&t["symbol"]), s(&t["venue"])), None);
+            kit::group(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 10.0;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(l("Current")).font(prop(12.0)).color(mu()));
+                    ui.label(RichText::new(f(&t["lev"]).map(|v| format!("{v}x")).unwrap_or("–".into())).font(mono_m(12.5)).color(fg()));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        let hi = max.unwrap_or(200.0);
+                        if kit::button(ui, "+", Look::Secondary, H, Some(H), lev < hi).clicked() { lev = (lev.round() + 1.0).min(hi); }
+                        ui.add_sized([64.0, H], egui::Label::new(RichText::new(format!("{}x", lev.round())).font(display_s(22.0)).color(fg_strong())));
+                        if kit::button(ui, "−", Look::Secondary, H, Some(H), lev > 1.0).clicked() { lev = (lev.round() - 1.0).max(1.0); }
                     });
+                });
+                match max {
+                    Some(m) => {
+                        let m = m.max(1.0);
+                        let mut x = if m > 1.0 { ((lev - 1.0) / (m - 1.0)) as f32 } else { 1.0 };
+                        if slider(ui, &mut x, &format!("{m}x")) { lev = (1.0 + x as f64 * (m - 1.0)).round(); }
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            for v in [1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 50.0, 100.0, 125.0].into_iter().filter(|v| *v <= m) {
+                                if pill(ui, &format!("{v}x"), lev == v).clicked() { lev = v; }
+                            }
+                        });
+                    }
+                    None => { ui.horizontal(|ui| { ui.spinner(); ui.label(RichText::new(l("Reading the venue's limit…")).font(prop(12.0)).color(mu())); }); }
                 }
-                None => { ui.horizontal(|ui| { ui.spinner(); ui.label(RichText::new(l("Reading the venue's limit…")).color(dim())); }); }
-            }
-            note(ui, l("Changes the setting on the exchange for this symbol (both sides). Higher leverage moves the liquidation price closer; the venue may refuse it for a large position."), mu());
-            ui.add_space(6.0);
-            let ok = lev >= 1.0 && max.is_none_or(|m| lev <= m) && Some(lev.round()) != f(&t["lev"]);
-            ui.columns(2, |c| {
-                if c[0].add_sized([c[0].available_width(), 32.0], egui::Button::new(l("Cancel"))).clicked() { done = Some(false); }
-                if big_button(&mut c[1], &lf("Set %gx", &[format!("{}", lev.round())]), accent(), ok) { done = Some(true); }
             });
+            kit::note(ui, l("Changes the setting on the exchange for this symbol (both sides). Higher leverage moves the liquidation price closer; the venue may refuse it for a large position."), mu());
+            let ok = lev >= 1.0 && max.is_none_or(|m| lev <= m) && Some(lev.round()) != f(&t["lev"]);
+            let (c, o) = dialog_buttons(ui, l("Cancel"), &lf("Set %gx", &[format!("{}", lev.round())]), accent(), ok);
+            if c { done = Some(false); }
+            if o { done = Some(true); }
         });
         self.lev = Some(lev);
         match done {
@@ -979,78 +1033,83 @@ pub(crate) fn tpsl_modal(sheet: &mut Option<TpSlSheet>, ui: &mut Ui, st: &Value,
         let qty_of = |lv: &Level| parse(&lv.amount).filter(|a| *a > 0.0).and_then(|a| parse(&qty_str(if lv.pct { qty * a.min(100.0) / 100.0 } else { a }, step)));
         let existing: Vec<Value> = st["tpsl"].as_array().map(|a| a.iter().filter(|x| s(&x["ex"]) == sh.ex && s(&x["symbol"]) == sh.symbol && s(&x["pos"]) == sh.side).cloned().collect()).unwrap_or_default();
         let (mut done, mut apply, mut cancel) = (false, false, None);
-        egui::Modal::new(egui::Id::new("tpsl_sheet")).show(ui.ctx(), |ui| {
+        dialog("tpsl_sheet").show(ui.ctx(), |ui| {
             ui.set_width(460.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{} · {}", sh.ex, sh.symbol)).strong().font(prop(15.0)));
-                ui.label(RichText::new(l("TP/SL")).color(dim()));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label(RichText::new(if long { l("Long") } else { l("Short") }).strong().color(if long { up() } else { dn() })); });
+            ui.spacing_mut().item_spacing.y = 10.0;
+            dialog_title(ui, &format!("{} · {}", sh.ex, sh.symbol), l("TP/SL"), Some((if long { l("Long") } else { l("Short") }, if long { Tone::Up } else { Tone::Down })));
+            kit::group(ui, |ui| {
+                tight(ui);
+                kit::kv(ui, l("Size"), format!("{} {base}", fmt_qty(qty)), fg_strong());
+                kit::kv(ui, l("Entry / Mark"), format!("{} / {}", fmt_px(entry), fmt_px(mark)), fg());
+                kit::kv(ui, l("Liq. price"), f(&p["liq"]).map(fmt_px).unwrap_or("–".into()), WARN);
             });
-            kv(ui, l("Size"), format!("{} {base}", fmt_qty(qty)), fg());
-            kv(ui, l("Entry / Mark"), format!("{} / {}", fmt_px(entry), fmt_px(mark)), fg());
-            kv(ui, l("Liq. price"), f(&p["liq"]).map(fmt_px).unwrap_or("–".into()), WARN);
-            ui.separator();
-            segments(ui, &mut sh.partial, &[(false, l("Entire position")), (true, l("Partial (staged)"))]);
-            segments(ui, &mut sh.last, &[(false, l("Mark")), (true, l("Last"))]);
+            kit::segments(ui, &mut sh.partial, &[(false, l("Entire position")), (true, l("Partial (staged)"))], 32.0);
+            row(ui, l("Trigger by"), |ui| {
+                ui.allocate_ui(egui::vec2(128.0, H_SM), |ui| kit::segments(ui, &mut sh.last, &[(false, l("Mark")), (true, l("Last"))], H_SM));
+            });
             let pnl = |ui: &mut Ui, px: Option<f64>, q: f64| {
                 if let Some(px) = px.filter(|v| *v > 0.0) {
                     let v = (px - entry) * q * sign;
-                    kv(ui, l("Est. PnL"), format!("{} USDT ({:+.2}%)", signed(v), (px / entry.max(1e-12) - 1.0) * sign * 100.0), if v >= 0.0 { up() } else { dn() });
+                    kit::kv(ui, l("Est. PnL"), format!("{} USDT ({:+.2}%)", signed(v), (px / entry.max(1e-12) - 1.0) * sign * 100.0), if v >= 0.0 { up() } else { dn() });
                 }
             };
             if !sh.partial {
-                apply |= field(ui, l("Take profit"), &mut sh.tp, "USDT", "stp").1;
+                apply |= kit::field(ui, l("Take profit"), &mut sh.tp, "USDT", "stp", false).1;
                 pnl(ui, parse(&sh.tp), qty);
-                apply |= field(ui, l("Stop loss"), &mut sh.sl, "USDT", "ssl").1;
+                apply |= kit::field(ui, l("Stop loss"), &mut sh.sl, "USDT", "ssl", false).1;
                 pnl(ui, parse(&sh.sl), qty);
-                note(ui, l("Closes the whole position at market when triggered, including size added later."), mu());
+                kit::note(ui, l("Closes the whole position at market when triggered, including size added later."), mu());
             } else {
                 let mut remove = None;
                 for (i, lv) in sh.levels.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
-                        ui.selectable_value(&mut lv.tp, true, l("TP"));
-                        ui.selectable_value(&mut lv.tp, false, l("SL"));
-                        ui.add(egui::TextEdit::singleline(&mut lv.price).hint_text(l("Price")).desired_width(130.0).font(mono(12.5)).horizontal_align(egui::Align::RIGHT));
-                        ui.add(egui::TextEdit::singleline(&mut lv.amount).hint_text(l("Size")).desired_width(70.0).font(mono(12.5)).horizontal_align(egui::Align::RIGHT));
-                        if ui.selectable_label(lv.pct, "%").clicked() && !lv.pct { lv.pct = true; lv.amount.clear(); }
-                        if ui.selectable_label(!lv.pct, &base).on_hover_text(l("Size as % of the position, or in base units")).clicked() && lv.pct { lv.pct = false; lv.amount.clear(); }
-                        if link(ui, "⊖").clicked() { remove = Some(i); }
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        if pill(ui, l("TP"), lv.tp).clicked() { lv.tp = true; }
+                        if pill(ui, l("SL"), !lv.tp).clicked() { lv.tp = false; }
+                        ui.add_space(4.0);
+                        ui.allocate_ui(egui::vec2(170.0, 32.0), |ui| kit::field(ui, l("Price"), &mut lv.price, "", ("lvp", i), false));
+                        ui.allocate_ui(egui::vec2(92.0, 32.0), |ui| kit::field(ui, l("Size"), &mut lv.amount, "", ("lva", i), false));
+                        if pill(ui, "%", lv.pct).clicked() && !lv.pct { lv.pct = true; lv.amount.clear(); }
+                        if pill(ui, &base, !lv.pct).on_hover_text(l("Size as % of the position, or in base units")).clicked() && lv.pct { lv.pct = false; lv.amount.clear(); }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if close_x(ui, H_SM).clicked() { remove = Some(i); }
+                        });
                     });
                     if let (Some(px), Some(q)) = (parse(&lv.price), qty_of(lv)) {
-                        kv(ui, &format!("{} {base}", fmt_qty(q)), format!("{} USDT", signed((px - entry) * q * sign)), if (px - entry) * sign >= 0.0 { up() } else { dn() });
+                        kit::kv(ui, &format!("{} {base}", fmt_qty(q)), format!("{} USDT", signed((px - entry) * q * sign)), if (px - entry) * sign >= 0.0 { up() } else { dn() });
                     }
                 }
                 if let Some(i) = remove { sh.levels.remove(i); }
                 if sh.levels.len() < 10 {
                     ui.horizontal(|ui| {
-                        if ui.button(format!("+ {}", l("Take-profit level"))).clicked() { sh.levels.push(Level { tp: true, price: String::new(), amount: String::new(), pct: true }); }
-                        if ui.button(format!("+ {}", l("Stop-loss level"))).clicked() { sh.levels.push(Level { tp: false, price: String::new(), amount: String::new(), pct: true }); }
+                        if kit::button(ui, &format!("+ {}", l("Take-profit level")), Look::Secondary, H, None, true).clicked() { sh.levels.push(Level { tp: true, price: String::new(), amount: String::new(), pct: true }); }
+                        if kit::button(ui, &format!("+ {}", l("Stop-loss level")), Look::Secondary, H, None, true).clicked() { sh.levels.push(Level { tp: false, price: String::new(), amount: String::new(), pct: true }); }
                     });
                 }
-                note(ui, l("Each level closes its size when triggered. Take-profit levels and stop levels each add up to at most the position."), mu());
+                kit::note(ui, l("Each level closes its size when triggered. Take-profit levels and stop levels each add up to at most the position."), mu());
             }
             if !existing.is_empty() {
-                ui.separator();
-                ui.label(RichText::new(l("Active")).color(dim()));
-                for r in &existing {
-                    let tp = r["take_profit"] == true;
-                    let above = tp == long;
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(if tp { l("TP") } else { l("SL") }).strong().color(if tp { up() } else { dn() }));
-                        ui.label(RichText::new(format!("{} {} {}", if s(&r["trigger"]) == "last" { l("Last") } else { l("Mark") }, if above { "≥" } else { "≤" }, fmt_px(f(&r["trigger_px"]).unwrap_or(0.0)))).font(mono(12.0)));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(RichText::new(l("Cancel")).color(dn())).clicked() { cancel = Some(r.clone()); }
-                            ui.label(RichText::new(f(&r["qty"]).map(|q| format!("{} {base}", fmt_qty(q))).unwrap_or(l("Entire position").into())).color(dim()));
+                caption(ui, l("Active"));
+                kit::group(ui, |ui| {
+                    tight(ui);
+                    for r in &existing {
+                        let tp = r["take_profit"] == true;
+                        let above = tp == long;
+                        ui.horizontal(|ui| {
+                            kit::chip(ui, if tp { l("TP") } else { l("SL") }, if tp { Tone::Up } else { Tone::Down });
+                            ui.label(RichText::new(format!("{} {} {}", if s(&r["trigger"]) == "last" { l("Last") } else { l("Mark") }, if above { "≥" } else { "≤" }, fmt_px(f(&r["trigger_px"]).unwrap_or(0.0)))).font(mono_m(12.5)).color(fg()));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if kit::button(ui, l("Cancel"), Look::Danger, H_SM, None, true).clicked() { cancel = Some(r.clone()); }
+                                ui.label(RichText::new(f(&r["qty"]).map(|q| format!("{} {base}", fmt_qty(q))).unwrap_or(l("Entire position").into())).font(mono(12.0)).color(mu()));
+                            });
                         });
-                    });
-                }
+                    }
+                });
             }
-            if let Some(e) = &sh.err { note(ui, &format!("⛔ {e}"), dn()); }
-            ui.add_space(6.0);
-            ui.columns(2, |c| {
-                if c[0].add_sized([c[0].available_width(), 32.0], egui::Button::new(l("Close"))).clicked() { done = true; }
-                if big_button(&mut c[1], l("Confirm"), accent(), true) { apply = true; }
-            });
+            if let Some(e) = &sh.err { kit::note(ui, e, dn()); }
+            let (c, o) = dialog_buttons(ui, l("Close"), l("Confirm"), accent(), true);
+            if c { done = true; }
+            if o { apply = true; }
         });
         if let Some(r) = cancel {
             if let Err(e) = call(json!({"op": "cancel_tpsl", "ex": r["ex"], "id": r["id"]})) { sh.err = Some(e); }
