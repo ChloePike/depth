@@ -2,7 +2,7 @@
 //! Like the order panel it reads the JSON state document and writes through the native ops
 //! (`set_prefs` / `set_route` with the whole object, `set_lang`, `save_keys`, ...), so there is no Save.
 //! `Prefs` persist in settings.json; `apply` pushes them into the palette, zoom and style.
-use super::{l, theme::*, tz_label};
+use super::{kit, l, theme::*, tz_label};
 use depth::{route::Policy, trade, Exchange};
 use eframe::egui::{self, Color32, RichText, Ui};
 use serde_json::{json, Value};
@@ -79,14 +79,8 @@ impl Prefs {
     }
 }
 
-/// Sidebar panes: title and icon tile color (the Swift SF Symbol tiles).
-const PANES: [(&str, Color32); 5] = [
-    ("General", Color32::from_rgb(0x8e, 0x8e, 0x93)),
-    ("Appearance", Color32::from_rgb(0x58, 0x56, 0xd6)),
-    ("Trading", Color32::from_rgb(0x30, 0xb0, 0x50)),
-    ("API Keys", Color32::from_rgb(0xff, 0x95, 0x00)),
-    ("About", Color32::from_rgb(0x0a, 0x84, 0xff)),
-];
+/// Sidebar panes (painted monochrome glyphs, design: neutral sidebar).
+const PANES: [&str; 5] = ["General", "Appearance", "Trading", "API Keys", "About"];
 const W: f32 = 800.0;
 const H: f32 = 580.0;
 const SIDE: f32 = 196.0;
@@ -111,8 +105,9 @@ impl SettingsView {
 
     pub fn show(&mut self, ctx: &egui::Context, st: &Value, call: &mut Call) {
         if !self.open { return; }
-        let frame = egui::Frame::new().fill(panel_c()).corner_radius(12).stroke(egui::Stroke::new(1.0, edge())).inner_margin(0)
-            .shadow(egui::Shadow { offset: [0, 12], blur: 40, spread: 0, color: Color32::from_black_alpha(90) });
+        // design: a popup surface (radius 6, hairline, soft wide shadow)
+        let frame = egui::Frame::new().fill(panel_c()).corner_radius(6).stroke(egui::Stroke::new(1.0, line())).inner_margin(0)
+            .shadow(egui::Shadow { offset: [0, 12], blur: 40, spread: 0, color: Color32::from_black_alpha(if light() { 50 } else { 150 }) });
         let m = egui::Modal::new(egui::Id::new("settings")).frame(frame).show(ctx, |ui| {
             ui.set_width(W);
             ui.set_height(H);
@@ -121,18 +116,16 @@ impl SettingsView {
                 self.sidebar(ui);
                 ui.vertical(|ui| {
                     ui.set_width(W - SIDE);
-                    egui::Frame::new().inner_margin(egui::Margin { left: 28, right: 24, top: 18, bottom: 0 }).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.set_height(30.0);
-                            ui.label(RichText::new(l(PANES[self.tab as usize].0)).font(display(20.0)).color(fg()));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add(prominent(l("Done"))).clicked() { self.open = false; }
-                            });
-                        });
+                    // header: page title, Done; a hairline under it
+                    let (hr, _) = ui.allocate_exact_size(egui::vec2(W - SIDE, 56.0), egui::Sense::hover());
+                    ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, egui::Stroke::new(1.0, line()));
+                    let mut head = ui.new_child(egui::UiBuilder::new().max_rect(hr.shrink2(egui::vec2(24.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                    head.label(RichText::new(l(PANES[self.tab as usize])).font(prop_s(16.0)).color(fg_strong()));
+                    head.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if kit::button(ui, l("Done"), kit::Look::Fill(accent()), kit::H, Some(72.0), true).clicked() { self.open = false; }
                     });
-                    ui.add_space(6.0);
-                    egui::ScrollArea::vertical().auto_shrink([false; 2]).max_height(H - 60.0).show(ui, |ui| {
-                        egui::Frame::new().inner_margin(egui::Margin { left: 28, right: 28, top: 4, bottom: 20 }).show(ui, |ui| {
+                    egui::ScrollArea::vertical().auto_shrink([false; 2]).max_height(H - 56.0).show(ui, |ui| {
+                        egui::Frame::new().inner_margin(egui::Margin { left: 24, right: 24, top: 4, bottom: 20 }).show(ui, |ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
                             match self.tab {
                                 0 => self.general(ui, st, call),
@@ -153,15 +146,18 @@ impl SettingsView {
     fn sidebar(&mut self, ui: &mut Ui) {
         let (side, _) = ui.allocate_exact_size(egui::vec2(SIDE, H), egui::Sense::hover());
         let p = ui.painter().clone();
-        p.rect_filled(side, egui::CornerRadius { nw: 12, sw: 12, ne: 0, se: 0 }, label_bg().linear_multiply(if light() { 0.7 } else { 0.8 }));
+        p.rect_filled(side, egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, panel2());
         p.vline(side.right(), side.y_range(), egui::Stroke::new(1.0, line()));
-        for (i, (title, col)) in PANES.into_iter().enumerate() {
-            let r = egui::Rect::from_min_size(side.left_top() + egui::vec2(10.0, 18.0 + i as f32 * 34.0), egui::vec2(SIDE - 20.0, 30.0));
+        p.text(side.left_top() + egui::vec2(20.0, 28.0), egui::Align2::LEFT_CENTER, l("Settings").to_uppercase(), prop_s(10.5), dim());
+        for (i, title) in PANES.into_iter().enumerate() {
+            let r = egui::Rect::from_min_size(side.left_top() + egui::vec2(10.0, 46.0 + i as f32 * 32.0), egui::vec2(SIDE - 20.0, kit::H + 2.0));
             let resp = ui.interact(r, ui.id().with(("set_tab", i)), egui::Sense::click());
             let on = self.tab == i as u8;
-            if on { p.rect_filled(r, 7, accent()); } else if resp.hovered() { p.rect_filled(r, 7, hl()); }
-            pane_icon(&p, egui::Rect::from_center_size(r.left_center() + egui::vec2(18.0, 0.0), egui::vec2(22.0, 22.0)), i, col);
-            p.text(r.left_center() + egui::vec2(38.0, 0.0), egui::Align2::LEFT_CENTER, l(title), prop(13.0), if on { Color32::WHITE } else { fg() });
+            let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() && !on, 0.1);
+            if on { p.rect_filled(r, kit::R, hl()); } else if hv > 0.0 { p.rect_filled(r, kit::R, hl().gamma_multiply(0.6 * hv)); }
+            let col = if on { fg_strong() } else { lerp(mu(), fg(), hv) };
+            pane_icon(&p, egui::Rect::from_center_size(r.left_center() + egui::vec2(18.0, 0.0), egui::vec2(16.0, 16.0)), i, if on { accent() } else { col });
+            p.text(r.left_center() + egui::vec2(36.0, 0.0), egui::Align2::LEFT_CENTER, l(title), if on { prop_s(12.5) } else { prop_m(12.5) }, col);
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !on { self.tab = i as u8; self.cache = None; self.close_form(); }
         }
     }
@@ -199,9 +195,9 @@ impl SettingsView {
         if self.cache.is_none() { self.cache = Some(call(json!({"op": "cache_size"})).ok().and_then(|v| v["bytes"].as_i64())); }
         section(ui, l("Storage"), l("Chart history, coin logos and crash logs. History not viewed for 30 days is removed automatically."), |ui| {
             row(ui, l("Cache and logs"), |ui| {
-                if ui.button(l("Clear Cache")).clicked() { self.cache = Some(call(json!({"op": "clear_cache"})).ok().and_then(|v| v["bytes"].as_i64())); }
+                if kit::button(ui, l("Clear Cache"), kit::Look::Secondary, kit::H, None, true).clicked() { self.cache = Some(call(json!({"op": "clear_cache"})).ok().and_then(|v| v["bytes"].as_i64())); }
                 let s = self.cache.flatten().map_or("–".into(), |b| format!("{:.1} MB", b as f64 / 1e6));
-                ui.label(RichText::new(s).font(mono(12.5)).color(mu()));
+                ui.label(RichText::new(s).font(mono_m(12.5)).color(mu()));
             });
         });
     }
@@ -213,15 +209,15 @@ impl SettingsView {
     fn api_keys(&mut self, ui: &mut Ui, st: &Value, call: &mut Call) {
         ui.add_space(8.0);
         // the withdrawal warning is the first thing on the page, in a tinted callout
-        egui::Frame::new().fill(WARN.linear_multiply(0.12)).stroke(egui::Stroke::new(1.0, WARN.linear_multiply(0.5))).corner_radius(8)
+        egui::Frame::new().fill(WARN.gamma_multiply(0.10)).stroke(egui::Stroke::new(1.0, WARN.gamma_multiply(0.35))).corner_radius(kit::R)
             .inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
                     shield(ui.painter(), r);
                     ui.add_space(8.0);
                     ui.add(egui::Label::new(RichText::new(l("Never enable withdrawals on these keys. Trading needs trade permission, transfers need transfer permission. Start with a read-only key."))
-                        .font(prop(12.5)).color(fg())).wrap());
+                        .font(prop_m(12.5)).color(fg())).wrap());
                 });
             });
         footer(ui, l("Stored in the macOS Keychain (service \"depth\"), never written to a file."));
@@ -236,31 +232,31 @@ impl SettingsView {
                     let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
                     icon(ui.painter(), ex, r, false);
                     ui.add_space(8.0);
-                    ui.label(RichText::new(name).font(prop(13.0)).color(fg()).strong());
+                    ui.label(RichText::new(name).font(prop_s(12.5)).color(fg_strong()));
                     if !k["verified"].as_bool().unwrap_or(true) {
                         ui.add_space(6.0);
-                        badge(ui, l("Untested"), WARN).on_hover_text(l("Implemented and unit-tested, but not yet run against a live account. Test with a read-only key first, then trade the minimum size."));
+                        kit::chip(ui, &l("Untested").to_uppercase(), kit::Tone::Warn).on_hover_text(l("Implemented and unit-tested, but not yet run against a live account. Test with a read-only key first, then trade the minimum size."));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         if k["configured"].as_bool() == Some(true) {
-                            if ui.add(egui::Button::new(RichText::new(l("Remove")).color(dn()))).clicked() { self.removing = Some(name.to_string()); }
-                            if ui.button(l("Replace")).clicked() { self.close_form(); self.edit = Some(name.to_string()); }
-                            if ui.button(l("Test")).on_hover_text(l("Read-only check: balances and permissions")).clicked() {
+                            if kit::button(ui, l("Remove"), kit::Look::Danger, kit::H_SM + 2.0, None, true).clicked() { self.removing = Some(name.to_string()); }
+                            if kit::button(ui, l("Replace"), kit::Look::Secondary, kit::H_SM + 2.0, None, true).clicked() { self.close_form(); self.edit = Some(name.to_string()); }
+                            if kit::button(ui, l("Test"), kit::Look::Secondary, kit::H_SM + 2.0, None, true).on_hover_text(l("Read-only check: balances and permissions")).clicked() {
                                 if let Err(e) = call(json!({"op": "test_keys", "ex": name})) { self.key_err = Some(e); }
                             }
                             ui.add_space(6.0);
                             ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
                                 ui.spacing_mut().item_spacing.y = 2.0;
                                 ui.add_space(4.0);
-                                ui.label(RichText::new(format!("✓ {} ••••{}", l("Configured"), k["tail"].as_str().unwrap_or(""))).font(mono(11.5)).color(up()));
+                                ui.label(RichText::new(format!("✓ {} ••••{}", l("Configured"), k["tail"].as_str().unwrap_or(""))).font(mono_m(11.5)).color(up()));
                                 if let Some(msg) = k["test"]["msg"].as_str() {
                                     let (txt, col) = if msg == "…" { (l("Testing…").to_string(), mu()) } else { (msg.to_string(), if k["test"]["ok"].as_bool() == Some(true) { up() } else { dn() }) };
                                     ui.add(egui::Label::new(RichText::new(&txt).font(prop(11.0)).color(col)).truncate()).on_hover_text(txt);
                                 }
                             });
                         } else {
-                            if ui.button(l("Add…")).clicked() { self.close_form(); self.edit = Some(name.to_string()); }
+                            if kit::button(ui, l("Add…"), kit::Look::Secondary, kit::H_SM + 2.0, None, true).clicked() { self.close_form(); self.edit = Some(name.to_string()); }
                             ui.label(RichText::new(l("Not configured")).font(prop(12.0)).color(dim()));
                         }
                     });
@@ -278,12 +274,12 @@ impl SettingsView {
         // OKX and Bitget keys are unusable without their passphrase
         let needs_extra = matches!(ex, Exchange::Okx | Exchange::Bitget);
         let (mut save, mut cancel) = (false, false);
-        egui::Frame::new().fill(bg()).stroke(egui::Stroke::new(1.0, line())).corner_radius(8).inner_margin(12).outer_margin(egui::Margin { left: 0, right: 0, top: 0, bottom: 10 }).show(ui, |ui| {
+        egui::Frame::new().fill(well()).stroke(egui::Stroke::new(1.0, line())).corner_radius(kit::R).inner_margin(12).outer_margin(egui::Margin { left: 0, right: 0, top: 0, bottom: 10 }).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 4.0;
             let field = |ui: &mut Ui, label: &str, v: &mut String, secret: bool| {
-                ui.label(RichText::new(label).font(prop(11.5)).color(mu()));
-                ui.add(egui::TextEdit::singleline(v).password(secret).font(mono(12.5)).desired_width(f32::INFINITY).margin(egui::vec2(8.0, 5.0)));
+                ui.label(RichText::new(label).font(prop(12.0)).color(mu()));
+                ui.add(egui::TextEdit::singleline(v).password(secret).font(mono_m(12.5)).desired_width(f32::INFINITY).margin(egui::vec2(10.0, 7.0)));
                 ui.add_space(4.0);
             };
             field(ui, l(kl), &mut self.key, false);
@@ -292,14 +288,14 @@ impl SettingsView {
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
                 warn_triangle(ui.painter(), r);
-                ui.label(RichText::new(l("Never enable withdrawal permission.")).font(prop(12.0)).color(WARN).strong());
+                ui.label(RichText::new(l("Never enable withdrawal permission.")).font(prop_s(12.0)).color(WARN));
             });
             if let Some(e) = &self.key_err { ui.add(egui::Label::new(RichText::new(e).font(prop(11.5)).color(dn())).wrap()); }
             ui.add_space(4.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let ok = !self.key.trim().is_empty() && !self.secret.is_empty() && !(needs_extra && self.extra.is_empty());
-                if ui.add_enabled(ok, prominent(l("Save to Keychain"))).clicked() { save = true; }
-                if ui.button(l("Cancel")).clicked() { cancel = true; }
+                if kit::button(ui, l("Save to Keychain"), kit::Look::Fill(accent()), kit::H, None, ok).clicked() { save = true; }
+                if kit::button(ui, l("Cancel"), kit::Look::Secondary, kit::H, None, true).clicked() { cancel = true; }
             });
         });
         if cancel { self.close_form(); }
@@ -315,19 +311,19 @@ impl SettingsView {
 
     fn confirm_remove(&mut self, ctx: &egui::Context, call: &mut Call) {
         let Some(ex) = self.removing.clone() else { return };
-        let frame = egui::Frame::new().fill(popup_bg()).corner_radius(12).stroke(egui::Stroke::new(1.0, edge())).inner_margin(20);
+        let frame = egui::Frame::new().fill(popup_bg()).corner_radius(6).stroke(egui::Stroke::new(1.0, line())).inner_margin(20);
         let mut done = false;
         let m = egui::Modal::new(egui::Id::new("remove_key")).frame(frame).show(ctx, |ui| {
             ui.set_width(300.0);
             ui.vertical_centered(|ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
-                ui.label(RichText::new(l("Remove API key?")).font(prop(14.0)).strong().color(fg()));
+                ui.label(RichText::new(l("Remove API key?")).font(prop_s(13.5)).color(fg_strong()));
                 ui.add(egui::Label::new(RichText::new(format!("{ex}: {}", l("The key is deleted from the Keychain and the venue disconnects from your account."))).font(prop(12.0)).color(mu())).wrap());
                 ui.add_space(6.0);
             });
             ui.columns(2, |c| {
-                if c[0].add_sized([c[0].available_width(), 28.0], egui::Button::new(l("Cancel"))).clicked() { done = true; }
-                if c[1].add_sized([c[1].available_width(), 28.0], egui::Button::new(RichText::new(l("Remove")).color(Color32::WHITE)).fill(dn())).clicked() {
+                if kit::button(&mut c[0], l("Cancel"), kit::Look::Secondary, kit::H, Some(f32::INFINITY), true).clicked() { done = true; }
+                if kit::button(&mut c[1], l("Remove"), kit::Look::Fill(dn()), kit::H, Some(f32::INFINITY), true).clicked() {
                     if let Err(e) = call(json!({"op": "delete_keys", "ex": ex})) { self.key_err = Some(e); }
                     if self.edit.as_deref() == Some(ex.as_str()) { self.close_form(); }
                     done = true;
@@ -351,9 +347,9 @@ impl SettingsView {
                 ui.add_space(12.0);
                 ui.vertical(|ui| {
                     ui.add_space(16.0);
-                    ui.label(RichText::new("Depth").font(display(17.0)).color(fg()).strong());
+                    ui.label(RichText::new("Depth").font(prop_s(16.0)).color(fg_strong()));
                     ui.add_space(3.0);
-                    ui.label(RichText::new(format!("{} {}", l("Version"), env!("CARGO_PKG_VERSION"))).font(mono(12.0)).color(mu()));
+                    ui.label(RichText::new(format!("{} {}", l("Version"), env!("CARGO_PKG_VERSION"))).font(mono_m(12.0)).color(mu()));
                 });
             });
         });
@@ -411,8 +407,7 @@ fn appearance(ui: &mut Ui, st: &Value, call: &mut Call) {
     let before = p.clone();
     section(ui, l("Colors"), l("The accent marks selection and highlights in the chart and book. Price colors apply to candles, the order book, PnL and buy/sell buttons."), |ui| {
         row(ui, l("Theme"), |ui| {
-            let mut sel = p.theme as usize;
-            if segment(ui, &[l("System"), l("Dark"), l("Light")], &mut sel) { p.theme = [ThemePref::System, ThemePref::Dark, ThemePref::Light][sel]; }
+            seg(ui, &mut p.theme, &[(ThemePref::System, l("System")), (ThemePref::Dark, l("Dark")), (ThemePref::Light, l("Light"))]);
         });
         row_sep(ui);
         row(ui, l("Accent color"), |ui| {
@@ -448,7 +443,7 @@ fn appearance(ui: &mut Ui, st: &Value, call: &mut Call) {
     section(ui, "", "", |ui| {
         ui.horizontal(|ui| {
             ui.set_min_height(36.0);
-            if ui.add_enabled(!p.default_look(), egui::Button::new(l("Restore Default Appearance"))).clicked() {
+            if kit::button(ui, l("Restore Default Appearance"), kit::Look::Secondary, kit::H, None, !p.default_look()).clicked() {
                 p = Prefs { tz_min: p.tz_min, confirm: p.confirm, fees: p.fees.clone(), ..Prefs::default() };
             }
         });
@@ -470,8 +465,7 @@ fn trading(ui: &mut Ui, st: &Value, call: &mut Call) {
     } else { l("Every order goes to the trading venue.") };
     section(ui, l("Order routing"), foot, |ui| {
         row(ui, l("Routing"), |ui| {
-            let mut sel = if r.smart { 0 } else { 1 };
-            if segment(ui, &[l("Smart"), l("Fixed venue")], &mut sel) { r.smart = sel == 0; }
+            seg(ui, &mut r.smart, &[(true, l("Smart")), (false, l("Fixed venue"))]);
         });
         row_sep(ui);
         row(ui, l(if r.smart { "Preferred venue" } else { "Trading venue" }), |ui| {
@@ -488,7 +482,7 @@ fn trading(ui: &mut Ui, st: &Value, call: &mut Call) {
     });
     section(ui, l("Smart routing"), l("Each leg is priced on its venue's real bid/ask, never the composite index. Venues whose book is stale or too far from the others are skipped."), |ui| {
         ui.add_enabled_ui(r.smart, |ui| {
-            row(ui, l("Allow split orders"), |ui| { toggle(ui, &mut r.allow_split); });
+            row(ui, l("Allow split orders"), |ui| { kit::switch(ui, &mut r.allow_split); });
             row_sep(ui);
             let split = r.allow_split;
             ui.add_enabled_ui(split, |ui| {
@@ -508,7 +502,7 @@ fn trading(ui: &mut Ui, st: &Value, call: &mut Call) {
         });
     });
     section(ui, l("Orders"), l("Shows an order summary before it is sent."), |ui| {
-        row(ui, l("Confirm before sending orders"), |ui| { toggle(ui, &mut p.confirm); });
+        row(ui, l("Confirm before sending orders"), |ui| { kit::switch(ui, &mut p.confirm); });
     });
     section(ui, l("Fees (your tier)"), l("Taker / maker in percent per fill. Used for fee estimates and routing; enter your VIP tier's rates."), |ui| {
         for (i, k) in tradable.iter().enumerate() {
@@ -521,7 +515,7 @@ fn trading(ui: &mut Ui, st: &Value, call: &mut Call) {
                     icon(ui.painter(), ex, r, false);
                     ui.add_space(8.0);
                 }
-                ui.label(RichText::new(k).font(prop(13.0)).color(fg()));
+                ui.label(RichText::new(k).font(prop_m(12.5)).color(fg()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     ui.add_sized([36.0, 20.0], egui::Label::new(RichText::new("%").font(prop(12.5)).color(mu())));
@@ -551,22 +545,23 @@ fn number(ui: &mut Ui, title: &str, v: &mut f64, decimals: usize, unit: &str) ->
 /// Value with − / + buttons (Swift `Stepper`).
 fn stepper(ui: &mut Ui, v: &mut usize, lo: usize, hi: usize) {
     ui.spacing_mut().item_spacing.x = 0.0;
-    if ui.add_enabled(*v < hi, egui::Button::new(RichText::new("+").font(prop(14.0))).min_size(egui::vec2(26.0, 22.0)).corner_radius(egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 })).clicked() { *v += 1; }
-    if ui.add_enabled(*v > lo, egui::Button::new(RichText::new("−").font(prop(14.0))).min_size(egui::vec2(26.0, 22.0)).corner_radius(egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 })).clicked() { *v -= 1; }
-    ui.add_space(10.0);
-    ui.label(RichText::new(v.to_string()).font(mono(13.0)).color(fg()));
+    ui.spacing_mut().item_spacing.x = 4.0;
+    if kit::button(ui, "+", kit::Look::Secondary, kit::H_SM, Some(26.0), *v < hi).clicked() { *v += 1; }
+    if kit::button(ui, "−", kit::Look::Secondary, kit::H_SM, Some(26.0), *v > lo).clicked() { *v -= 1; }
+    ui.add_space(8.0);
+    ui.label(RichText::new(v.to_string()).font(mono_m(13.0)).color(fg_strong()));
 }
 
 // ---------------------------------------------------------------------- form pieces
 
-/// Grouped form section (macOS `.formStyle(.grouped)`): optional header, rounded card, footer.
+/// Grouped form section: overline header, a panel2 group (radius 4, hairline), note below.
 fn section(ui: &mut Ui, header: &str, foot: &str, rows: impl FnOnce(&mut Ui)) {
-    ui.add_space(14.0);
+    ui.add_space(18.0);
     if !header.is_empty() {
-        ui.label(RichText::new(header).font(prop(12.0)).color(mu()).strong());
-        ui.add_space(5.0);
+        kit::overline(ui, header);
+        ui.add_space(6.0);
     }
-    egui::Frame::new().fill(panel2()).corner_radius(9).stroke(egui::Stroke::new(1.0, line())).inner_margin(egui::Margin::symmetric(14, 2)).show(ui, |ui| {
+    egui::Frame::new().fill(panel2()).corner_radius(kit::R).stroke(egui::Stroke::new(1.0, line())).inner_margin(egui::Margin::symmetric(14, 2)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         rows(ui);
     });
@@ -575,70 +570,60 @@ fn section(ui: &mut Ui, header: &str, foot: &str, rows: impl FnOnce(&mut Ui)) {
 
 fn footer(ui: &mut Ui, text: &str) {
     if text.is_empty() { return; }
-    ui.add_space(5.0);
-    egui::Frame::new().inner_margin(egui::Margin { left: 2, right: 2, top: 0, bottom: 0 }).show(ui, |ui| {
-        ui.add(egui::Label::new(RichText::new(text).font(prop(11.0)).color(dim())).wrap());
-    });
+    ui.add_space(6.0);
+    kit::note(ui, text, dim());
 }
 
-/// Label on the left, control right-aligned (Swift `LabeledContent`).
+/// Label on the left (12.5), control right-aligned; 40 px rows.
 fn row(ui: &mut Ui, title: &str, control: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
-        ui.set_min_height(36.0);
-        ui.label(RichText::new(title).font(prop(13.0)).color(fg()));
+        ui.set_min_height(40.0);
+        ui.label(RichText::new(title).font(prop(12.5)).color(fg()));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
     });
 }
 
-/// Default (accent-filled) push button.
-fn prominent(text: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(text).color(Color32::WHITE).strong()).fill(accent()).min_size(egui::vec2(64.0, 24.0))
+/// kit::segments at a fixed 220 px (it fills the width it is given).
+fn seg<T: PartialEq + Copy>(ui: &mut Ui, sel: &mut T, items: &[(T, &str)]) {
+    ui.allocate_ui(egui::vec2(220.0, kit::H), |ui| { kit::segments(ui, sel, items, kit::H); });
 }
 
-/// Small tinted capsule ("Untested").
-fn badge(ui: &mut Ui, text: &str, col: Color32) -> egui::Response {
-    let g = ui.painter().layout_no_wrap(text.to_string(), prop(10.5), col);
-    let (r, resp) = ui.allocate_exact_size(g.size() + egui::vec2(12.0, 4.0), egui::Sense::hover());
-    ui.painter().rect_filled(r, r.height() / 2.0, col.linear_multiply(0.16));
-    ui.painter().galley(r.center() - g.size() / 2.0, g, col);
-    resp
-}
-
-/// Sidebar tile: colored rounded square with a white glyph (the Swift SF Symbols, painted).
+/// Sidebar glyph, stroked in `col` (16 px).
 fn pane_icon(p: &egui::Painter, r: egui::Rect, i: usize, col: Color32) {
-    p.rect_filled(r, 6, col);
-    let (c, w) = (r.center(), Color32::WHITE);
-    let s = egui::Stroke::new(1.6, w);
+    let c = r.center();
+    let s = egui::Stroke::new(1.4, col);
+    let v = egui::vec2;
     match i {
         0 => {
+            // gear: ring and eight teeth
             for k in 0..8 {
-                let a = k as f32 * std::f32::consts::FRAC_PI_4;
-                let d = egui::vec2(a.cos(), a.sin());
-                p.line_segment([c + d * 4.0, c + d * 7.0], egui::Stroke::new(2.2, w));
+                let d = egui::Vec2::angled(k as f32 * std::f32::consts::FRAC_PI_4);
+                p.line_segment([c + d * 5.0, c + d * 7.5], egui::Stroke::new(2.0, col));
             }
-            p.circle_filled(c, 4.6, w);
-            p.circle_filled(c, 1.8, col);
+            p.circle_stroke(c, 4.6, s);
+            p.circle_filled(c, 1.6, col);
         }
         1 => {
-            p.circle_filled(c, 7.0, w);
-            for (dx, dy) in [(-3.0, -2.0), (0.5, -3.8), (3.5, -1.0)] { p.circle_filled(c + egui::vec2(dx, dy), 1.4, col); }
-            p.circle_filled(c + egui::vec2(1.5, 3.0), 2.0, col);
+            // half-filled circle (theme)
+            p.circle_stroke(c, 6.5, s);
+            let pts: Vec<egui::Pos2> = (0..=16).map(|k| c + egui::Vec2::angled(-std::f32::consts::FRAC_PI_2 + k as f32 / 16.0 * std::f32::consts::PI) * 6.5).collect();
+            p.add(egui::Shape::convex_polygon(pts, col, egui::Stroke::NONE));
         }
         2 => {
-            let pts = [c + egui::vec2(-7.0, 5.0), c + egui::vec2(-2.5, 0.0), c + egui::vec2(0.5, 2.5), c + egui::vec2(6.5, -4.5)];
-            p.add(egui::Shape::line(pts.to_vec(), egui::Stroke::new(1.8, w)));
-            p.line_segment([c + egui::vec2(6.5, -4.5), c + egui::vec2(2.5, -4.5)], s);
-            p.line_segment([c + egui::vec2(6.5, -4.5), c + egui::vec2(6.5, -0.5)], s);
+            p.add(egui::Shape::line(vec![c + v(-7.0, 5.0), c + v(-2.5, 0.0), c + v(0.5, 2.5), c + v(6.5, -4.5)], s));
+            p.line_segment([c + v(6.5, -4.5), c + v(2.5, -4.5)], s);
+            p.line_segment([c + v(6.5, -4.5), c + v(6.5, -0.5)], s);
         }
         3 => {
-            p.circle_stroke(c + egui::vec2(-3.5, 0.0), 3.4, egui::Stroke::new(1.8, w));
-            p.line_segment([c + egui::vec2(-0.1, 0.0), c + egui::vec2(7.0, 0.0)], egui::Stroke::new(1.8, w));
-            p.line_segment([c + egui::vec2(4.5, 0.0), c + egui::vec2(4.5, 3.0)], s);
-            p.line_segment([c + egui::vec2(6.8, 0.0), c + egui::vec2(6.8, 2.5)], s);
+            p.circle_stroke(c + v(-3.5, 0.0), 3.4, s);
+            p.line_segment([c + v(-0.1, 0.0), c + v(7.0, 0.0)], s);
+            p.line_segment([c + v(4.5, 0.0), c + v(4.5, 3.0)], s);
+            p.line_segment([c + v(6.8, 0.0), c + v(6.8, 2.5)], s);
         }
         _ => {
-            p.circle_filled(c + egui::vec2(0.0, -4.5), 1.4, w);
-            p.line_segment([c + egui::vec2(0.0, -1.5), c + egui::vec2(0.0, 5.5)], egui::Stroke::new(2.2, w));
+            p.circle_stroke(c, 6.8, s);
+            p.circle_filled(c + v(0.0, -3.2), 1.1, col);
+            p.line_segment([c + v(0.0, -1.0), c + v(0.0, 3.8)], egui::Stroke::new(1.6, col));
         }
     }
 }
