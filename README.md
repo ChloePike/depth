@@ -5,7 +5,7 @@
 [![build](https://github.com/ChloePike/depth/actions/workflows/build.yml/badge.svg)](https://github.com/ChloePike/depth/actions/workflows/build.yml)
 [![license](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 
-A local, multi-exchange crypto trading terminal for macOS. Ten venues streamed side by side,
+A local, multi-exchange crypto trading terminal for macOS, Windows and Linux. Ten venues streamed side by side,
 aggregated into one book, one tape and one chart, with order entry on the venues you hold keys for.
 Everything runs on your machine: no relay, no server, no account.
 
@@ -17,15 +17,19 @@ Everything runs on your machine: no relay, no server, no account.
 Hyperliquid, Lighter. Spot, margin, perpetuals and options (where the venue lists them).
 
 - Composite index price (venue mids weighted by recent volume), aggregated candles, CVD
-- Aggregated order book (mid-aligned per venue, 50 levels each), book heatmap, liquidity walls
+- Aggregated order book (mid-aligned per venue), individual orders per level where known (L3),
+  book heatmap, liquidity walls
+- Stocks and commodities matched across venues under their own names (XAU = Hyperliquid
+  `xyz:GOLD`, BZ = Lighter `BRENTOIL`, ...)
 - Trades tape, liquidations, open interest, funding (hourly-normalized, with countdown), basis,
   long/short ratios, option chains with greeks
 - Per-venue share of volume and resting depth
 
-**Chart**: candles from 1m to 1W, MA, session VWAP with ±1σ/±2σ bands, visible-range volume profile
-(POC, value area, high-volume nodes), breakouts through those levels, mark price, estimated
-liquidation map, expected-move cone, drawing tools, your positions / orders / TP-SL / liquidation
-prices as lines.
+**Chart**: candles from 1m to 1W in one to four cells, MA, Bollinger, session VWAP with ±1σ/±2σ
+bands, visible-range volume profile (POC, value area, high-volume nodes), breakouts, mark price,
+liquidation heatmap over time (Coinglass-style, estimated across all ten venues), footprint, whale
+bubbles, RSI / MACD / delta panes, expected-move cone, drawing tools with alerts, bar replay, and
+trading on the chart (drag orders and TP / SL).
 
 **Signals and models** (all thresholds relative to the instrument's own history):
 volume spikes, liquidation cascades, OI vs price divergence, crowded funding, spot vs perp flow,
@@ -35,7 +39,8 @@ pressure, carry table.
 **Trading** (Bybit and Binance verified on live accounts; OKX, Bitget, Gate, Kraken, Hyperliquid
 and Lighter implemented and marked untested): limit / market / post-only / BBO orders, smart order
 routing across venues, whole-position and staged TP/SL, close / reverse / close-all, positions with
-funding estimates, order / trade / position history, wallets and transfers between a venue's accounts.
+funding estimates and funding paid since open, account-wide liquidation estimates for unified /
+portfolio-margin accounts, order / trade / position history, wallets and transfers between a venue's accounts.
 Private data arrives over WebSocket pushes, never REST polling.
 
 ## Getting started
@@ -46,7 +51,7 @@ Private data arrives over WebSocket pushes, never REST polling.
 3. To see positions or trade: Settings (⌘,) → API Keys. Start with a read-only key.
 
 The full walkthrough (window layout, every indicator, order entry, smart routing, positions, transfers,
-troubleshooting) is in **[docs/GUIDE.md](docs/GUIDE.md)**.
+troubleshooting) is in **[docs/GUIDE.md](docs/GUIDE.md)** ([中文](docs/GUIDE.zh-CN.md)).
 
 ## Security
 
@@ -56,8 +61,9 @@ troubleshooting) is in **[docs/GUIDE.md](docs/GUIDE.md)**.
 
 ## Download
 
-Prebuilt macOS (Apple silicon) builds are attached to each [release](https://github.com/ChloePike/depth/releases).
-They are ad-hoc signed, not notarized: on first launch, right-click Depth.app and choose Open.
+Each [release](https://github.com/ChloePike/depth/releases) has macOS (Apple silicon; plain and
+SwiftUI shell), Windows x64 (plain and WinUI shell) and Linux x64 builds. macOS builds are ad-hoc
+signed, not notarized: on first launch, right-click Depth.app and choose Open. Windows builds are unsigned.
 
 ## Build
 
