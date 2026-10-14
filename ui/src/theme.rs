@@ -32,7 +32,7 @@ pub fn track() -> Color32 { pick(Color32::from_rgb(0x2a, 0x31, 0x3b), Color32::f
 fn bg_c() -> Color32 { pick(Color32::from_rgb(0x16, 0x16, 0x17), Color32::WHITE, light()) }
 /// Opaque fill of popups, menus and windows (the panel veils are translucent and would show what is under them).
 pub fn popup_bg() -> Color32 { pick(Color32::from_rgb(0x26, 0x26, 0x29), Color32::from_rgb(0xff, 0xff, 0xff), light()) }
-fn panel_c() -> Color32 { pick(Color32::from_rgb(0x1e, 0x1e, 0x20), Color32::from_rgb(0xf5, 0xf5, 0xf7), light()) }
+pub fn panel_c() -> Color32 { pick(Color32::from_rgb(0x1e, 0x1e, 0x20), Color32::from_rgb(0xf5, 0xf5, 0xf7), light()) }
 
 static NATIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Hosted in the SwiftUI window: egui leaves its backgrounds transparent and the native window
@@ -85,7 +85,7 @@ fn icon_png(e: Exchange) -> &'static [u8] {
     }
 }
 
-fn decode_png(bytes: &[u8]) -> Option<egui::ColorImage> {
+pub fn decode_png(bytes: &[u8]) -> Option<egui::ColorImage> {
     let mut d = png::Decoder::new(std::io::Cursor::new(bytes));
     // palette (indexed) and low-bit images expand to 8-bit RGB(A) / gray
     d.set_transformations(png::Transformations::EXPAND);
@@ -291,34 +291,6 @@ pub fn num_field(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, 
     }
     ui.data_mut(|d| d.insert_temp(eid, text));
     changed
-}
-
-/// A settings row inside a group: title (+ muted description) on the left, control on the right.
-pub fn setting_row(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal(|ui| {
-        ui.set_min_height(if desc.is_empty() { 34.0 } else { 44.0 });
-        // the text column stops short of the control so a long description wraps instead of
-        // running under it
-        let text_w = (ui.available_width() * 0.55).max(160.0);
-        ui.vertical(|ui| {
-            ui.set_max_width(text_w);
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.label(egui::RichText::new(title).font(prop(12.5)).color(fg()));
-            if !desc.is_empty() { ui.add(egui::Label::new(egui::RichText::new(desc).font(prop(10.5)).color(dim())).wrap()); }
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
-    });
-}
-
-/// Rounded group card for settings rows; rows are separated by hairlines.
-pub fn group(ui: &mut egui::Ui, title: &str, rows: impl FnOnce(&mut egui::Ui)) {
-    ui.add_space(10.0);
-    ui.label(egui::RichText::new(title.to_uppercase()).font(prop(10.5)).color(dim()));
-    ui.add_space(3.0);
-    egui::Frame::new().fill(panel2()).corner_radius(8).stroke(egui::Stroke::new(1.0, line())).inner_margin(egui::Margin::symmetric(12, 4)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        rows(ui);
-    });
 }
 
 /// Hairline between rows of a group.

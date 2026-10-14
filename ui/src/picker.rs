@@ -11,6 +11,8 @@ pub struct Picker {
     query: String,
     favs_only: bool,
     favs: BTreeSet<String>,
+    /// opened from the keyboard (Cmd-K): focus the search field on the next frame
+    focus: bool,
 }
 
 fn favs_path() -> Option<PathBuf> {
@@ -22,7 +24,7 @@ impl Default for Picker {
         let favs = favs_path().and_then(|p| std::fs::read_to_string(p).ok())
             .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
             .unwrap_or_else(|| ["BTC", "ETH", "SOL"].into_iter().map(String::from).collect());
-        Picker { open: false, query: String::new(), favs_only: false, favs }
+        Picker { open: false, query: String::new(), favs_only: false, favs, focus: false }
     }
 }
 
@@ -33,11 +35,29 @@ impl Picker {
         let _ = std::fs::write(p, self.favs.iter().cloned().collect::<Vec<_>>().join("\n"));
     }
 
+    /// Open the list with the search field focused (Cmd-K).
+    pub fn open_search(&mut self) { self.open = true; self.query.clear(); self.focus = true; }
+
+    /// Favorite `d` steps from `base` (wrapping); the first one when `base` is not a favorite (Cmd-[ / Cmd-]).
+    pub fn step(&self, base: &str, d: isize) -> Option<String> {
+        let f: Vec<&String> = self.favs.iter().collect();
+        if f.is_empty() { return None; }
+        let n = f.len() as isize;
+        let i = f.iter().position(|b| *b == base).map_or(0, |i| (i as isize + d).rem_euclid(n) as usize);
+        Some(f[i].clone())
+    }
+
+    /// Star / unstar `base` (Cmd-D).
+    pub fn toggle_fav(&mut self, base: &str) {
+        if !self.favs.remove(base) { self.favs.insert(base.to_string()); }
+        self.save();
+    }
+
     /// Button showing the current pair; returns a newly chosen base asset.
     pub fn show(&mut self, ui: &mut Ui, base: &str, tickers: &[Ticker]) -> Option<String> {
         let btn = ui.add(egui::Button::new(RichText::new(format!("       {base}/USDT  ▾")).font(prop(15.0)).strong()).min_size(egui::vec2(120.0, 28.0)));
         coin_icon(ui, base, egui::Rect::from_center_size(egui::pos2(btn.rect.left() + 18.0, btn.rect.center().y), egui::vec2(18.0, 18.0)));
-        let just_opened = btn.clicked() && !self.open;
+        let just_opened = (btn.clicked() && !self.open) || std::mem::take(&mut self.focus);
         if btn.clicked() { self.open = !self.open; if self.open { self.query.clear(); } }
         if !self.open { return None; }
         let mut chosen = None;
@@ -85,10 +105,7 @@ impl Picker {
                         }
                     }
                 });
-                if let Some(b) = toggle {
-                    if !self.favs.remove(&b) { self.favs.insert(b); }
-                    self.save();
-                }
+                if let Some(b) = toggle { self.toggle_fav(&b); }
             });
         });
         // close on choice, Escape or a click outside the button and the popup
@@ -96,5 +113,17 @@ impl Picker {
             && ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| !inner.response.rect.contains(p) && !btn.rect.contains(p));
         if chosen.is_some() || clicked_outside || ui.input(|i| i.key_pressed(egui::Key::Escape)) { self.open = false; }
         chosen
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn step_wraps() {
+        let p = super::Picker { open: false, query: String::new(), favs_only: false, favs: ["BTC", "ETH", "SOL"].into_iter().map(String::from).collect(), focus: false };
+        assert_eq!(p.step("BTC", 1).as_deref(), Some("ETH"));
+        assert_eq!(p.step("BTC", -1).as_deref(), Some("SOL"));
+        assert_eq!(p.step("SOL", 1).as_deref(), Some("BTC"));
+        assert_eq!(p.step("DOGE", 1).as_deref(), Some("BTC"));
     }
 }

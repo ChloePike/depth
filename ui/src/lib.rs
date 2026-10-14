@@ -169,10 +169,10 @@ pub fn hms(ms: i64) -> String {
 /// Written when it changes (checked once a second); env overrides (T1_BASE, ...) win on load.
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
-struct Settings { route: Option<depth::route::Policy>, prefs: Option<settings::Prefs>, lang: Option<String>, base: Option<String>, mode: Option<Market>, chart: Option<chart::Chart>, layout: Option<String>, cell: Option<usize>, charts: Option<Vec<(usize, chart::Chart)>>, trade_ex: Option<Exchange>, off: Option<Vec<Exchange>>, auto: Option<HashMap<Exchange, engine::AutoTopUp>> }
+struct Settings { route: Option<depth::route::Policy>, prefs: Option<settings::Prefs>, lang: Option<String>, base: Option<String>, mode: Option<Market>, chart: Option<chart::Chart>, layout: Option<String>, cell: Option<usize>, charts: Option<Vec<(usize, chart::Chart)>>, trade_ex: Option<Exchange>, off: Option<Vec<Exchange>>, auto: Option<HashMap<Exchange, engine::AutoTopUp>>, order_panel: Option<bool> }
 
 #[derive(serde::Serialize)]
-struct SettingsRef<'a> { route: &'a depth::route::Policy, prefs: &'a settings::Prefs, lang: &'static str, base: &'a str, mode: Market, chart: &'a chart::Chart, layout: &'a str, cell: usize, charts: &'a [(usize, chart::Chart)], trade_ex: Exchange, off: Vec<Exchange>, auto: std::collections::BTreeMap<String, engine::AutoTopUp> }
+struct SettingsRef<'a> { route: &'a depth::route::Policy, prefs: &'a settings::Prefs, lang: &'static str, base: &'a str, mode: Market, chart: &'a chart::Chart, layout: &'a str, cell: usize, charts: &'a [(usize, chart::Chart)], trade_ex: Exchange, off: Vec<Exchange>, auto: std::collections::BTreeMap<String, engine::AutoTopUp>, order_panel: bool }
 
 fn settings_path() -> Option<std::path::PathBuf> {
     Some(depth::sys::data_dir()?.join("settings.json"))
@@ -215,6 +215,8 @@ pub struct App {
     /// egui ports of the native panels: their state document (when built, stale) and the order panel
     st: (std::sync::Arc<serde_json::Value>, Instant, bool),
     order: order::OrderPanel,
+    /// order panel shown (Perp; Cmd-Opt-I or the header button), persisted
+    order_panel: bool,
 }
 
 /// Cell rects of a chart layout: "2" side by side, "2v" stacked, "3" one left and two right,
@@ -277,7 +279,7 @@ impl App {
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
             route: st.route.clone().unwrap_or_default(), pending_base: None, pending_mode: None, pending_restart: false, book_w: 0.0,
             layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(),
-            st: (Default::default(), Instant::now(), true), order: Default::default(),
+            st: (Default::default(), Instant::now(), true), order: Default::default(), order_panel: st.order_panel.unwrap_or(true),
         }
     }
 
@@ -348,9 +350,47 @@ impl App {
                 p.circle_stroke(c, 5.5, egui::Stroke::new(1.6, col));
                 p.circle_filled(c, 1.8, col);
                 if resp.on_hover_text(t("set.title")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.settings.open = true; }
+                // show / hide the order panel (the Swift toolbar's sidebar.trailing button); Perp only
+                ui.add_space(2.0);
+                let perp = self.mode == Market::Perp;
+                let (r, resp) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), if perp { egui::Sense::click() } else { egui::Sense::hover() });
+                let p = ui.painter();
+                if perp && resp.hovered() { p.rect_filled(r, 5, hl()); }
+                let col = if !perp { dim().linear_multiply(0.5) } else if resp.hovered() || self.order_panel { fg() } else { mu() };
+                let b = egui::Rect::from_center_size(r.center(), egui::vec2(17.0, 13.0));
+                p.rect_stroke(b, 3, egui::Stroke::new(1.4, col), egui::StrokeKind::Inside);
+                let x = b.right() - 6.0;
+                p.vline(x, b.y_range().shrink(1.0), egui::Stroke::new(1.4, col));
+                if self.order_panel { p.rect_filled(egui::Rect::from_min_max(egui::pos2(x, b.top() + 1.5), b.max - egui::vec2(1.5, 1.5)), 1, col.linear_multiply(0.5)); }
+                if resp.on_hover_text(l("Show or hide the order panel (Option-Command-I)")).clicked() { self.order_panel = !self.order_panel; }
             });
 
         });
+    }
+
+    /// Keyboard shortcuts of the SwiftUI menus (App.swift): Cmd-, settings, Cmd-Opt-I order panel,
+    /// Cmd-K pair, Cmd-[ / Cmd-] favorites, Cmd-D star, Cmd-1..4 market, Ctrl-1..6 interval.
+    /// Never while a text field has focus or a dialog is open.
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() { return; }
+        use egui::{Key, Modifiers as M};
+        let k = |m: M, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
+        if k(M::COMMAND, Key::Comma) { self.settings.open = true; }
+        if self.settings.open { return; }
+        if k(M::COMMAND | M::ALT, Key::I) { self.order_panel = !self.order_panel; }
+        if k(M::COMMAND, Key::K) { self.picker.open_search(); }
+        let base = self.eng.base.clone();
+        for (key, d) in [(Key::OpenBracket, -1), (Key::CloseBracket, 1)] {
+            if k(M::COMMAND, key) { if let Some(b) = self.picker.step(&base, d).filter(|b| *b != base) { self.pending_base = Some(b); } }
+        }
+        if k(M::COMMAND, Key::D) { self.picker.toggle_fav(&base); }
+        const NUM: [Key; 6] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6];
+        for (i, (m, _)) in MODES.iter().enumerate() {
+            if k(M::COMMAND, NUM[i]) && self.mode != *m { self.pending_mode = Some(*m); }
+        }
+        for (i, tf) in [1, 5, 15, 60, 240, 1440].into_iter().enumerate() {
+            if k(M::CTRL, NUM[i]) { self.chart.tf = tf; }
+        }
     }
 
     /// Borderless window: let the pointer resize from any edge or corner.
@@ -471,7 +511,7 @@ impl App {
         off.sort_by_key(|e| *e as u8);
         // sorted keys so an unchanged state serializes identically (no rewrite every second)
         let auto = self.eng.account.lock().unwrap().auto.iter().map(|(e, r)| (format!("{e:?}"), *r)).collect();
-        let s = SettingsRef { route: &self.route, prefs: &self.prefs, lang: lang_code(), base: &self.eng.base, mode: self.mode, chart: &self.chart, layout: &self.layout, cell: self.cell, charts: &self.others, trade_ex: self.trade.ex, off, auto };
+        let s = SettingsRef { route: &self.route, prefs: &self.prefs, lang: lang_code(), base: &self.eng.base, mode: self.mode, chart: &self.chart, layout: &self.layout, cell: self.cell, charts: &self.others, trade_ex: self.trade.ex, off, auto, order_panel: self.order_panel };
         let Ok(json) = serde_json::to_string_pretty(&s) else { return };
         if json == self.saved.0 { return; }
         let Some(p) = settings_path() else { return };
@@ -601,7 +641,7 @@ impl App {
         if std::env::var("T1_SPIN").is_ok() { ctx.request_repaint(); }
         self.screenshot(&ctx);
         self.save_settings();
-        if !self.hosted { self.resize_edges(ui); }
+        if !self.hosted { self.resize_edges(ui); self.shortcuts(&ctx); }
         let (mut new_base, mut new_mode, mut restart) = (None, None, false);
         // T1_CYCLE=<s>: switch base every <s> seconds (diagnostics for resubscription leaks)
         if let Some(every) = std::env::var("T1_CYCLE").ok().and_then(|s| s.parse::<u64>().ok()) {
@@ -628,7 +668,7 @@ impl App {
             let acc = egui::Panel::bottom("account").show_separator_line(false).frame(card(12));
             let acc = if has_keys { acc.resizable(true).default_size(210.0) } else { acc.resizable(false).exact_size(46.0) };
             acc.show(ui, |ui| self.trade.account(ui, &self.eng));
-            if self.mode == Market::Perp {
+            if self.mode == Market::Perp && self.order_panel {
                 // ops from the order panel take the agg lock themselves (route planning reads books)
                 drop(a);
                 let st = self.state_doc();
@@ -716,7 +756,13 @@ impl App {
         if std::mem::take(&mut self.trade.open_settings) { self.settings.open_tab(2); }
         // T1_SETTINGS=<tab>: open the settings dialog once (screenshots)
         if let Some(n) = std::env::var("T1_SETTINGS").ok().and_then(|s| s.parse().ok()) { if !self.shot_sent && self.started.elapsed().as_secs() < 2 { self.settings.open_tab(n); } }
-        if !self.hosted { if let Some(ex) = self.settings.show(&ctx, &mut self.prefs, self.trade.ex, &mut self.eng) { self.trade.ex = ex; self.trade.reset_price(); } }
+        if !self.hosted && self.settings.open {
+            // ops take the agg lock themselves: nothing is held here
+            let st = self.state_doc();
+            let mut sv = std::mem::take(&mut self.settings);
+            sv.show(&ctx, &st, &mut |v| { let r = self.call(&ctx, &v); self.st.2 = true; r });
+            self.settings = sv;
+        }
         self.trade.confirm_orders = self.prefs.confirm;
         self.eng.ensure_tf(chart::native_tf(self.chart.tf) as u32, &ctx);
         let n = layout_cells(&self.layout, egui::Rect::NOTHING).len();
