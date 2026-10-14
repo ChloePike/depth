@@ -215,3 +215,4 @@ Whale trades = Transactions baleines
 Footprint (traded value per price) = Footprint (valeur échangée par prix)
 Cluster bars = Barres cluster
 Side clusters = Clusters latéraux
+Use this price = Utiliser ce prix

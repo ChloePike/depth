@@ -215,3 +215,4 @@ Whale trades = Negócios de baleias
 Footprint (traded value per price) = Footprint (valor negociado por preço)
 Cluster bars = Barras de cluster
 Side clusters = Clusters laterais
+Use this price = Usar este preço

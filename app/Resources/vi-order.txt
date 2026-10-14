@@ -215,3 +215,4 @@ Whale trades = Giao dịch cá voi
 Footprint (traded value per price) = Footprint (giá trị khớp theo giá)
 Cluster bars = Thanh cụm
 Side clusters = Cụm bên cạnh
+Use this price = Dùng giá này

@@ -215,3 +215,4 @@ Whale trades = 大口約定
 Footprint (traded value per price) = フットプリント（価格ごとの約定額）
 Cluster bars = クラスターバー
 Side clusters = サイドクラスター
+Use this price = この価格を使う

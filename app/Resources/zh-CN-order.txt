@@ -215,3 +215,4 @@ Whale trades = 大单成交
 Footprint (traded value per price) = 足迹图（每个价位的成交额）
 Cluster bars = 簇柱
 Side clusters = 侧簇
+Use this price = 使用这个价格

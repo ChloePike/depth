@@ -319,6 +319,17 @@ impl OrderPanel {
                     ui.label(RichText::new(l("Avbl")).font(prop(12.0)).color(dim()));
                     ui.label(RichText::new(f(&t["available"]).map(|a| format!("{} USDT", usd(a))).unwrap_or("–".into())).font(mono(12.0)));
                     if has_key && link(ui, "⇄").on_hover_text(l("Move funds between accounts on this venue")).clicked() { self.open_transfer = Some(venue.clone()); }
+                    // the venue's own touch, right-aligned; a click puts it in the limit price
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        for (v, col) in [(ask, dn()), (bid, up())] {
+                            let Some(v) = v else { continue };
+                            let r = ui.add(egui::Label::new(RichText::new(fmt_px(v)).font(mono(12.0)).color(col)).sense(egui::Sense::click()));
+                            if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(l("Use this price")).clicked() && self.kind != Kind::Market {
+                                (self.kind, self.bbo_on, self.price) = (if self.kind == Kind::Stop { Kind::Stop } else { Kind::Limit }, false, px_str(v, tick));
+                            }
+                        }
+                    });
                 });
                 enter |= self.kind_fields(ui, t, &venue, &bbo_levels, use_bbo, tick);
                 let (r, e) = field(ui, l("Size"), &mut self.qty, &base, "qty");
@@ -365,7 +376,6 @@ impl OrderPanel {
                 }
             });
             ui.add_space(8.0);
-            for p in &positions { self.position_card(ui, p, st, call); ui.add_space(8.0); }
             self.account_card(ui, st, t, &venue, has_key);
         }
         if enter {
@@ -465,15 +475,6 @@ impl OrderPanel {
                             let b = egui::Button::new(RichText::new("BBO").font(prop(11.5)).color(if self.bbo_on { accent() } else { mu() }))
                                 .fill(if self.bbo_on { hl() } else { panel2() }).stroke(egui::Stroke::new(1.0, if self.bbo_on { accent() } else { line() })).corner_radius(5).min_size(egui::vec2(48.0, 30.0));
                             if ui.add(b).on_hover_text(l("Priced by the venue's book when the order arrives (Counterparty: opposite side; Queue: own side; number: book level)")).clicked() { self.bbo_on = !self.bbo_on; }
-                        }
-                    });
-                    // the venue's own touch, click to use it
-                    ui.horizontal(|ui| {
-                        for (k, v, col) in [(l("Bid"), f(&t["bid"]), up()), (l("Ask"), f(&t["ask"]), dn())] {
-                            let Some(v) = v else { continue };
-                            if ui.add(egui::Button::new(RichText::new(format!("{k} {}", fmt_px(v))).font(mono(10.5)).color(col)).fill(panel2()).corner_radius(4)).clicked() && !use_bbo {
-                                self.price = px_str(v, f(&t["tick"]));
-                            }
                         }
                     });
                     ui.horizontal(|ui| {
@@ -633,58 +634,6 @@ impl OrderPanel {
         if t["lev"].is_null() && has_key && !self.close { note(ui, &format!("⚠ {}", l("Leverage unknown: max size and cost assume 1x.")), WARN); }
         if let Some(m) = f(&t["min_qty"]).filter(|m| qty_v > 0.0 && qty_v < *m) { note(ui, &format!("⚠ {} {} {base}", l("Below the minimum size"), fmt_qty(m)), WARN); }
         else if let Some(m) = f(&t["min_notional"]).filter(|m| notional > 0.0 && notional < *m) { note(ui, &format!("⚠ {} {} USDT", l("Below the minimum order value"), usd(m)), WARN); }
-    }
-
-    /// This symbol's position on the trade venue: size, prices, uPnL / ROE, TP/SL and actions.
-    fn position_card(&mut self, ui: &mut Ui, p: &Value, st: &Value, call: &mut Call) {
-        let long = s(&p["side"]) == "long";
-        let (qty, entry, mark, upnl, lev) = (f(&p["qty"]).unwrap_or(0.0), f(&p["entry"]).unwrap_or(0.0), f(&p["mark"]).unwrap_or(0.0), f(&p["upnl"]).unwrap_or(0.0), f(&p["lev"]).unwrap_or(0.0));
-        let margin = f(&p["margin"]).filter(|m| *m > 0.0).unwrap_or(entry * qty / lev.max(1.0));
-        let base = s(&st["base"]);
-        let tpsl: Vec<&Value> = st["tpsl"].as_array().map(|a| a.iter().filter(|x| x["ex"] == p["ex"] && x["symbol"] == p["symbol"] && x["pos"] == p["side"]).collect()).unwrap_or_default();
-        card(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(if long { l("Long") } else { l("Short") }).strong().color(if long { up() } else { dn() }));
-                if lev > 0.0 { ui.label(RichText::new(format!("{lev}x")).font(mono(11.5)).color(dim())); }
-                ui.label(RichText::new(format!("{} · {}", s(&p["ex"]), s(&p["symbol"]))).font(prop(11.5)).color(dim()));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let c = if upnl >= 0.0 { up() } else { dn() };
-                    ui.label(RichText::new(if margin > 0.0 { format!("{:+.2}%", upnl / margin * 100.0) } else { "–".into() }).font(mono(11.0)).color(c));
-                    ui.label(RichText::new(signed(upnl)).font(mono(13.0)).strong().color(c)).on_hover_text(l("Unrealized PnL (USDT) and return on margin"));
-                });
-            });
-            kv(ui, l("Size"), format!("{} {base}", fmt_qty(qty)), fg());
-            kv(ui, l("Entry / Mark"), format!("{} / {}", fmt_px(entry), fmt_px(mark)), fg());
-            kv(ui, l("Liq. price"), f(&p["liq"]).map(fmt_px).unwrap_or("–".into()), WARN);
-            kv(ui, l("Margin"), format!("{} USDT", usd(margin)), fg());
-            let one = |tp: bool| { let v: Vec<f64> = tpsl.iter().filter(|x| (x["take_profit"] == true) == tp).filter_map(|x| f(&x["trigger_px"])).collect(); if v.is_empty() { "–".to_string() } else { format!("{}{}", fmt_px(v[0]), if v.len() > 1 { format!(" +{}", v.len() - 1) } else { String::new() }) } };
-            kv(ui, l("TP / SL"), format!("{} / {}", one(true), one(false)), fg());
-            ui.columns(3, |c| {
-                if c[0].add_sized([c[0].available_width(), 26.0], egui::Button::new(RichText::new(l("Market")).color(dn()))).on_hover_text(l("Close the whole position at market (asks for confirmation)")).clicked() {
-                    // destructive: always confirmed, whatever the preference
-                    let args = json!({"pos": p["side"], "close": true, "kind": "market", "qty": qty});
-                    let mut req = args.clone();
-                    req["op"] = "preview".into();
-                    match call(req) {
-                        Ok(plan) if plan["legs"].as_array().is_some_and(|a| !a.is_empty()) => self.ticket = Some(Ticket { pos: s(&p["side"]).into(), close: true, args, plan, tp: None, sl: None, trigger: "mark", err: None }),
-                        Ok(_) => self.error = Some(l("No venue can take this order").into()),
-                        Err(e) => self.error = Some(e),
-                    }
-                }
-                if c[1].add_sized([c[1].available_width(), 26.0], egui::Button::new(l("Limit"))).on_hover_text(l("Fill the form with a limit close at the venue's best price")).clicked() {
-                    // prefill: close tab, limit at the venue's own touch on the passive side
-                    let t = &st["trade"];
-                    (self.close, self.kind, self.bbo_on) = (true, Kind::Limit, false);
-                    if let Some(px) = f(&t[if long { "ask" } else { "bid" }]) { self.price = px_str(px, f(&t["tick"])); }
-                    self.qty = qty_str(qty, f(&t["step"]));
-                    self.last_pos = Some(s(&p["side"]).into());
-                }
-                if c[2].add_sized([c[2].available_width(), 26.0], egui::Button::new(l("TP/SL"))).on_hover_text(l("Whole-position or staged take-profit / stop-loss")).clicked() {
-                    self.sheet = Some(TpSlSheet { ex: s(&p["ex"]).into(), symbol: s(&p["symbol"]).into(), side: s(&p["side"]).into(), partial: false, tp: String::new(), sl: String::new(), last: false,
-                        levels: vec![Level { tp: true, price: String::new(), amount: "50".into(), pct: true }, Level { tp: false, price: String::new(), amount: "100".into(), pct: true }], err: None });
-                }
-            });
-        });
     }
 
     /// The trade venue's account: margin health, equity, uPnL, keys shortcut.

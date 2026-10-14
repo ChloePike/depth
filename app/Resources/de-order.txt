@@ -215,3 +215,4 @@ Whale trades = Wal-Trades
 Footprint (traded value per price) = Footprint (Umsatz je Preis)
 Cluster bars = Cluster-Balken
 Side clusters = Seitliche Cluster
+Use this price = Diesen Preis verwenden

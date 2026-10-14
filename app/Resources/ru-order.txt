@@ -215,3 +215,4 @@ Whale trades = Сделки китов
 Footprint (traded value per price) = Футпринт (оборот по цене)
 Cluster bars = Кластерные бары
 Side clusters = Боковые кластеры
+Use this price = Использовать эту цену

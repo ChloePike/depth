@@ -215,3 +215,4 @@ Whale trades = 고래 체결
 Footprint (traded value per price) = 풋프린트 (가격별 체결액)
 Cluster bars = 클러스터 바
 Side clusters = 사이드 클러스터
+Use this price = 이 가격 사용

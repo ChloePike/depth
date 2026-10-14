@@ -215,3 +215,4 @@ Whale trades = Operaciones ballena
 Footprint (traded value per price) = Footprint (valor operado por precio)
 Cluster bars = Barras de clúster
 Side clusters = Clústeres laterales
+Use this price = Usar este precio
