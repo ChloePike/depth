@@ -97,3 +97,4 @@ Remove alert = 刪除警報
 Sound of new alerts = 新警報的提示音
 Price alerts = 價格警報
 Sound = 提示音
+Long / short position = 多空倉位工具

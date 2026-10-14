@@ -97,3 +97,4 @@ Remove alert = Alarm entfernen
 Sound of new alerts = Ton neuer Alarme
 Price alerts = Preisalarme
 Sound = Ton
+Long / short position = Long-/Short-Position

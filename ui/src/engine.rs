@@ -56,7 +56,7 @@ pub struct Account {
 pub struct AutoTopUp { pub enabled: bool, pub min: f64, pub target: f64 }
 
 impl Account {
-    fn note(&mut self, msg: String, ok: bool) {
+    pub(crate) fn note(&mut self, msg: String, ok: bool) {
         if !ok { eprintln!("[trade] {msg}"); }
         self.log.push_back((now_ms(), msg, ok));
         if self.log.len() > 200 { self.log.pop_front(); }
@@ -740,6 +740,67 @@ impl Engine {
             let res = trade::cancel(o.ex, &k, &o.symbol, &o.id).await;
             let ok = res.is_ok();
             account.lock().unwrap().note(match res { Ok(()) => format!("OK cancel {:?} {} {}", o.ex, o.symbol, o.id), Err(e) => format!("FAIL cancel {:?} {}: {e:#}", o.ex, o.id) }, ok);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Move a resting limit order (dragged on the chart): amended in place where the venue allows it
+    /// (Bybit, Binance: same id, nothing in between); elsewhere cancelled, then the rest of it placed
+    /// at `price` only once the cancel succeeded, so a failed cancel never leaves two orders.
+    /// ponytail: OKX / Bitget / Gate / Kraken / Hyperliquid have amend endpoints too; wire them once
+    /// those venues are verified on a real account.
+    pub fn replace_order(&self, o: &OpenOrder, price: f64, ctx: &eframe::egui::Context) {
+        let (Some(rt), account, ctx, o) = (self.rt.as_ref(), self.account.clone(), ctx.clone(), o.clone()) else { return };
+        let opp = |s: depth::Side| if s == depth::Side::Buy { depth::Side::Sell } else { depth::Side::Buy };
+        let req = OrderReq {
+            symbol: o.symbol.clone(), close: o.reduce_only, kind: trade::Kind::Limit { price, tif: trade::Tif::Gtc }, qty: o.qty - o.filled, client_id: None,
+            // the position the order acts on: its own side when opening, the other one when reducing
+            pos: o.pos.unwrap_or(if o.reduce_only { opp(o.side) } else { o.side }),
+        };
+        rt.spawn(async move {
+            let Some(k) = account.lock().unwrap().keys.get(&o.ex).cloned() else { return };
+            if trade::can_amend(o.ex) {
+                let cached = account.lock().unwrap().rules.get(&(o.ex, o.symbol.clone())).copied();
+                let res = async {
+                    let r = match cached { Some(r) => r, None => trade::rules(o.ex, &o.symbol).await? };
+                    trade::amend(o.ex, &k, &o, price, &r).await
+                }.await;
+                let what = format!("{:?} {} {} {} -> {price}", o.ex, o.symbol, o.id, o.price);
+                let ok = res.is_ok();
+                account.lock().unwrap().note(match res { Ok(()) => format!("OK amend {what}"), Err(e) => format!("FAIL amend {what}: {e:#}") }, ok);
+                ctx.request_repaint();
+                return;
+            }
+            match trade::cancel(o.ex, &k, &o.symbol, &o.id).await {
+                Ok(()) => { place_logged(&account, o.ex, &req, price).await; }
+                Err(e) => account.lock().unwrap().note(format!("FAIL move {:?} {} {}: cancel: {e:#}", o.ex, o.symbol, o.id), false),
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Move a TP / SL trigger (dragged on the chart): a whole-position one is replaced in place, a
+    /// partial one is re-added at the new price after its cancel succeeded.
+    pub fn move_tpsl(&self, t: &trade::tpsl::TpSl, price: f64, ctx: &eframe::egui::Context) {
+        let Some(rt) = self.acct_rt.as_ref() else { return };
+        let (account, ctx, t) = (self.account.clone(), ctx.clone(), t.clone());
+        rt.spawn(async move {
+            let Some(k) = account.lock().unwrap().keys.get(&t.ex).cloned() else { return };
+            let cached = account.lock().unwrap().modes.get(&(t.ex, t.symbol.clone())).copied().flatten();
+            let res = async {
+                let m = match cached { Some(m) => m, None => trade::mode(t.ex, &k, &t.symbol).await? };
+                let (tp, sl) = if t.take_profit { (Some(price), None) } else { (None, Some(price)) };
+                match t.qty {
+                    None => trade::tpsl::set_position_tpsl(t.ex, &k, &t.symbol, t.pos, m, tp, sl, t.trigger).await,
+                    Some(q) => {
+                        trade::tpsl::cancel(t.ex, &k, &t.symbol, &t.id).await?;
+                        trade::tpsl::add_partial(t.ex, &k, &t.symbol, t.pos, m, t.take_profit, price, q, t.trigger).await.map(|_| ())
+                    }
+                }
+            }.await;
+            let what = format!("{:?} {} {} -> {price}", t.ex, t.symbol, if t.take_profit { "TP" } else { "SL" });
+            let mut a = account.lock().unwrap();
+            match res { Ok(()) => a.note(format!("OK move {what}"), true), Err(e) => a.note(format!("FAIL move {what}: {e:#}"), false) }
             ctx.request_repaint();
         });
     }

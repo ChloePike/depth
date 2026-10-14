@@ -97,3 +97,4 @@ Remove alert = Xóa cảnh báo
 Sound of new alerts = Âm thanh cảnh báo mới
 Price alerts = Cảnh báo giá
 Sound = Âm thanh
+Long / short position = Vị thế long / short

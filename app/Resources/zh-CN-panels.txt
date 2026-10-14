@@ -97,3 +97,4 @@ Remove alert = 删除报警
 Sound of new alerts = 新报警的提示音
 Price alerts = 价格报警
 Sound = 提示音
+Long / short position = 多空仓位工具

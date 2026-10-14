@@ -97,3 +97,4 @@ Remove alert = 알림 삭제
 Sound of new alerts = 새 알림 소리
 Price alerts = 가격 알림
 Sound = 소리
+Long / short position = 롱 / 숏 포지션

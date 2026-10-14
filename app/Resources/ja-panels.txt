@@ -97,3 +97,4 @@ Remove alert = アラートを削除
 Sound of new alerts = 新しいアラートの音
 Price alerts = 価格アラート
 Sound = サウンド
+Long / short position = ロング / ショートポジション

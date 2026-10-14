@@ -97,3 +97,4 @@ Remove alert = Удалить алерт
 Sound of new alerts = Звук новых алертов
 Price alerts = Ценовые алерты
 Sound = Звук
+Long / short position = Длинная / короткая позиция

@@ -645,6 +645,26 @@ pub async fn place(ex: Exchange, k: &Keys, req: &OrderReq, r: &Rules, ref_px: f6
     }
 }
 
+/// Venues whose resting limit orders `amend` changes in place (same id); the others are moved by
+/// cancel + new.
+pub fn can_amend(ex: Exchange) -> bool { matches!(ex, Exchange::Bybit | Exchange::Binance) }
+
+/// Re-price a resting limit order in place, keeping its size left and its id. Binance's modify
+/// needs side and quantity again (it rejects a quantity below what already filled).
+pub async fn amend(ex: Exchange, k: &Keys, o: &OpenOrder, price: f64, r: &Rules) -> Result<()> {
+    let px = fmt_step(price, r.tick, false);
+    if !(px.parse::<f64>().is_ok_and(|p| p > 0.0)) { bail!("invalid price {price}"); }
+    match ex {
+        Exchange::Bybit => { bybit(k, false, "/v5/order/amend", json!({"category": "linear", "symbol": o.symbol, "orderId": o.id, "price": px})).await?; }
+        Exchange::Binance => {
+            binance(k, reqwest::Method::PUT, "/fapi/v1/order", &[("symbol", o.symbol.clone()), ("orderId", o.id.clone()),
+                ("side", side_str(Exchange::Binance, o.side).into()), ("quantity", fmt_step(o.qty, r.step, true)), ("price", px)]).await?;
+        }
+        _ => bail!("{ex:?}: no in-place amend"),
+    }
+    Ok(())
+}
+
 pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {
     match ex {
         Exchange::Bybit => { bybit(k, false, "/v5/order/cancel", json!({"category": "linear", "symbol": symbol, "orderId": id})).await?; }

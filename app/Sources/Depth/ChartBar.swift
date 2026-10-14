@@ -88,7 +88,8 @@ struct ChartBar: View {
                 moreTool("channel", "equal", L("Parallel channel"), c)
                 moreTool("text", "textformat", L("Text note"), c)
                 moreTool("measure", "ruler", L("Measure"), c)
-            } label: { Image(systemName: ["channel", "text", "measure"].contains(c.tool ?? "") ? "checkmark.circle.fill" : "ellipsis.circle") }
+                moreTool("position", "arrow.up.arrow.down.square", L("Long / short position"), c)
+            } label: { Image(systemName: ["channel", "text", "measure", "position"].contains(c.tool ?? "") ? "checkmark.circle.fill" : "ellipsis.circle") }
             .menuIndicator(.hidden).help(L("More drawing tools"))
             if c.drawings > 0 {
                 Toggle(isOn: Binding(get: { c.hide }, set: { chart(["hide": $0]) })) { Image(systemName: c.hide ? "eye.slash" : "eye") }

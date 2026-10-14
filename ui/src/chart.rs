@@ -92,14 +92,14 @@ struct HeatCache {
 struct TexGeom { t0: i64, ms: i64, lo: i64, bins: usize, cols: usize }
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-enum Tool { HLine, Trend, Ray, Fib, Rect, Channel, Text, Measure }
+enum Tool { HLine, Trend, Ray, Fib, Rect, Channel, Text, Measure, Position }
 
 impl Tool {
-    const ALL: [Tool; 8] = [Tool::HLine, Tool::Trend, Tool::Ray, Tool::Fib, Tool::Rect, Tool::Channel, Tool::Text, Tool::Measure];
+    const ALL: [Tool; 9] = [Tool::HLine, Tool::Trend, Tool::Ray, Tool::Fib, Tool::Rect, Tool::Channel, Tool::Text, Tool::Measure, Tool::Position];
     fn id(self) -> &'static str {
         match self {
             Tool::HLine => "hline", Tool::Trend => "trend", Tool::Ray => "ray", Tool::Fib => "fib", Tool::Rect => "rect",
-            Tool::Channel => "channel", Tool::Text => "text", Tool::Measure => "measure",
+            Tool::Channel => "channel", Tool::Text => "text", Tool::Measure => "measure", Tool::Position => "position",
         }
     }
     fn parse(s: &str) -> Option<Tool> { Tool::ALL.into_iter().find(|t| t.id() == s) }
@@ -130,7 +130,15 @@ impl Default for Ind { fn default() -> Self { Ind { rsi: 14, macd: [12, 26, 9], 
 /// A price line from the account: entry of a position or a resting order.
 /// Drawn dashed with a tag at the left edge ("tag | sub") and the price on the axis.
 #[derive(Clone)]
-pub struct ChartLine { pub price: f64, pub tag: String, pub sub: String, pub col: Color32 }
+pub struct ChartLine { pub price: f64, pub tag: String, pub sub: String, pub col: Color32, pub act: Option<LineAct> }
+
+/// What dragging an account line changes: a resting limit order, or a TP / SL trigger (venue, id).
+#[derive(Clone, PartialEq, Debug)]
+pub enum LineAct { Order(Exchange, String), TpSl(Exchange, String) }
+
+/// Requests from the chart to the app: move an order / trigger, or put a price into the order panel.
+#[derive(Clone, Debug)]
+pub enum ChartAct { Move(LineAct, f64), Fill(f64) }
 
 /// One moving average line: period, color (0xRRGGBB), exponential instead of simple, shown.
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -247,6 +255,14 @@ impl Drawing {
         self.c = (mt, self.line_at(mt).unwrap_or(self.a.1) + off);
         self
     }
+    /// A drawing from its placed points: a channel's third point goes on its parallel line, a
+    /// position tool (entry, stop) gets a 2R target.
+    fn placed(tool: Tool, pts: &[(i64, f64)]) -> Self {
+        let mut d = Drawing::new(tool, pts[0], *pts.get(1).unwrap_or(&pts[0]));
+        if let Some(c) = pts.get(2) { d = d.with_c(*c); }
+        if tool == Tool::Position { d.c = (d.a.0, d.a.1 * 3.0 - d.b.1 * 2.0); }
+        d
+    }
     fn alertable(&self) -> bool { matches!(self.tool, Tool::HLine | Tool::Trend | Tool::Ray) }
     /// the line's price at time t, for alerts: a trend line only within its two points, a ray from its start on
     fn level_at(&self, t: i64) -> Option<f64> {
@@ -340,13 +356,28 @@ pub struct Chart {
     #[serde(skip)] toast: Option<(String, std::time::Instant)>,
     /// one cell of a multi-chart layout: the legend names the interval
     #[serde(skip)] pub multi: bool,
+    /// account line under the pointer last frame, the one being dragged, and a move awaiting
+    /// confirmation (what, label, from, to, where)
+    #[serde(skip)] line_hot: Option<usize>,
+    #[serde(skip)] line_drag: Option<usize>,
+    #[serde(skip)] pending_move: Option<(LineAct, String, f64, f64, Pos2)>,
+    /// requests for the app, drained each frame
+    #[serde(skip)] pub actions: Vec<ChartAct>,
+    /// set by the app: confirm before moving orders; keys present (order tools shown); account equity
+    /// (USD) for the position tool's size; whether the trading venue amends in place
+    #[serde(skip)] pub confirm: bool,
+    #[serde(skip)] pub trading: bool,
+    #[serde(skip)] pub equity: Option<f64>,
+    #[serde(skip)] pub amends: bool,
+    /// position tool: share of equity risked between entry and stop (percent)
+    risk_pct: f64,
 }
 
 impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
             panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false)],
         }
     }
@@ -719,8 +750,13 @@ impl Chart {
         // a drag that starts on the price axis scales prices instead of panning time
         let on_axis = resp.interact_pointer_pos().is_some_and(|p| p.x > main.right() && p.y < main.bottom());
         // a drag that starts on a drawing (hit-tested last frame) moves it instead of the chart
-        if resp.drag_started() { self.drag = if on_axis { None } else { self.hot.filter(|h| h.1 != LOCKED) }; self.fling = 0.0; }
-        let editing = self.drag.is_some();
+        if resp.drag_started() {
+            // an account line (hit-tested last frame) wins over drawings
+            self.line_drag = if on_axis || self.tool.is_some() { None } else { self.line_hot };
+            self.drag = if on_axis || self.line_drag.is_some() { None } else { self.hot.filter(|h| h.1 != LOCKED) };
+            self.fling = 0.0;
+        }
+        let editing = self.drag.is_some() || self.line_drag.is_some();
         let dt = ui.input(|i| i.stable_dt).clamp(0.001, 0.05);
         if resp.dragged() && !on_axis && !editing { self.right += resp.drag_delta().x / self.bar_w; }
         if resp.drag_stopped() {
@@ -1106,9 +1142,12 @@ impl Chart {
         }
 
         // account lines: positions and resting orders of this symbol
-        for l in self.lines.iter().filter(|_| live) {
+        let mut line_hot = None;
+        let hover_p = resp.hover_pos().filter(|p| main_plot.contains(*p));
+        for (li, l) in self.lines.iter().enumerate().filter(|_| live) {
             if !(l.price > lo && l.price < hi) { continue; }
             let ly = y(l.price);
+            if let (Some(_), Some(p), None) = (&l.act, hover_p, self.tool) { if (p.y - ly).abs() < 5.0 { line_hot = Some(li); } }
             dashed(&painter, main.left(), main.right(), ly, l.col.linear_multiply(0.8));
             let g1 = painter.layout_no_wrap(l.tag.clone(), prop(11.0), Color32::WHITE);
             let g2 = painter.layout_no_wrap(l.sub.clone(), mono(11.0), l.col);
@@ -1125,6 +1164,53 @@ impl Chart {
             painter.rect_filled(ax, 3, label_bg());
             painter.rect_stroke(ax, 3, Stroke::new(1.0, l.col), egui::StrokeKind::Inside);
             painter.text(ax.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(l.price), mono(11.0), l.col);
+            if l.act.is_some() && hover_p.is_some_and(|p| both.contains(p)) { line_hot = Some(li); }
+        }
+        // dragging an order / TP / SL line: a ghost follows the pointer; release moves it (after a
+        // confirmation when order confirmations are on)
+        let ghost = |px: f64, col: Color32| {
+            let gy = y(px);
+            painter.extend(egui::Shape::dashed_line(&[pos2(main.left(), gy), pos2(main.right(), gy)], Stroke::new(1.5, col), 6.0, 3.0));
+            let ax = Rect::from_min_size(pos2(main.right() + 2.0, gy - 9.0), vec2(AXIS_W - 4.0, 18.0));
+            painter.rect_filled(ax, 3, col);
+            painter.text(ax.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(px), mono(11.0), Color32::WHITE);
+        };
+        if let Some(li) = self.line_drag {
+            match (self.lines.get(li), resp.interact_pointer_pos()) {
+                (Some(l), Some(p)) if l.act.is_some() => {
+                    let np = ps.v(p.y.clamp(main_plot.top(), main_plot.bottom()));
+                    ghost(np, l.col);
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                    if resp.drag_stopped() {
+                        if (y(np) - y(l.price)).abs() > 2.0 {
+                            let act = l.act.clone().unwrap();
+                            if self.confirm { self.pending_move = Some((act, l.tag.clone(), l.price, np, p)); } else { self.actions.push(ChartAct::Move(act, np)); }
+                        }
+                        self.line_drag = None;
+                    }
+                }
+                _ => self.line_drag = None,
+            }
+        } else if line_hot.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            resp.clone().on_hover_text(t("tr.drag_line"));
+        }
+        self.line_hot = line_hot;
+        if let Some((act, tag, from, to, at)) = self.pending_move.clone() {
+            ghost(to, accent());
+            let (mut open, mut done) = (true, None);
+            egui::Popup::menu(&resp).id(ui.id().with("move_confirm")).at_position(at).open_bool(&mut open)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                ui.label(RichText::new(format!("{tag}:  {} → {}", fmt_px(from), fmt_px(to))).strong());
+                // only Bybit / Binance orders are amended in place; elsewhere the order is cancelled and placed again
+                if matches!(act, LineAct::Order(..)) && !self.amends { ui.label(RichText::new(t("tr.move_replace")).color(WARN).small()); }
+                ui.horizontal(|ui| {
+                    if ui.button(t("tr.move")).clicked() { done = Some(true); ui.close(); }
+                    if ui.button(t("tr.cancel_action")).clicked() { done = Some(false); ui.close(); }
+                });
+            });
+            if done == Some(true) { self.actions.push(ChartAct::Move(act, to)); }
+            if !open || done.is_some() { self.pending_move = None; }
         }
 
         // last price: dashed line; axis tag with the bar-close countdown; bid/ask box beside it
@@ -1234,6 +1320,14 @@ impl Chart {
                 let lab = Rect::from_min_size(pos2(main.right() + 1.0, py - 9.0), vec2(AXIS_W - 2.0, 18.0));
                 painter.rect_filled(lab, 2, cross_bg());
                 painter.text(lab.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, axis_label(ps.v(py)), mono(11.0), Color32::WHITE);
+                // TradingView's "+": puts the crosshair price into the order panel
+                if self.trading && live && !editing {
+                    let pb = Rect::from_min_size(pos2(main.right() - 22.0, py - 9.0), vec2(20.0, 18.0));
+                    let pr = ui.interact(pb, ui.id().with("fill_px"), Sense::click());
+                    painter.rect_filled(pb, 3, if pr.hovered() { accent() } else { cross_bg() });
+                    painter.text(pb.center(), Align2::CENTER_CENTER, "+", prop(14.0), Color32::WHITE);
+                    if pr.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t("tr.fill_px")).clicked() { self.actions.push(ChartAct::Fill(ps.v(py))); }
+                }
             }
             // over a sub-pane: its own horizontal line and value on the axis
             for (_, r, sc) in &pane_scales {
@@ -1557,7 +1651,7 @@ impl Chart {
         if !typing { self.undo_redo(ui, base); }
 
         let ptr = resp.hover_pos().filter(|p| plot.contains(*p));
-        let (hidden, sound) = (self.hide, self.alert_sound.clone());
+        let (hidden, sound, equity, risk_pct) = (self.hide, self.alert_sound.clone(), self.equity, self.risk_pct);
         let list = self.drawings.entry(base.to_string()).or_default();
         // a channel's middle handle: halfway along its parallel line
         let mid_c = |d: &Drawing| ((d.a.0 + d.b.0) / 2, (d.a.1 + d.b.1) / 2.0 + d.offset());
@@ -1570,13 +1664,17 @@ impl Chart {
                 match part {
                     0 => d.a = mv(d.a),
                     1 => d.b = mv(d.b),
+                    3 if d.tool == Tool::Position => d.c.1 = mv((d.a.0, d.c.1)).1,
                     3 => { let m = mid_c(d); d.c = (m.0, mv(m).1); }
-                    _ => { d.a = mv(d.a); d.b = mv(d.b); if d.tool == Tool::Channel { d.c = mv(d.c); } }
+                    _ => { d.a = mv(d.a); d.b = mv(d.b); if matches!(d.tool, Tool::Channel | Tool::Position) { d.c = mv(d.c); } }
                 }
+                if d.tool == Tool::Position { d.c.0 = d.a.0; }
                 if matches!(d.tool, Tool::HLine | Tool::Text) { d.b = d.a; }
             }
         }
 
+        // a position tool's horizontal extent (at least 120 px wide)
+        let pos_x = |d: &Drawing| { let (x0, x1) = (to_screen(d.a).x, to_screen(d.b).x); (x0.min(x1), x0.max(x1).max(x0.min(x1) + 120.0)) };
         // screen segments of a drawing (for drawing and hit-testing)
         let segs = |d: &Drawing| -> Vec<(Pos2, Pos2)> {
             let (a, b) = (to_screen(d.a), to_screen(d.b));
@@ -1588,6 +1686,7 @@ impl Chart {
                 Tool::Fib => FIB.iter().map(|f| { let yy = y(d.b.1 + (d.a.1 - d.b.1) * f); (pos2(a.x.min(b.x), yy), pos2(a.x.max(b.x), yy)) }).collect(),
                 Tool::Channel => { let o = d.offset(); vec![(a, b), (to_screen((d.a.0, d.a.1 + o)), to_screen((d.b.0, d.b.1 + o)))] }
                 Tool::Text => vec![],
+                Tool::Position => { let (x0, x1) = pos_x(d); [d.a.1, d.b.1, d.c.1].iter().map(|p| (pos2(x0, y(*p)), pos2(x1, y(*p)))).collect() }
             }
         };
         let note = |d: &Drawing| painter.layout_no_wrap(if d.text.is_empty() { t("draw.text_hint").to_string() } else { d.text.clone() }, prop(13.0), d.color());
@@ -1596,6 +1695,7 @@ impl Chart {
             match d.tool {
                 Tool::HLine | Tool::Text => vec![],
                 Tool::Channel => vec![(0, to_screen(d.a)), (1, to_screen(d.b)), (3, to_screen(mid_c(d)))],
+                Tool::Position => { let x1 = pos_x(d).1; vec![(0, to_screen(d.a)), (1, pos2(x1, y(d.b.1))), (3, pos2(to_screen(d.a).x, y(d.c.1)))] }
                 _ => vec![(0, to_screen(d.a)), (1, to_screen(d.b))],
             }
         };
@@ -1610,6 +1710,7 @@ impl Chart {
                 let inside = match d.tool {
                     Tool::Rect | Tool::Measure => Rect::from_two_pos(to_screen(d.a), to_screen(d.b)).contains(p),
                     Tool::Text => note_rect(d, &note(d)).contains(p),
+                    Tool::Position => { let (x0, x1) = pos_x(d); Rect::from_x_y_ranges(x0..=x1, y(d.b.1).min(y(d.c.1))..=y(d.b.1).max(y(d.c.1))).contains(p) }
                     _ => false,
                 };
                 (dist < 6.0 || inside).then_some((i, if inside { 5.9 } else { dist }))
@@ -1622,9 +1723,7 @@ impl Chart {
             self.pending.push(to_point(p));
             if self.pending.len() >= tool.points() {
                 let pts = std::mem::take(&mut self.pending);
-                let mut d = Drawing::new(tool, pts[0], *pts.get(1).unwrap_or(&pts[0]));
-                if let Some(c) = pts.get(2) { d = d.with_c(*c); }
-                list.push(d);
+                list.push(Drawing::placed(tool, &pts));
                 self.tool = None;
                 // a note is typed right away
                 if tool == Tool::Text { self.menu = Some((Menu::Drawing(list.len() - 1, true), p)); }
@@ -1679,6 +1778,11 @@ impl Chart {
                             let mut on = d.alert.is_some();
                             if ui.checkbox(&mut on, t("alert.on")).on_hover_text(t("alert.tip")).changed() { d.alert = on.then(|| sound.clone()); }
                             if let Some(s) = &mut d.alert { sound_menu(ui, s); }
+                        }
+                        if d.tool == Tool::Position {
+                            ui.separator();
+                            ui.horizontal(|ui| { ui.label(t("pos.risk")); ui.add(egui::DragValue::new(&mut self.risk_pct).range(0.05..=100.0).speed(0.05).suffix("%")); });
+                            if self.trading && ui.button(t("pos.use")).clicked() { self.actions.push(ChartAct::Fill(d.a.1)); ui.close(); }
                         }
                         ui.separator();
                         ui.checkbox(&mut d.locked, t("draw.lock"));
@@ -1760,6 +1864,32 @@ impl Chart {
                     clip.rect_filled(lr, 4, mc.linear_multiply(0.9));
                     clip.galley(lr.min + vec2(6.0, 4.0), g, Color32::WHITE);
                 }
+                Tool::Position => {
+                    // TradingView's long / short position: reward box to the target, risk box to the
+                    // stop, and the size that risks `risk_pct` of equity between entry and stop
+                    let (x0, x1) = pos_x(d);
+                    let (ye, ys, yt) = (y(d.a.1), y(d.b.1), y(d.c.1));
+                    clip.rect_filled(Rect::from_x_y_ranges(x0..=x1, ye.min(yt)..=ye.max(yt)), 0, up().linear_multiply(0.16 * alpha));
+                    clip.rect_filled(Rect::from_x_y_ranges(x0..=x1, ye.min(ys)..=ye.max(ys)), 0, dn().linear_multiply(0.16 * alpha));
+                    for (yy, c) in [(ye, fg()), (ys, dn()), (yt, up())] { clip.hline(x0..=x1, yy, Stroke::new(1.2, c.linear_multiply(alpha))); }
+                    let pct = |p: f64| if d.a.1 != 0.0 { (p / d.a.1 - 1.0) * 100.0 } else { 0.0 };
+                    let risk = (d.a.1 - d.b.1).abs();
+                    let rr = if risk > 0.0 { (d.c.1 - d.a.1).abs() / risk } else { 0.0 };
+                    let long = d.c.1 > d.a.1;
+                    let size = match (equity, risk > 0.0) {
+                        (Some(eq), true) => { let usd = eq * risk_pct / 100.0; format!("{} {base} · {risk_pct}% = ${}", fmt_qty_chart(usd / risk), fmt_usd_short(usd)) }
+                        _ => format!("{risk_pct}%"),
+                    };
+                    let tag = |yy: f64, txt: String, c: Color32, below: bool| {
+                        let g = painter.layout_no_wrap(txt, mono(10.5), Color32::WHITE);
+                        let r = Rect::from_min_size(pos2(x0 + 4.0, if below { yy as f32 + 3.0 } else { yy as f32 - g.size().y - 7.0 }), g.size() + vec2(8.0, 4.0));
+                        clip.rect_filled(r, 3, c.linear_multiply(0.9 * alpha));
+                        clip.galley(r.min + vec2(4.0, 2.0), g, Color32::WHITE);
+                    };
+                    tag(yt as f64, format!("{} {} ({:+.2}%)  R:R {rr:.2}", t("pos.target"), fmt_px(d.c.1), pct(d.c.1)), up(), !long);
+                    tag(ys as f64, format!("{} {} ({:+.2}%)", t("pos.stop"), fmt_px(d.b.1), pct(d.b.1)), dn(), long);
+                    tag(ye as f64, format!("{} {} {} · {size}", if long { t("pos.long") } else { t("pos.short") }, fmt_px(d.a.1), t("pos.qty")), label_bg(), !long);
+                }
                 Tool::Text => {
                     let g = note(d);
                     let r = note_rect(d, &g);
@@ -1789,12 +1919,10 @@ impl Chart {
         // preview of a drawing in progress
         if let (Some(tool), Some(p)) = (self.tool, ptr) {
             let pt = to_point(p);
-            let pv = match self.pending.as_slice() {
-                [] if tool.points() == 1 => Some(Drawing::new(tool, pt, pt)),
-                [a] => Some(Drawing::new(tool, *a, pt).with_c(pt)),
-                [a, b, ..] => Some(Drawing::new(tool, *a, *b).with_c(pt)),
-                _ => None,
-            };
+            let mut pts = self.pending.clone();
+            pts.push(pt);
+            if tool == Tool::Channel && pts.len() == 2 { pts.push(pt); }
+            let pv = (pts.len() >= tool.points().min(2)).then(|| Drawing::placed(tool, &pts));
             if let Some(d) = pv { draw(&d, false, 0.6); }
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
@@ -1986,7 +2114,7 @@ impl Chart {
                 if market == Market::Perp { ui.checkbox(&mut self.liqmap, t("chart.liqmap")).on_hover_text(t("chart.liqmap_tip")); }
             });
             ui.separator();
-            for (tool, key) in [(Tool::HLine, "draw.hline"), (Tool::Trend, "draw.trend"), (Tool::Ray, "draw.ray"), (Tool::Channel, "draw.channel"), (Tool::Fib, "draw.fib"), (Tool::Rect, "draw.rect"), (Tool::Text, "draw.text"), (Tool::Measure, "draw.measure")] {
+            for (tool, key) in [(Tool::HLine, "draw.hline"), (Tool::Trend, "draw.trend"), (Tool::Ray, "draw.ray"), (Tool::Channel, "draw.channel"), (Tool::Fib, "draw.fib"), (Tool::Rect, "draw.rect"), (Tool::Text, "draw.text"), (Tool::Measure, "draw.measure"), (Tool::Position, "draw.position")] {
                 if tool_button(ui, Some(tool), self.tool == Some(tool)).on_hover_text(t(key)).clicked() {
                     self.tool = if self.tool == Some(tool) { None } else { Some(tool) };
                     self.pending.clear();
@@ -2041,6 +2169,10 @@ fn tool_button(ui: &mut Ui, tool: Option<Tool>, on: bool) -> egui::Response {
             p.line_segment([c + vec2(-6.0, 7.0), c + vec2(8.0, -2.0)], s);
         }
         Some(Tool::Text) => { p.text(c, Align2::CENTER_CENTER, "T", prop(14.0), col); }
+        Some(Tool::Position) => {
+            p.rect_filled(Rect::from_min_max(c + vec2(-8.0, -7.0), c + vec2(8.0, 0.0)), 1, up().linear_multiply(0.7));
+            p.rect_filled(Rect::from_min_max(c + vec2(-8.0, 0.0), c + vec2(8.0, 5.0)), 1, dn().linear_multiply(0.7));
+        }
         Some(Tool::Measure) => {
             p.vline(c.x, egui::Rangef::new(c.y - 7.0, c.y + 7.0), s);
             p.line_segment([c + vec2(0.0, -7.0), c + vec2(-3.0, -4.0)], s);
@@ -2103,6 +2235,9 @@ fn sound_menu(ui: &mut Ui, cur: &mut String) {
         }
     });
 }
+
+/// Order size with the decimals a size of that magnitude needs.
+fn fmt_qty_chart(q: f64) -> String { let d = if q > 0.0 { (3.0 - q.log10().floor()).clamp(0.0, 6.0) as usize } else { 2 }; fmt_dp(q, d) }
 
 /// "3d 4h", "2h 15m", "45m" for a duration in ms.
 fn span(ms: i64) -> String {

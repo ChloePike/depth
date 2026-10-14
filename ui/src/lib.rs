@@ -448,6 +448,31 @@ impl App {
         self.chart.check_alerts(&px);
     }
 
+    /// Orders and triggers dragged on a chart, and prices put into the order panel from it.
+    fn chart_actions(&mut self, ctx: &egui::Context) {
+        let mut acts = std::mem::take(&mut self.chart.actions);
+        for o in self.others.iter_mut() { acts.append(&mut o.1.actions); }
+        for act in acts {
+            match act {
+                chart::ChartAct::Fill(px) => self.trade.fill = Some((self.trade.ex, px)),
+                chart::ChartAct::Move(chart::LineAct::Order(ex, id), px) => {
+                    let o = self.eng.account.lock().unwrap().orders.iter().find(|o| o.ex == ex && o.id == id).cloned();
+                    if let Some(o) = o { self.eng.replace_order(&o, px, ctx); }
+                }
+                chart::ChartAct::Move(chart::LineAct::TpSl(ex, id), px) => {
+                    let mut acc = self.eng.account.lock().unwrap();
+                    let Some(tp) = acc.tpsl.iter().find(|x| x.ex == ex && x.id == id).cloned() else { continue };
+                    // a TP / SL dragged past the price would fire at once: refuse it here, as the order panel does
+                    let mark = acc.positions.iter().find(|p| p.ex == ex && p.symbol == tp.symbol && p.side == tp.pos).map_or(0.0, |p| p.mark);
+                    match depth::trade::tpsl::validate(tp.pos, mark, tp.take_profit, px) {
+                        Err(e) => acc.note(format!("FAIL move {ex:?} {} {}: {e:#}", tp.symbol, if tp.take_profit { "TP" } else { "SL" }), false),
+                        Ok(()) => { drop(acc); self.eng.move_tpsl(&tp, px, ctx); }
+                    }
+                }
+            }
+        }
+    }
+
     /// Charts for every cell of the layout: new cells copy the active chart with another interval.
     fn fill_cells(&mut self, n: usize) {
         if self.cell >= n {
@@ -484,6 +509,7 @@ impl App {
                 let c = &mut o.1;
                 c.multi = true;
                 c.lines = self.chart.lines.clone();
+                (c.confirm, c.trading, c.equity, c.amends) = (self.chart.confirm, self.chart.trading, self.chart.equity, self.chart.amends);
                 c.adopt_drawings(&self.chart);
                 c.show(&mut child, a, self.mode, &base);
                 self.chart.adopt_drawings(c);
@@ -560,29 +586,37 @@ impl App {
                 let mut lines: Vec<chart::ChartLine> = acc.positions.iter().filter(|p| p.symbol == sym).map(|p| chart::ChartLine {
                     price: p.entry, col: if p.side == depth::Side::Buy { up() } else { dn() },
                     tag: format!("{:?} {} {}", p.ex, if p.side == depth::Side::Buy { t("tr.long_s") } else { t("tr.short_s") }, fmt_qty(p.qty)),
-                    sub: format!("{:+.2}", p.upnl),
+                    sub: format!("{:+.2}", p.upnl), act: None,
                 }).collect();
                 lines.extend(acc.orders.iter().filter(|o| o.symbol == sym && o.price > 0.0).map(|o| chart::ChartLine {
                     price: o.price, col: if o.side == depth::Side::Buy { up() } else { dn() }.linear_multiply(0.75),
                     tag: format!("{:?} {}", o.ex, o.kind), sub: format!("{} {}", if o.side == depth::Side::Buy { t("tr.buy") } else { t("tr.sell") }, fmt_qty(o.qty - o.filled)),
+                    // only plain limit orders are dragged: a stop or post-only order would come back as something else
+                    act: o.kind.eq_ignore_ascii_case("limit").then(|| chart::LineAct::Order(o.ex, o.id.clone())),
                 }));
                 // liquidation price of each position (none on Binance Portfolio Margin: account-level uniMMR)
                 lines.extend(acc.positions.iter().filter(|p| p.symbol == sym).filter_map(|p| p.liq.filter(|l| *l > 0.0).map(|l| chart::ChartLine {
                     price: l, col: theme::WARN,
-                    tag: format!("{:?} Liq.", p.ex), sub: format!("{} {}", if p.side == depth::Side::Buy { t("tr.long_s") } else { t("tr.short_s") }, fmt_qty(p.qty)),
+                    tag: format!("{:?} Liq.", p.ex), sub: format!("{} {}", if p.side == depth::Side::Buy { t("tr.long_s") } else { t("tr.short_s") }, fmt_qty(p.qty)), act: None,
                 })));
                 // take-profit / stop-loss triggers
                 lines.extend(acc.tpsl.iter().filter(|x| x.symbol == sym).map(|x| chart::ChartLine {
                     price: x.trigger_px, col: if x.take_profit { up() } else { dn() }.linear_multiply(0.8),
                     tag: format!("{:?} {}", x.ex, if x.take_profit { "TP" } else { "SL" }),
                     sub: x.qty.map(fmt_qty).unwrap_or_else(|| t("tr.whole").to_string()),
+                    act: Some(chart::LineAct::TpSl(x.ex, x.id.clone())),
                 }));
                 self.chart.lines = lines;
+                self.chart.confirm = self.prefs.confirm;
+                self.chart.trading = !acc.keys.is_empty();
+                self.chart.equity = acc.balances.get(&self.trade.ex).map(|b| b.equity).filter(|e| *e > 0.0);
+                self.chart.amends = depth::trade::can_amend(self.trade.ex);
             }
             self.alerts_tick(&a);
             egui::CentralPanel::default().frame(card(10)).show(ui, |ui| {
                 if self.mode == Market::Option { self.opt.show(ui, &a) } else { self.charts(ui, &a) }
             });
+            self.chart_actions(&ctx);
         }
         if let Some(b) = self.pending_base.take() { new_base = Some(b); }
         if let Some(m) = self.pending_mode.take() { new_mode = Some(m); }
