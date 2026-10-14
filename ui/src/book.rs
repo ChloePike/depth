@@ -1,11 +1,16 @@
 //! Order book (cross-venue USD or one venue) and the trade tape.
-use super::{fmt_dp, fmt_px, fmt_qty, l, step_dp, t, theme::*};
-use eframe::egui::{self, pos2, vec2, Align2, Rect, RichText, Sense, Ui};
-use std::collections::HashSet;
+use super::{fmt_dp, fmt_px, fmt_qty, kit, l, step_dp, t, theme::*};
+use eframe::egui::{self, pos2, vec2, Align2, Rect, Sense, Stroke, Ui};
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 use depth::agg::{Agg, Level};
 use depth::{Exchange, Market, Side};
 
-const ROW: f32 = 18.0;
+/// level / print row height, header row, mid row (with its 4 px margins), ratio block
+const ROW: f32 = 21.0;
+const HEAD: f32 = 18.0;
+const MID_H: f32 = 38.0;
+const RATIO_H: f32 = 36.0;
 /// height of the native header laid over the book column (points)
 pub const NATIVE_HEADER: f32 = 62.0;
 
@@ -19,18 +24,23 @@ pub struct BookView { trades: bool,
     min_usd: usize,
     /// levels last computed: (when, what they were computed for, bids, asks). The rows repaint every
     /// frame from this; the cross-venue aggregation runs at most every REFRESH.
-    cache: Option<(std::time::Instant, (Option<Exchange>, Market, usize, u64), Vec<Level>, Vec<Level>)>,
-    /// rows whose size changed at the last refreshes: (ask side, price bin) -> (when, grew)
-    flash: std::collections::HashMap<(bool, i64), (std::time::Instant, bool)> }
+    cache: Option<(Instant, (Option<Exchange>, Market, usize, u64), Vec<Level>, Vec<Level>)>,
+    /// levels a taker trade printed into: (ask side, price bin) -> when lit
+    flash: HashMap<(bool, i64), Instant>,
+    /// newest trade time already checked for hits, per venue
+    seen: HashMap<Exchange, i64>,
+    /// last mid and whether its last move was up (mid row color)
+    last_mid: (f64, bool) }
 
-/// How long a changed size stays lit, fading out.
-const FLASH: std::time::Duration = std::time::Duration::from_millis(600);
+/// How long an eaten level stays lit, fading out; at most one flash per level per FLASH_GAP.
+const FLASH: Duration = Duration::from_millis(400);
+const FLASH_GAP: Duration = Duration::from_millis(300);
 
 /// How often the book's levels are recomputed: fast enough to feel live, slow enough to read
 /// (and the aggregation across ten venues is not free).
-const REFRESH: std::time::Duration = std::time::Duration::from_millis(100);
+const REFRESH: Duration = Duration::from_millis(100);
 
-impl Default for BookView { fn default() -> Self { BookView { trades: false, page: 0, src: None, group: 1, clicked: None, quote: false, min_usd: 0, cache: None, flash: Default::default() } } }
+impl Default for BookView { fn default() -> Self { BookView { trades: false, page: 0, src: None, group: 1, clicked: None, quote: false, min_usd: 0, cache: None, flash: Default::default(), seen: Default::default(), last_mid: (0.0, true) } } }
 
 /// Quote amounts: 12.3K / 4.56M style, whole units below a thousand.
 fn fmt_big_book(v: f64) -> String {
@@ -129,7 +139,7 @@ impl BookView {
         if self.trades {
             let r = ui.available_rect_before_wrap();
             ui.allocate_rect(r, Sense::hover());
-            return self.tape(ui, r, a, market, scope);
+            return self.tape(ui, r, a, market, scope, false);
         }
 
         let Some(mid) = mid else {
@@ -138,16 +148,18 @@ impl BookView {
         };
         let base_bin = depth::agg::nice(mid * 1e-5);
         let bin = base_bin * GROUPS[self.group];
+        // last move of the mid colors the mid row
+        if (mid - self.last_mid.0).abs() > bin * 1e-6 { self.last_mid = (mid, mid >= self.last_mid.0); }
 
         let full = ui.available_rect_before_wrap();
         ui.allocate_rect(full, Sense::hover());
         // depth on top, the (filterable) tape under it: both at a glance, as on a venue's own page
         let split = (full.top() + full.height() * 0.62).round();
         let rect = Rect::from_min_max(full.min, pos2(full.right(), split));
-        self.tape(ui, Rect::from_min_max(pos2(full.left(), split + 4.0), full.max), a, market, scope);
-        let painter = ui.painter_at(rect);
+        self.tape(ui, Rect::from_min_max(pos2(full.left(), split), full.max), a, market, scope, true);
+        let painter = ui.painter_at(rect.expand2(vec2(2.0, 0.0)));
         // rows stretch to fill the column: header, mid line and ratio bar are fixed, the rest is levels
-        let fixed = ROW * 2.5 + 22.0;
+        let fixed = HEAD + MID_H + RATIO_H;
         let n = (((rect.height() - fixed) / 2.0 / ROW).floor() as usize).max(3);
         let rh = ((rect.height() - fixed) / (2 * n) as f32).max(ROW * 0.8);
         let key = (self.src, market, n, bin.to_bits());
@@ -163,37 +175,29 @@ impl BookView {
                     None => (vec![], vec![]),
                 },
             };
-            // a level whose size moved lights up (green grew, red shrank) and fades out
-            let now = std::time::Instant::now();
-            if let Some((_, old_key, ob, ok)) = &self.cache {
-                if *old_key == key {
-                    for (ask, old, new) in [(false, ob, &b), (true, ok, &k)] {
-                        let prev: std::collections::HashMap<i64, f64> = old.iter().map(|l| ((l.px / bin).round() as i64, l.qty)).collect();
-                        for l in new.iter() {
-                            let id = (l.px / bin).round() as i64;
-                            if let Some(q) = prev.get(&id).filter(|q| (**q - l.qty).abs() > 1e-9 * l.qty.max(1e-12)) {
-                                self.flash.insert((ask, id), (now, l.qty > *q));
-                            }
-                        }
-                    }
-                }
-            }
-            self.flash.retain(|_, (t, _)| now.duration_since(*t) < FLASH);
+            let now = Instant::now();
+            // other source / market / grouping: the lit bins mean something else now
+            if self.cache.as_ref().is_some_and(|(_, k, _, _)| (k.0, k.1, k.3) != (key.0, key.1, key.3)) { self.flash.clear(); }
+            self.hits(a, market, scope, mid, bin, now);
             self.cache = Some((now, key, b, k));
         }
         let (bids, asks) = self.cache.as_ref().map(|(_, _, b, k)| (b.clone(), k.clone())).unwrap_or_default();
         // repaint when the next refresh is due, even if nothing else asks for a frame
         ui.ctx().request_repaint_after(REFRESH);
 
-        // header
-        let cols = [rect.left() + 6.0, rect.left() + rect.width() * 0.52, rect.right() - 36.0];
-        let hy = rect.top() + ROW / 2.0;
-        painter.text(pos2(cols[0], hy), Align2::LEFT_CENTER, t("book.price"), prop(11.0), dim());
-        painter.text(pos2(cols[1], hy), Align2::RIGHT_CENTER, t("book.size"), prop(11.0), dim());
-        painter.text(pos2(cols[2], hy), Align2::RIGHT_CENTER, t("book.total"), prop(11.0), dim());
+        // columns as the design: price left, size and total right-aligned (76 / 70 wide); the
+        // aggregate adds a narrow per-venue split on the far right
+        let split_w = if self.src.is_none() { 24.0 } else { 0.0 };
+        let x_px = rect.left() + 2.0;
+        let x_tot = rect.right() - 2.0 - split_w;
+        let x_size = x_tot - 70.0;
+        let hy = rect.top() + HEAD / 2.0 - 1.0;
+        overline_at(&painter, pos2(x_px, hy), Align2::LEFT_CENTER, t("book.price"));
+        overline_at(&painter, pos2(x_size, hy), Align2::RIGHT_CENTER, t("book.size"));
+        overline_at(&painter, pos2(x_tot, hy), Align2::RIGHT_CENTER, t("book.total"));
         if bids.is_empty() && asks.is_empty() {
             // a mid without levels: depth streams are down (the status bar shows which venues)
-            painter.text(rect.center(), Align2::CENTER_CENTER, t("book.waiting"), prop(11.5), mu());
+            painter.text(rect.center(), Align2::CENTER_CENTER, t("book.waiting"), prop(12.0), mu());
         }
 
         let quote = self.quote;
@@ -205,161 +209,206 @@ impl BookView {
         let lmax = bids.iter().chain(&asks).map(size).fold(0.0, f64::max);
         let (fs, ft) = (col_fmt(lmax, quote), col_fmt(max, quote));
         let dp = step_dp(bin);
-        let bar_r = rect.right() - 32.0;
+        let (bar_l, bar_r) = (rect.left() - 2.0, x_tot + 2.0);
         let flash = &self.flash;
         let row = |y: f32, l: &Level, c: f64, is_ask: bool| {
-            let r = Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), rh));
+            let r = Rect::from_min_size(pos2(rect.left() - 2.0, y), vec2(rect.width() + 4.0, rh));
             let col = if is_ask { dn() } else { up() };
-            // cumulative depth behind the row, and this level's own size stronger on top of it
-            let w = (c / max) as f32 * (bar_r - rect.left());
-            painter.rect_filled(Rect::from_min_max(pos2(bar_r - w, r.top() + 1.0), pos2(bar_r, r.bottom() - 1.0)), 0, col.linear_multiply(0.10));
-            let w1 = (size(l) / lmax.max(1e-12)) as f32 * (bar_r - rect.left()) * 0.5;
-            painter.rect_filled(Rect::from_min_max(pos2(bar_r - w1, r.top() + 1.0), pos2(bar_r, r.bottom() - 1.0)), 0, col.linear_multiply(0.16));
-            let cy = r.center().y;
-            if let Some((t, grew)) = flash.get(&(is_ask, (l.px / bin).round() as i64)) {
+            // cumulative depth: a soft side-tinted fill growing from the right
+            let w = ((c / max) as f32 * (bar_r - bar_l)).max(2.0);
+            painter.rect_filled(Rect::from_min_max(pos2(bar_r - w, r.top() + 2.0), pos2(bar_r, r.bottom() - 2.0)), 3, col.gamma_multiply(0.12));
+            // eaten level: the whole row lights up in its side color and fades out
+            if let Some(t) = flash.get(&(is_ask, (l.px / bin).round() as i64)) {
                 let f = 1.0 - (t.elapsed().as_secs_f32() / FLASH.as_secs_f32()).min(1.0);
-                if f > 0.0 {
-                    let cell = Rect::from_min_max(pos2(cols[1] - 70.0, r.top() + 1.0), pos2(cols[1] + 4.0, r.bottom() - 1.0));
-                    painter.rect_filled(cell, 2, if *grew { up() } else { dn() }.linear_multiply(0.35 * f));
+                if f > 0.0 { painter.rect_filled(r.shrink2(vec2(0.0, 1.0)), 3, col.gamma_multiply(0.22 * f)); }
+            }
+            let cy = r.center().y;
+            painter.text(pos2(x_px, cy), Align2::LEFT_CENTER, fmt_dp(l.px, dp), mono_m(12.0), col);
+            painter.text(pos2(x_size, cy), Align2::RIGHT_CENTER, fs(size(l)), mono(12.0), fg());
+            painter.text(pos2(x_tot, cy), Align2::RIGHT_CENTER, ft(c), mono(12.0), mu());
+            if split_w > 0.0 {
+                // per-venue split of this level, venue colors, rounded ends
+                let (mut x, total, bw) = (x_tot + 6.0, l.qty.max(1e-12), split_w - 6.0);
+                let back = Rect::from_min_size(pos2(x, cy - 2.0), vec2(bw, 4.0));
+                for (e, q) in &l.by {
+                    let ww = (q / total) as f32 * bw;
+                    painter.with_clip_rect(back).rect_filled(Rect::from_min_size(pos2(x, cy - 2.0), vec2(ww, 4.0)), 0, ex_color(*e));
+                    x += ww;
                 }
             }
-            painter.text(pos2(cols[0], cy), Align2::LEFT_CENTER, fmt_dp(l.px, dp), mono(11.5), col);
-            painter.text(pos2(cols[1], cy), Align2::RIGHT_CENTER, fs(size(l)), mono(11.5), fg());
-            painter.text(pos2(cols[2], cy), Align2::RIGHT_CENTER, ft(c), mono(11.0), mu());
-            // per-venue split
-            let (mut x, total) = (bar_r + 4.0, l.qty.max(1e-12));
-            for (e, q) in &l.by {
-                let ww = (q / total) as f32 * 26.0;
-                painter.rect_filled(Rect::from_min_size(pos2(x, cy - 2.5), vec2(ww, 5.0)), 0, ex_color(*e));
-                x += ww;
-            }
         };
-        let top = rect.top() + ROW;
+        let top = rect.top() + HEAD;
         let mut rows_at: Vec<(Rect, f64)> = vec![];
         for (i, l) in asks.iter().enumerate() {
             let y = top + (n - 1 - i) as f32 * rh;
             row(y, l, ca[i], true);
-            rows_at.push((Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), rh)), l.px));
+            rows_at.push((Rect::from_min_size(pos2(rect.left() - 2.0, y), vec2(rect.width() + 4.0, rh)), l.px));
         }
+        // mid row: 17 semibold price in the direction of its last move, spread caption right
         let my = top + n as f32 * rh;
         let (bb, ba) = (bids.first().map(|l| l.px), asks.first().map(|l| l.px));
-        painter.rect_filled(Rect::from_min_size(pos2(rect.left(), my), vec2(rect.width(), ROW * 1.5)), 4, panel2());
-        painter.text(pos2(cols[0], my + ROW * 0.75), Align2::LEFT_CENTER, fmt_px(mid), display(16.0), fg());
+        let mr = Rect::from_min_size(pos2(rect.left(), my + 4.0), vec2(rect.width(), MID_H - 8.0));
+        painter.rect_filled(mr, 5, panel2());
+        let g = painter.layout_no_wrap(fmt_px(mid), mono_s(17.0), if self.last_mid.1 { up() } else { dn() });
+        let gy = mr.center().y - g.size().y / 2.0;
+        let base_y = gy + g.size().y * 0.78;
+        painter.galley(pos2(mr.left() + 8.0, gy), g, fg());
         if let (Some(b), Some(k)) = (bb, ba) {
-            painter.text(pos2(rect.right() - 6.0, my + ROW * 0.75), Align2::RIGHT_CENTER,
-                format!("{} {:.1}bp", t("book.spread"), (k / b - 1.0) * 1e4), mono(11.0), mu());
+            // baseline-aligned with the price
+            let s = painter.layout_no_wrap(format!("{} {:.1}bp", t("book.spread"), (k / b - 1.0) * 1e4), mono(11.5), mu());
+            painter.galley(pos2(mr.right() - 8.0 - s.size().x, base_y - s.size().y * 0.78), s, mu());
         }
         for (i, l) in bids.iter().enumerate() {
-            let y = my + ROW * 1.5 + i as f32 * rh;
+            let y = my + MID_H + i as f32 * rh;
             row(y, l, cb[i], false);
-            rows_at.push((Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), rh)), l.px));
+            rows_at.push((Rect::from_min_size(pos2(rect.left() - 2.0, y), vec2(rect.width() + 4.0, rh)), l.px));
         }
         // click-to-fill only on a single venue's raw book (aligned aggregate prices are not executable)
         if let Some(e) = self.src {
             for (i, (r, px)) in rows_at.iter().enumerate() {
-                let resp = ui.interact(*r, ui.id().with(("bkrow", i)), Sense::click());
-                if resp.hovered() { painter.rect_stroke(*r, 0, egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside); }
+                let resp = ui.interact(*r, ui.id().with(("bkrow", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                if resp.hovered() { painter.rect_filled(*r, 3, hl().gamma_multiply(0.6)); }
                 if resp.clicked() { self.clicked = Some((e, *px)); }
             }
         }
 
-        // buy/sell ratio of the shown depth
+        // buy/sell ratio of the shown depth: captions over a 4 px bar split by a 2 px gap
         let (sb, sa) = (cb.last().copied().unwrap_or(0.0), ca.last().copied().unwrap_or(0.0));
         if sb + sa > 0.0 {
-            let y = my + ROW * 1.5 + n as f32 * rh + 4.0;
-            let w = rect.width() - 12.0;
-            let wb = (sb / (sb + sa)) as f32 * w;
-            painter.rect_filled(Rect::from_min_size(pos2(rect.left() + 6.0, y + 12.0), vec2(wb, 3.0)), 1, up());
-            painter.rect_filled(Rect::from_min_size(pos2(rect.left() + 6.0 + wb, y + 12.0), vec2(w - wb, 3.0)), 1, dn());
-            painter.text(pos2(rect.left() + 6.0, y + 4.0), Align2::LEFT_CENTER, format!("B {:.1}%", sb / (sb + sa) * 100.0), mono(10.5), up());
-            painter.text(pos2(rect.right() - 6.0, y + 4.0), Align2::RIGHT_CENTER, format!("{:.1}% S", sa / (sb + sa) * 100.0), mono(10.5), dn());
+            let y = rect.bottom() - RATIO_H + 8.0;
+            let w = rect.width() - 4.0;
+            let fb = (sb / (sb + sa)) as f32;
+            painter.text(pos2(x_px, y + 6.0), Align2::LEFT_CENTER, format!("B {:.1}%", fb * 100.0), mono_s(11.0), up());
+            painter.text(pos2(rect.right() - 2.0, y + 6.0), Align2::RIGHT_CENTER, format!("{:.1}% S", (1.0 - fb) * 100.0), mono_s(11.0), dn());
+            let by = y + 17.0;
+            let wb = ((w - 2.0) * fb).clamp(0.0, w - 2.0);
+            if wb > 0.0 { painter.rect_filled(Rect::from_min_size(pos2(x_px, by), vec2(wb, 4.0)), 2, up()); }
+            if w - 2.0 - wb > 0.0 { painter.rect_filled(Rect::from_min_max(pos2(x_px + wb + 2.0, by), pos2(x_px + w, by + 4.0)), 2, dn()); }
         }
+    }
+
+    /// Light the levels taker trades printed into since the last refresh: a buy ate an ask, a sell
+    /// a bid. Trades map to row bins with the rows' own grouping (the aggregate shifts each venue
+    /// onto the composite mid, as `book_where` does). At most one flash per level per FLASH_GAP.
+    fn hits(&mut self, a: &Agg, market: Market, scope: &HashSet<Exchange>, mid: f64, bin: f64, now: Instant) {
+        let mut newest = self.seen.clone();
+        for x in a.trades.iter().filter(|x| x.market == market && scope.contains(&x.ex) && self.src.is_none_or(|e| e == x.ex)) {
+            let seen = newest.entry(x.ex).or_insert(i64::MIN);
+            *seen = (*seen).max(x.ts);
+            // a venue's first refresh only marks its backlog as seen
+            let Some(prev) = self.seen.get(&x.ex) else { continue };
+            if x.ts <= *prev { continue; }
+            let k = if self.src.is_some() { 1.0 } else {
+                match a.venues.get(&(x.ex, market)).and_then(|v| v.book_mid()) { Some(vm) => mid / vm, None => continue }
+            };
+            let ask = x.side == Side::Buy;
+            let p = x.px * k / bin;
+            let id = if ask { p.ceil() } else { p.floor() } as i64;
+            if self.flash.get(&(ask, id)).is_none_or(|t| now.duration_since(*t) >= FLASH_GAP) { self.flash.insert((ask, id), now); }
+        }
+        self.seen = newest;
+        self.flash.retain(|_, t| now.duration_since(*t) < FLASH);
     }
 
     /// Shown page: 0 book, 1 trades, 2 venues, 3 quant.
     pub fn pane(&self) -> u8 { if self.page > 1 { self.page } else { self.trades as u8 } }
 
-    /// Tab row: Book / Trades / Venues / Quant. True when a page other than book / trades is shown
-    /// (its content is drawn by the caller, without the agg lock).
+    /// Tab bar: Book / Trades / Venues / Quant as compact pills over a hairline that spans the
+    /// column. True when a page other than book / trades is shown (its content is drawn by the
+    /// caller, without the agg lock).
     pub fn tabs(&mut self, ui: &mut Ui) -> bool {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            for (i, name) in [l("Book"), l("Trades"), l("Venues"), l("Quant")].into_iter().enumerate() {
-                let i = i as u8;
-                if tab(ui, name, self.pane() == i, 12.5).clicked() && self.pane() != i {
-                    if i < 2 { self.trades = i == 1; self.page = 0; } else { self.page = i; }
-                    ui.ctx().request_repaint();
-                }
+        let sp = ui.spacing().item_spacing.y;
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
+        let mut x = row.left();
+        for (i, name) in [l("Book"), l("Trades"), l("Venues"), l("Quant")].into_iter().enumerate() {
+            let i = i as u8;
+            let r = pill(ui, pos2(x, row.top()), name, self.pane() == i, ("book_tab", i));
+            x = r.rect.right() + 2.0;
+            if r.clicked() && self.pane() != i {
+                if i < 2 { self.trades = i == 1; self.page = 0; } else { self.page = i; }
+                ui.ctx().request_repaint();
             }
-        });
+        }
+        // the panel's 8 px margin: the hairline runs edge to edge, 6 px under the pills
+        let y = row.bottom() + 6.5;
+        ui.painter().with_clip_rect(ui.clip_rect().expand2(vec2(8.0, 0.0))).hline(row.left() - 8.0..=row.right() + 8.0, y, Stroke::new(1.0, line()));
+        ui.add_space((15.0 - sp).max(0.0));
         self.page > 1
     }
 
-    /// Second header row of Book and Trades: source (all venues or one), price grouping (book
-    /// only) and size unit, as the native header's `bookRight`.
+    /// Filter row of Book and Trades (26 px controls, 6 px apart): source (all venues or one),
+    /// price grouping (book only) and size unit, as the native header's `bookRight`.
     fn controls(&mut self, ui: &mut Ui, a: &Agg, market: Market, base: &str, mid: Option<f64>) {
-        ui.horizontal(|ui| {
-            ui.set_height(26.0);
-            let cur = self.src.map(|e| format!("{e:?}")).unwrap_or_else(|| l("All venues").to_string());
-            let tip = if self.src.is_none() { l("All venues, mid-aligned (view only)") } else { l("This venue's raw book (click a level to fill the price)") };
-            if let Some(e) = self.src {
-                let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                icon(ui.painter(), e, r, false);
-            }
-            egui::ComboBox::from_id_salt("book_src").icon(chevron).selected_text(RichText::new(cur).font(prop(12.0))).width(112.0).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.src, None, l("All venues"));
-                ui.separator();
-                let mut vs: Vec<Exchange> = a.venues.keys().filter(|(_, m)| *m == market).map(|(e, _)| *e).collect();
-                vs.sort_by_key(|e| format!("{e:?}"));
-                for e in vs { ui.selectable_value(&mut self.src, Some(e), format!("{e:?}")); }
-            }).response.on_hover_text(tip);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let mut unit = self.quote as usize;
-                if segment(ui, &[base, "USDT"], &mut unit) { self.quote = unit == 1; }
-                if !self.trades {
-                    if let Some(mid) = mid {
-                        let base_bin = depth::agg::nice(mid * 1e-5);
-                        let bin = base_bin * GROUPS[self.group];
-                        egui::ComboBox::from_id_salt("book_group").icon(chevron).selected_text(RichText::new(fmt_dp(bin, step_dp(bin))).font(mono(12.0))).width(64.0).show_ui(ui, |ui| {
-                            for (i, g) in GROUPS.iter().enumerate() { ui.selectable_value(&mut self.group, i, fmt_dp(base_bin * g, step_dp(base_bin * g))); }
-                        }).response.on_hover_text(l("Price grouping"));
+        let sp = ui.spacing().item_spacing.y;
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
+        let mut c = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        c.spacing_mut().item_spacing.x = 6.0;
+        let mut unit = self.quote as usize;
+        if seg_fit(&mut c, &mut unit, &[(0, base), (1, "USDT")]) { self.quote = unit == 1; }
+        if !self.trades {
+            if let Some(mid) = mid {
+                let base_bin = depth::agg::nice(mid * 1e-5);
+                let bin = base_bin * GROUPS[self.group];
+                let group = &mut self.group;
+                dropdown(&mut c, 56.0, &fmt_dp(bin, step_dp(bin)), mono_m(12.0), None, l("Price grouping"), |ui| {
+                    for (i, g) in GROUPS.iter().enumerate() {
+                        if menu_item(ui, &fmt_dp(base_bin * g, step_dp(base_bin * g)), *group == i, None) { *group = i; }
                     }
-                }
-            });
+                });
+            }
+        }
+        let cur = self.src.map(|e| format!("{e:?}")).unwrap_or_else(|| l("All venues").to_string());
+        let tip = if self.src.is_none() { l("All venues, mid-aligned (view only)") } else { l("This venue's raw book (click a level to fill the price)") };
+        let src = &mut self.src;
+        let w = c.available_width();
+        dropdown(&mut c, w, &cur, prop_m(12.0), *src, tip, |ui| {
+            if menu_item(ui, l("All venues"), src.is_none(), None) { *src = None; }
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 9.0), Sense::hover());
+            ui.painter().hline(r.x_range().shrink(6.0), r.center().y, Stroke::new(1.0, line()));
+            let mut vs: Vec<Exchange> = a.venues.keys().filter(|(_, m)| *m == market).map(|(e, _)| *e).collect();
+            vs.sort_by_key(|e| format!("{e:?}"));
+            for e in vs { if menu_item(ui, &format!("{e:?}"), *src == Some(e), Some(e)) { *src = Some(e); } }
         });
-        ui.add_space(2.0);
+        ui.add_space((8.0 - sp).max(0.0));
     }
 
-    /// The trade tape in `rect`: a filter row (minimum USDT notional), then the newest prints.
-    /// Fills of one taker order arrive merged (see `Agg::on`); prints of at least `BIG_USD` come
-    /// from the longer `Agg::big` tape, so a whale filter still shows minutes of history.
-    fn tape(&mut self, ui: &mut Ui, rect: Rect, a: &Agg, market: Market, scope: &HashSet<Exchange>) {
-        let painter = ui.painter_at(rect);
-        painter.hline(rect.left()..=rect.right(), rect.top() - 2.0, egui::Stroke::new(1.0, line()));
-        // filter chips
-        let mut x = rect.left() + 6.0;
-        let cy = rect.top() + ROW / 2.0 + 1.0;
-        x = painter.text(pos2(x, cy), Align2::LEFT_CENTER, t("book.min"), prop(10.5), dim()).right() + 6.0;
+    /// The trade tape in `rect`: a filter row (minimum USDT notional), a header, then the newest
+    /// prints. Fills of one taker order arrive merged (see `Agg::on`); prints of at least `BIG_USD`
+    /// come from the longer `Agg::big` tape, so a whale filter still shows minutes of history.
+    /// `rule`: a hairline over it (under the book).
+    fn tape(&mut self, ui: &mut Ui, rect: Rect, a: &Agg, market: Market, scope: &HashSet<Exchange>, rule: bool) {
+        let painter = ui.painter_at(rect.expand2(vec2(2.0, 0.0)));
+        let rect = if rule {
+            ui.painter().with_clip_rect(ui.clip_rect().expand2(vec2(8.0, 0.0))).hline(rect.left() - 8.0..=rect.right() + 8.0, rect.top() + 0.5, Stroke::new(1.0, line()));
+            Rect::from_min_max(pos2(rect.left(), rect.top() + 8.0), rect.max)
+        } else { rect };
+        // filter pills: "MIN  All 10K 50K 250K 1M"
+        let cy = rect.top() + 11.0;
+        let mut x = overline_at(&painter, pos2(rect.left() + 2.0, cy), Align2::LEFT_CENTER, t("book.min")).right() + 8.0;
         for (i, (v, label)) in MIN_USD.iter().enumerate() {
             let label = if *v == 0.0 { t("book.all") } else { label };
-            let g = painter.layout_no_wrap(label.to_string(), prop(10.5), fg());
-            let r = Rect::from_min_size(pos2(x, cy - 8.0), vec2(g.size().x + 10.0, 16.0));
-            let resp = ui.interact(r, ui.id().with(("tape_min", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
             let on = self.min_usd == i;
-            if on { painter.rect_filled(r, 3, accent().linear_multiply(0.25)); } else if resp.hovered() { painter.rect_filled(r, 3, hl()); }
-            painter.text(r.center(), Align2::CENTER_CENTER, label, prop(10.5), if on { fg() } else { mu() });
-            if resp.clicked() { self.min_usd = i; }
-            x = r.right() + 2.0;
+            let r = pill_sized(ui, pos2(x, cy - 11.0), label, on, ("tape_min", i), 22.0, 12.0);
+            if r.clicked() { self.min_usd = i; }
+            x = r.rect.right() + 2.0;
         }
         let min = MIN_USD[self.min_usd].0;
         let src = if min >= depth::agg::BIG_USD { &a.big } else { &a.trades };
-        let body = Rect::from_min_max(pos2(rect.left(), rect.top() + ROW + 2.0), rect.max);
+        // header, then rows of ROW
+        let hy = rect.top() + 22.0 + 6.0 + HEAD / 2.0 - 1.0;
+        let x_px = rect.left() + 2.0;
+        let x_time = rect.right() - 26.0;
+        let x_size = x_time - 70.0;
+        overline_at(&painter, pos2(x_px, hy), Align2::LEFT_CENTER, t("book.price"));
+        overline_at(&painter, pos2(x_size, hy), Align2::RIGHT_CENTER, t("book.size"));
+        overline_at(&painter, pos2(x_time, hy), Align2::RIGHT_CENTER, t("book.time"));
+        let body = Rect::from_min_max(pos2(rect.left(), rect.top() + 28.0 + HEAD), rect.max);
         let usd = |x: &depth::agg::Tick| x.px * x.qty * a.usdt(x.ex, x.market);
         let rows: Vec<_> = src.iter().rev()
             .filter(|x| x.market == market && scope.contains(&x.ex) && self.src.is_none_or(|e| e == x.ex) && usd(x) >= min)
-            .take((body.height() / ROW) as usize).collect();
+            .take((body.height() / ROW).max(0.0) as usize).collect();
         if rows.is_empty() {
-            painter.text(body.center_top() + vec2(0.0, 20.0), Align2::CENTER_CENTER, t("book.no_trades"), prop(11.0), dim());
+            painter.text(body.center_top() + vec2(0.0, 24.0), Align2::CENTER_CENTER, t("book.no_trades"), prop(12.0), dim());
             return;
         }
         // highlight: the top decile of what is shown, and anything of at least $100K
@@ -376,17 +425,93 @@ impl BookView {
             let col = if x.side == Side::Buy { up() } else { dn() };
             let whale = usd(x) >= big;
             if whale {
-                // bar length by notional, log-scaled from $10K to $10M
+                // soft bar by notional, log-scaled from $10K to $10M
                 let k = ((usd(x).max(1e4).log10() - 4.0) / 3.0).clamp(0.1, 1.0) as f32;
-                painter.rect_filled(Rect::from_min_size(pos2(body.left(), y - ROW / 2.0 + 1.0), vec2(body.width() * k, ROW - 2.0)), 0, col.linear_multiply(0.14));
+                let w = (body.width() + 4.0) * k;
+                painter.rect_filled(Rect::from_min_size(pos2(body.left() - 2.0, y - ROW / 2.0 + 2.0), vec2(w, ROW - 4.0)), 3, col.gamma_multiply(0.12));
             }
-            let f = if whale { mono(11.5) } else { mono(11.0) };
-            painter.text(pos2(body.left() + 6.0, y), Align2::LEFT_CENTER, fmt_px(x.px), f.clone(), col);
-            painter.text(pos2(body.left() + body.width() * 0.55, y), Align2::RIGHT_CENTER, fs(amt(x)), f, if whale { fg() } else { mu() });
-            painter.text(pos2(body.right() - 22.0, y), Align2::RIGHT_CENTER, super::hms(x.ts), mono(10.5), dim());
-            icon(&painter, x.ex, Rect::from_center_size(pos2(body.right() - 10.0, y), vec2(12.0, 12.0)), false);
+            painter.text(pos2(x_px, y), Align2::LEFT_CENTER, fmt_px(x.px), mono_m(12.0), col);
+            painter.text(pos2(x_size, y), Align2::RIGHT_CENTER, fs(amt(x)), if whale { mono_m(12.0) } else { mono(12.0) }, if whale { fg_strong() } else { fg() });
+            painter.text(pos2(x_time, y), Align2::RIGHT_CENTER, super::hms(x.ts), mono(11.5), mu());
+            icon(&painter, x.ex, Rect::from_center_size(pos2(rect.right() - 7.0, y), vec2(13.0, 13.0)), false);
         }
     }
+}
+
+/// Overline at `pos`: 10.5 semibold caps, dim, 0.06 em tracking. Returns its rect.
+pub(super) fn overline_at(p: &egui::Painter, pos: egui::Pos2, align: Align2, text: &str) -> Rect {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(&text.to_uppercase(), 0.0, egui::TextFormat { font_id: prop_s(10.5), color: dim(), extra_letter_spacing: 0.6, ..Default::default() });
+    let g = p.layout_job(job);
+    let r = align.anchor_size(pos, g.size());
+    p.galley(r.min, g, dim());
+    r
+}
+
+/// Compact pill tab at `at` (26 px, 12.5): selected = hl solid and semibold, others grey medium;
+/// the fill fades in.
+fn pill(ui: &mut Ui, at: egui::Pos2, text: &str, on: bool, id: impl std::hash::Hash + std::fmt::Debug) -> egui::Response {
+    pill_sized(ui, at, text, on, id, 26.0, 12.5)
+}
+
+fn pill_sized(ui: &mut Ui, at: egui::Pos2, text: &str, on: bool, id: impl std::hash::Hash + std::fmt::Debug, h: f32, size: f32) -> egui::Response {
+    let w = ui.painter().layout_no_wrap(text.to_string(), prop_s(size), fg()).size().x + if h > 24.0 { 20.0 } else { 14.0 };
+    let r = Rect::from_min_size(at, vec2(w, h));
+    let resp = ui.interact(r, ui.id().with(id), Sense::click());
+    let s = ui.ctx().animate_bool_with_time(resp.id.with("on"), on, 0.15);
+    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() && !on, 0.1);
+    let fill = if s > 0.0 { hl().gamma_multiply(s.max(hv * 0.5)) } else { hl().gamma_multiply(0.5 * hv) };
+    if fill.a() > 0 { ui.painter().rect_filled(r, kit::R, fill); }
+    let font = if on { prop_s(size) } else { prop_m(size) };
+    ui.painter().text(r.center(), Align2::CENTER_CENTER, text, font, lerp(mu(), fg_strong(), s.max(hv * 0.6)));
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Segmented control (`kit::segments`) sized to its labels instead of the whole row, 26 px.
+pub(super) fn seg_fit<T: PartialEq + Copy>(ui: &mut Ui, sel: &mut T, items: &[(T, &str)]) -> bool {
+    let w = items.iter().map(|(_, s)| ui.painter().layout_no_wrap(s.to_string(), prop_s(12.5), fg()).size().x).fold(0.0, f32::max) + 18.0;
+    ui.allocate_ui(vec2(w * items.len() as f32 + 4.0, 26.0), |ui| kit::segments(ui, sel, items, 26.0)).inner
+}
+
+/// Dropdown button (26 px, panel2 + hairline, 12 medium text left, chevron right, optional venue
+/// logo) opening a popup menu filled by `add`.
+fn dropdown(ui: &mut Ui, w: f32, text: &str, font: egui::FontId, logo: Option<Exchange>, tip: &str, add: impl FnOnce(&mut Ui)) {
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click());
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
+    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() || open, 0.1);
+    let p = ui.painter();
+    p.rect(r, kit::R, lerp(panel2(), hl(), hv * 0.5), Stroke::new(1.0, lerp(line(), edge(), hv)), egui::StrokeKind::Inside);
+    let cy = r.center().y;
+    let mut x = r.left() + 8.0;
+    if let Some(e) = logo { icon(p, e, Rect::from_center_size(pos2(x + 7.0, cy), vec2(14.0, 14.0)), false); x += 20.0; }
+    p.with_clip_rect(r.shrink(1.0)).text(pos2(x, cy), Align2::LEFT_CENTER, text, font, lerp(fg(), fg_strong(), hv));
+    let c = pos2(r.right() - 11.0, cy);
+    let (cw, ch) = (3.5, 2.0);
+    let pts = if open { vec![c + vec2(-cw, ch), c + vec2(0.0, -ch), c + vec2(cw, ch)] } else { vec![c + vec2(-cw, -ch), c + vec2(0.0, ch), c + vec2(cw, -ch)] };
+    p.add(egui::Shape::line(pts, Stroke::new(1.3, mu())));
+    let resp = resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand);
+    egui::Popup::from_toggle_button_response(&resp)
+        .frame(egui::Frame::new().fill(popup_bg()).stroke(Stroke::new(1.0, line())).corner_radius(6).inner_margin(4).shadow(ui.visuals().popup_shadow))
+        .align(egui::RectAlign::BOTTOM_START)
+        .gap(4.0)
+        .show(|ui| {
+            ui.set_min_width(w.max(140.0) - 8.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            add(ui)
+        });
+}
+
+/// Menu row: 28 px, check mark column, 12.5 text, optional venue logo; hover = hl. True on click.
+fn menu_item(ui: &mut Ui, text: &str, on: bool, logo: Option<Exchange>) -> bool {
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+    let p = ui.painter();
+    if resp.hovered() || on { p.rect_filled(r, kit::R, if on { hl() } else { hl().gamma_multiply(0.7) }); }
+    let cy = r.center().y;
+    if on { p.text(pos2(r.left() + 10.0, cy), Align2::LEFT_CENTER, "✓", prop(12.0), accent()); }
+    let mut x = r.left() + 28.0;
+    if let Some(e) = logo { icon(p, e, Rect::from_center_size(pos2(x + 7.0, cy), vec2(14.0, 14.0)), false); x += 20.0; }
+    p.text(pos2(x, cy), Align2::LEFT_CENTER, text, if text.chars().next().is_some_and(|c| c.is_ascii_digit()) { mono(12.5) } else { prop(12.5) }, if on { fg_strong() } else { fg() });
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
 /// Minimum USDT notional of the tape filter.
@@ -397,4 +522,35 @@ const MIN_USD: [(f64, &str); 5] = [(0.0, ""), (10_000.0, "10K"), (50_000.0, "50K
 fn col_fmt(max: f64, quote: bool) -> impl Fn(f64) -> String {
     let d = if max > 0.0 { (3.0 - max.log10().floor()).clamp(0.0, 4.0) as usize } else { 2 };
     move |v| if quote { fmt_big_book(v) } else { fmt_dp(v, d) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use depth::agg::Tick;
+
+    #[test]
+    fn trades_light_the_level_they_ate() {
+        let mut a = Agg::default();
+        let tick = |ts, px, side| Tick { ts, ex: Exchange::Binance, market: Market::Perp, px, qty: 1.0, side };
+        let mut v = BookView { src: Some(Exchange::Binance), ..Default::default() };
+        let scope: HashSet<Exchange> = [Exchange::Binance].into();
+        let t0 = Instant::now();
+        a.trades.push_back(tick(1, 100.3, Side::Buy));
+        v.hits(&a, Market::Perp, &scope, 100.0, 1.0, t0);
+        assert!(v.flash.is_empty(), "backlog at the first refresh does not flash");
+        a.trades.push_back(tick(2, 100.3, Side::Buy));
+        a.trades.push_back(tick(2, 100.3, Side::Sell));
+        v.hits(&a, Market::Perp, &scope, 100.0, 1.0, t0);
+        assert_eq!(v.flash.get(&(true, 101)), Some(&t0), "taker buy eats the ask bin (ceil)");
+        assert_eq!(v.flash.get(&(false, 100)), Some(&t0), "taker sell eats the bid bin (floor)");
+        let t1 = t0 + Duration::from_millis(100);
+        a.trades.push_back(tick(3, 100.6, Side::Buy));
+        v.hits(&a, Market::Perp, &scope, 100.0, 1.0, t1);
+        assert_eq!(v.flash.get(&(true, 101)), Some(&t0), "throttled within FLASH_GAP");
+        let t2 = t0 + Duration::from_millis(350);
+        a.trades.push_back(tick(4, 100.6, Side::Buy));
+        v.hits(&a, Market::Perp, &scope, 100.0, 1.0, t2);
+        assert_eq!(v.flash.get(&(true, 101)), Some(&t2));
+    }
 }
