@@ -2345,10 +2345,10 @@ impl Chart {
     }
 
     fn toolbar(&mut self, ui: &mut Ui, a: &Agg, market: Market, base: &str) {
-        // design: a 32 px bar over a hairline; compact interval pills, outlined menus, tools on a strip
-        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
+        // design: a 36 px bar, controls in its top 28 px, 8 px clear of the hairline; compact interval pills, outlined menus, tools on a strip
+        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
         ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, line()));
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(0.0, 2.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(bar.min, pos2(bar.right(), bar.bottom() - 8.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
         let ui = &mut child;
         ui.spacing_mut().item_spacing.x = 2.0;
         for (m, l) in &TFS[..TF_QUICK] {
