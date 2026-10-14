@@ -120,3 +120,6 @@ Amended = Изменён
 Partial fill = Частично
 Filled = Исполнен
 Cancelled = Отменён
+Data sources = Источники данных
+Hyperliquid orders via Flowscan = Ордера Hyperliquid через Flowscan
+Flowscan runs a Hyperliquid node and publishes its book with order counts about every 130 ms (the public feed: every few seconds), which makes the order-by-order estimate in the book much closer. It is a third-party, undocumented service and may stop working; when it fails Depth retries, and turning this off goes back to the public feed. = Flowscan запускает узел Hyperliquid и публикует стакан с числом ордеров каждые ~130 мс. Сторонний недокументированный сервис, может перестать работать.

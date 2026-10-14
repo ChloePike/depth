@@ -7,16 +7,28 @@ on:
   pull_request:
   workflow_dispatch:
 
-# creating a release and attaching the zip needs write access (the default token is read-only)
+# creating a release and attaching the builds needs write access (the default token is read-only)
 permissions:
   contents: write
 
 jobs:
-  macos:
-    # macOS 26 SDK and Swift 6 are needed by app/Package.swift
-    runs-on: macos-26
-    env:
-      CARGO_TARGET_DIR: target/main
+  # One job per host and OS:
+  #   egui (ui/src/main.rs)  cross-platform: macOS, Windows, Linux
+  #   SwiftUI host (app/)    macOS only
+  #   WinUI 3 host (win/)    Windows only (never compiled before CI: allowed to fail until fixed)
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macos-egui, os: macos-26, asset: Depth-macos-arm64.zip, experimental: false }
+          - { name: macos-swiftui, os: macos-26, asset: Depth-macos-arm64-swiftui.zip, experimental: false }
+          - { name: windows-egui, os: windows-latest, asset: Depth-windows-x64.zip, experimental: false }
+          - { name: windows-winui, os: windows-latest, asset: Depth-windows-x64-winui.zip, experimental: true }
+          - { name: linux-egui, os: ubuntu-24.04, asset: Depth-linux-x64.tar.gz, experimental: false }
     steps:
       - uses: actions/checkout@v4
 
@@ -24,27 +36,89 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ". -> target/main"
+          key: ${{ matrix.name }}
+          # the SwiftUI bundle builds the staticlib into target/main
+          workspaces: ${{ matrix.name == 'macos-swiftui' && '. -> target/main' || '. -> target' }}
+
+      - name: Linux libraries (winit / wgpu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libx11-xcb-dev
 
       - name: Test
-        # unit tests only: they need no network (exchanges block some runner regions)
+        # unit tests only: they need no network (exchanges block some runner regions); once per OS
+        if: endsWith(matrix.name, '-egui')
         run: cargo test --release --workspace
 
-      - name: Bundle Depth.app
-        run: APP=dist/Depth.app scripts/bundle.sh
+      - name: Bundle (macOS, egui)
+        if: matrix.name == 'macos-egui'
+        run: |
+          HOST=egui APP=dist/Depth.app scripts/bundle.sh
+          ditto -c -k --keepParent dist/Depth.app dist/${{ matrix.asset }}
 
-      - name: Zip
-        run: ditto -c -k --keepParent dist/Depth.app dist/Depth-macos-arm64.zip
+      - name: Bundle (macOS, SwiftUI)
+        if: matrix.name == 'macos-swiftui'
+        run: |
+          APP=dist/Depth.app scripts/bundle.sh
+          ditto -c -k --keepParent dist/Depth.app dist/${{ matrix.asset }}
+
+      - name: Build (Windows, egui)
+        if: matrix.name == 'windows-egui'
+        shell: pwsh
+        run: |
+          cargo build --release -p t1-ui --bin depth
+          New-Item -ItemType Directory -Force dist/Depth | Out-Null
+          Copy-Item target/release/depth.exe dist/Depth/Depth.exe
+          Compress-Archive -Path dist/Depth -DestinationPath dist/${{ matrix.asset }}
+
+      - uses: actions/setup-dotnet@v4
+        if: matrix.name == 'windows-winui'
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build (Windows, WinUI 3)
+        if: matrix.name == 'windows-winui'
+        shell: pwsh
+        run: |
+          cargo build --release -p t1-ffi
+          dotnet publish win -c Release -p:Platform=x64 -o dist/Depth
+          Compress-Archive -Path dist/Depth -DestinationPath dist/${{ matrix.asset }}
+
+      - name: Build (Linux, egui)
+        if: matrix.name == 'linux-egui'
+        run: |
+          cargo build --release -p t1-ui --bin depth
+          mkdir -p dist/Depth && cp target/release/depth dist/Depth/depth
+          tar -C dist -czf dist/${{ matrix.asset }} Depth
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Depth-macos-arm64
-          path: dist/Depth-macos-arm64.zip
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.asset }}
 
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+  release:
+    # after every build (a failed experimental build just leaves its file out)
+    needs: build
+    if: always() && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
         with:
-          files: dist/Depth-macos-arm64.zip
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
           body: |
-            Depth for macOS (Apple silicon), ad-hoc signed: on first launch, right-click the app and choose Open.
+            | File | App | OS |
+            |---|---|---|
+            | `Depth-macos-arm64.zip` | Depth (egui) | macOS, Apple silicon |
+            | `Depth-macos-arm64-swiftui.zip` | Depth with the native SwiftUI shell | macOS, Apple silicon |
+            | `Depth-windows-x64.zip` | Depth (egui) | Windows x64 |
+            | `Depth-windows-x64-winui.zip` | Depth with the native WinUI 3 shell (first builds, untested) | Windows x64 |
+            | `Depth-linux-x64.tar.gz` | Depth (egui) | Linux x64 |
+
+            macOS builds are ad-hoc signed: on first launch, right-click the app and choose Open.
+            Windows builds are unsigned: SmartScreen asks once.

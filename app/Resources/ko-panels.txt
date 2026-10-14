@@ -120,3 +120,6 @@ Amended = 정정
 Partial fill = 부분 체결
 Filled = 체결
 Cancelled = 취소됨
+Data sources = 데이터 소스
+Hyperliquid orders via Flowscan = Hyperliquid 주문 추정에 Flowscan 사용
+Flowscan runs a Hyperliquid node and publishes its book with order counts about every 130 ms (the public feed: every few seconds), which makes the order-by-order estimate in the book much closer. It is a third-party, undocumented service and may stop working; when it fails Depth retries, and turning this off goes back to the public feed. = Flowscan은 Hyperliquid 노드를 운영하며 주문 건수가 포함된 호가를 약 130ms마다 제공합니다(공개 피드는 몇 초마다). 비공개 제3자 서비스라 중단될 수 있으며, 끄면 공개 피드로 돌아갑니다.

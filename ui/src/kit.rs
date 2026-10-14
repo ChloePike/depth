@@ -52,11 +52,11 @@ pub fn icon_button(ui: &mut Ui, size: f32, on: bool, paint: impl FnOnce(&egui::P
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Text field in a well: label inside on the left (12 grey), value right-aligned (13.5 medium
+/// Text field in a well (28 px): label inside on the left (12 grey), value right-aligned (13.5 medium
 /// numbers), unit on the right; accent border with a soft ring when focused, red when `error`.
 /// Returns the edit response and whether Enter was pressed.
 pub fn field(ui: &mut Ui, label: &str, text: &mut String, unit: &str, id: impl std::hash::Hash + std::fmt::Debug, error: bool) -> (Response, bool) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), H), Sense::hover());
     let eid = ui.id().with(("kit_field", id));
     let focused = ui.memory(|m| m.has_focus(eid));
     let f = ui.ctx().animate_bool_with_time(eid.with("f"), focused, 0.12);

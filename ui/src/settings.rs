@@ -26,11 +26,13 @@ pub struct Prefs {
     pub confirm: bool,
     /// taker / maker fee in percent per venue (drives fee estimates and, later, routing)
     pub fees: BTreeMap<String, (f64, f64)>,
+    /// Hyperliquid's order-by-order inference from Flowscan's book (third party) instead of the public l2Book
+    pub hl_flowscan: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 5, confirm: true, fees: BTreeMap::new() }
+        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 5, confirm: true, fees: BTreeMap::new(), hl_flowscan: false }
     }
 }
 
@@ -190,6 +192,9 @@ impl SettingsView {
                     for m in TZS { ui.selectable_value(&mut p.tz_min, Some(m), tz_label(m.into())); }
                 });
             });
+        });
+        section(ui, l("Data sources"), l("Flowscan runs a Hyperliquid node and publishes its book with order counts about every 130 ms (the public feed: every few seconds), which makes the order-by-order estimate in the book much closer. It is a third-party, undocumented service and may stop working; when it fails Depth retries, and turning this off goes back to the public feed."), |ui| {
+            row(ui, l("Hyperliquid orders via Flowscan"), |ui| { kit::switch(ui, &mut p.hl_flowscan); });
         });
         set_prefs(&before, &p, call);
         if self.cache.is_none() { self.cache = Some(call(json!({"op": "cache_size"})).ok().and_then(|v| v["bytes"].as_i64())); }

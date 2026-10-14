@@ -220,3 +220,7 @@ Est. liquidations at = Liquidations est. à
 Longs = Longs
 Shorts = Shorts
 above: shorts · below: longs = au-dessus : shorts · en dessous : longs
+Est. liq. price = Prix liq. est.
+Max open = Max. ouvrable
+Unified account: liquidation is decided on the whole account (UniMMR / margin ratio in the account card), not per order. = Compte unifié : la liquidation dépend du compte entier (UniMMR / ratio de marge), pas de chaque ordre.
+Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ. = Estimation isolée à ce levier avec 0,5 % de maintenance ; le chiffre de la plateforme peut différer.

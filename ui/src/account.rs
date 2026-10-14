@@ -718,7 +718,10 @@ impl AccountPanel {
             // soft glow in the result's color from the lower right
             for k in 0..6 { pnt.circle_filled(r.right_bottom() - egui::vec2(60.0, 50.0), 220.0 - k as f32 * 34.0, col.linear_multiply(0.035)); }
             let at = |dx: f32, dy: f32| r.min + egui::vec2(dx, dy);
-            pnt.text(at(26.0, 30.0), egui::Align2::LEFT_CENTER, "Depth", prop_s(17.0), fg_strong());
+            // brand: the app mark and wordmark
+            let logo = super::theme::app_logo(ui.ctx());
+            pnt.image(logo.id(), Rect::from_center_size(at(37.0, 30.0), egui::vec2(24.0, 24.0)), Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+            pnt.text(at(56.0, 30.0), egui::Align2::LEFT_CENTER, "Depth", prop_s(17.0), fg_strong());
             pnt.text(egui::pos2(r.right() - 26.0, r.top() + 30.0), egui::Align2::RIGHT_CENTER, time(depth::now_ms()), mono(12.0), mu());
             coin_icon(ui, base_of(s(&p["symbol"])), Rect::from_center_size(at(38.0, 92.0), egui::vec2(24.0, 24.0)));
             let sr = pnt.text(at(58.0, 92.0), egui::Align2::LEFT_CENTER, s(&p["symbol"]), prop_s(21.0), fg_strong());

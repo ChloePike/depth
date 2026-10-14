@@ -120,3 +120,6 @@ Amended = 改單
 Partial fill = 部分成交
 Filled = 成交
 Cancelled = 撤單
+Data sources = 資料來源
+Hyperliquid orders via Flowscan = Hyperliquid 逐筆推斷使用 Flowscan
+Flowscan runs a Hyperliquid node and publishes its book with order counts about every 130 ms (the public feed: every few seconds), which makes the order-by-order estimate in the book much closer. It is a third-party, undocumented service and may stop working; when it fails Depth retries, and turning this off goes back to the public feed. = Flowscan 自己運行 Hyperliquid 節點，約每 130 毫秒發布一次帶每檔筆數的訂單簿（公開介面要幾秒一次），訂單簿裡的逐筆估計會準確得多。這是第三方未公開的服務，隨時可能失效；失效時 Depth 會自動重試，關掉此項即回到公開介面。

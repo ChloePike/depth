@@ -220,3 +220,7 @@ Est. liquidations at = 推定清算 @
 Longs = ロング
 Shorts = ショート
 above: shorts · below: longs = 上 = ショート清算 · 下 = ロング清算
+Est. liq. price = 清算価格
+Max open = 最大建玉
+Unified account: liquidation is decided on the whole account (UniMMR / margin ratio in the account card), not per order. = 統合口座：清算は口座全体（口座カードの UniMMR / 証拠金率）で決まり、注文ごとではありません。
+Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ. = 分離マージン・現在のレバレッジ・維持率0.5%での推定。取引所の値と異なる場合があります。

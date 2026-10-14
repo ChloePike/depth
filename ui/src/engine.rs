@@ -191,6 +191,9 @@ pub struct Engine {
     /// so they run only once someone looks)
     pub wants_l3: std::sync::atomic::AtomicBool,
     l3_started: bool,
+    /// Hyperliquid's L3 feed in use (public l2Book, or Flowscan when `l3_flowscan`)
+    hl_l3: Option<(bool, tokio::task::JoinHandle<()>)>,
+    pub l3_flowscan: bool,
     /// venues switched off in the status bar: never connected (applied on `start`)
     pub off: std::collections::HashSet<Exchange>,
     /// private account streams live on their own runtime so base switches don't drop them
@@ -213,7 +216,7 @@ impl Engine {
             let mut a = Account::default();
             for ex in trade::TRADABLE { if let Some(k) = trade::keychain(ex) { a.keys.insert(ex, k); } }
             Arc::new(Mutex::new(a))
-        }, wants_options: Default::default(), wants_l3: Default::default(), l3_started: false, off: Default::default(), acct_rt: None, acct_tx: None, streams: HashMap::new(), key_tests: Default::default(), watch_rt: None, watching: HashMap::new(), watched: Default::default() }
+        }, wants_options: Default::default(), wants_l3: Default::default(), l3_started: false, hl_l3: None, l3_flowscan: false, off: Default::default(), acct_rt: None, acct_tx: None, streams: HashMap::new(), key_tests: Default::default(), watch_rt: None, watching: HashMap::new(), watched: Default::default() }
     }
 
     /// (Re)subscribe everything for `base`: spot + perp live and history, USDT/USD, heatmap sampling.
@@ -227,6 +230,7 @@ impl Engine {
         self.tfs = vec![];
         self.venue_tasks.clear();
         self.l3_started = false;
+        self.hl_l3 = None;
         let _guard = rt.enter();
 
         // pump: apply messages in batches under one lock
@@ -540,12 +544,22 @@ impl Engine {
 
     /// Exact L3 feeds for the current base (Lighter perp), once.
     pub fn ensure_l3(&mut self) {
-        if self.l3_started || self.off.contains(&Exchange::Lighter) { return; }
         let (Some(rt), Some(tx)) = (self.rt.as_ref(), self.tx.clone()) else { return };
         let _guard = rt.enter();
-        self.l3_started = true;
-        let h = depth::ex::lighter::spawn_l3(&self.sub(Market::Perp), tx);
-        self.venue_tasks.entry(Exchange::Lighter).or_default().push(h);
+        let sub = self.sub(Market::Perp);
+        // Lighter exact (REST order snapshots)
+        if !self.l3_started && !self.off.contains(&Exchange::Lighter) {
+            self.l3_started = true;
+            let h = depth::ex::lighter::spawn_l3(&sub, tx.clone());
+            self.venue_tasks.entry(Exchange::Lighter).or_default().push(h);
+        }
+        // Hyperliquid inferred: Flowscan's fast book when chosen in Settings, else the public l2Book;
+        // a changed choice replaces the running feed
+        if self.hl_l3.as_ref().is_some_and(|(f, _)| *f != self.l3_flowscan) { if let Some((_, h)) = self.hl_l3.take() { h.abort(); } }
+        if self.hl_l3.is_none() && !self.off.contains(&Exchange::Hyperliquid) {
+            let h = if self.l3_flowscan { depth::ex::hyperliquid::spawn_l3_flowscan(&sub, tx) } else { depth::ex::hyperliquid::spawn_l3(&sub, tx) };
+            self.hl_l3 = Some((self.l3_flowscan, h));
+        }
     }
 
     /// Switch one venue off (its connections close, its data leaves the cross-venue views) or on
@@ -557,6 +571,7 @@ impl Engine {
             for h in self.venue_tasks.remove(&e).unwrap_or_default() { h.abort(); }
             self.agg.lock().unwrap().drop_venue(e);
             if e == Exchange::Lighter { self.l3_started = false; }
+            if e == Exchange::Hyperliquid { if let Some((_, h)) = self.hl_l3.take() { h.abort(); } }
             return;
         }
         self.off.remove(&e);

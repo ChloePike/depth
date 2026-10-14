@@ -169,12 +169,10 @@ fn kind_text(k: &str) -> String {
 // ---- widgets: everything is kit.rs; the few primitives the kit has no equivalent for live here ----
 
 /// Account card helpers kept for account.rs (it imports them from here); new code calls kit directly.
-pub(crate) fn big_button(ui: &mut Ui, text: &str, fill: Color32, enabled: bool) -> bool { kit::button(ui, text, Look::Fill(fill), H_LG, Some(f32::INFINITY), enabled).clicked() }
-pub(crate) fn note(ui: &mut Ui, text: &str, col: Color32) { kit::note(ui, text, col) }
 pub(crate) fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     kit::panel_frame(12).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = 10.0;
+        ui.spacing_mut().item_spacing.y = 6.0;
         add(ui)
     }).inner
 }
@@ -295,6 +293,21 @@ fn pair_row(ui: &mut Ui, cells: [(&str, String, Color32); 2], big: bool) {
     }
 }
 
+/// The two sides' facts under the buy / sell buttons: (label, buy-side value, sell-side value)
+/// rows; the buy column flush left, the sell column flush right, label grey right before its value.
+fn side_facts(ui: &mut Ui, rows: &[(&str, String, String, &str)]) {
+    for (k, a, b, tip) in rows {
+        let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 17.0), Sense::hover());
+        if !tip.is_empty() { resp.on_hover_text(*tip); }
+        let p = ui.painter();
+        let y = r.center().y;
+        let kw = p.text(egui::pos2(r.left(), y), Align2::LEFT_CENTER, *k, prop(11.5), mu()).width();
+        p.text(egui::pos2(r.left() + kw + 5.0, y), Align2::LEFT_CENTER, a, mono_m(11.5), fg());
+        let vw = p.text(egui::pos2(r.right(), y), Align2::RIGHT_CENTER, b, mono_m(11.5), fg()).width();
+        p.text(egui::pos2(r.right() - vw - 5.0, y), Align2::RIGHT_CENTER, *k, prop(11.5), mu());
+    }
+}
+
 /// Small close glyph button (painted, no font dependency).
 fn close_x(ui: &mut Ui, size: f32) -> Response {
     kit::icon_button(ui, size, false, |p, r, c| {
@@ -380,7 +393,7 @@ impl OrderPanel {
                 let mid = (b + k) / 2.0;
                 if mid > 0.0 { ui.painter().text(r.center(), Align2::CENTER_CENTER, format!("{:.1}bp", (k - b) / mid * 1e4), mono(11.0), dim()); }
             }
-            if kit::segments(ui, &mut self.close, &[(false, l("Open")), (true, l("Close"))], 34.0) { (self.pct, self.qty, self.error) = (0.0, String::new(), None); }
+            if kit::segments(ui, &mut self.close, &[(false, l("Open")), (true, l("Close"))], 28.0) { (self.pct, self.qty, self.error) = (0.0, String::new(), None); }
             self.type_tabs(ui, caps);
             // available margin, with the transfer shortcut
             ui.horizontal(|ui| {
@@ -409,17 +422,31 @@ impl OrderPanel {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let w = (ui.available_width() - 8.0) / 2.0;
-                if kit::button(ui, l1, Look::Fill(up()), H_LG, Some(w), can_trade).clicked() { go = Some(p1); }
-                if kit::button(ui, l2, Look::Fill(dn()), H_LG, Some(w), can_trade).clicked() { go = Some(p2); }
+                if kit::button(ui, l1, Look::Fill(up()), 32.0, Some(w), can_trade).clicked() { go = Some(p1); }
+                if kit::button(ui, l2, Look::Fill(dn()), 32.0, Some(w), can_trade).clicked() { go = Some(p2); }
             });
-            if self.close { pair_row(ui, [(l("Max"), format!("{} {base}", fmt_qty(held(p1))), fg()), (l("Max"), format!("{} {base}", fmt_qty(held(p2))), fg())], false); }
-            else {
+            // per side, Binance-style: "label value" pairs, the buy side flush left, the sell side
+            // flush right; est. liquidation (isolated estimate), margin, and what can be opened
+            ui.spacing_mut().item_spacing.y = 3.0;
+            if self.close {
+                side_facts(ui, &[(l("Max"), format!("{} {base}", fmt_qty(held(p1))), format!("{} {base}", fmt_qty(held(p2))), "")]);
+            } else {
+                // a unified / portfolio-margin account liquidates on the whole account (uniMMR,
+                // margin ratio): no per-order price exists, so none is shown. Otherwise an
+                // isolated-margin estimate with a 0.5 % maintenance rate, marked ≈.
+                let bal = st["balances"].as_array().and_then(|a| a.iter().find(|b| s(&b["ex"]) == venue));
+                let acct_wide = bal.is_some_and(|b| !b["uni_mmr"].is_null() || !b["mm_rate"].is_null());
+                let liq = |long: bool| if !acct_wide && qty_v > 0.0 && ref_px > 0.0 {
+                    let m = 1.0 / lev - 0.005;
+                    format!("≈{} USDT", fmt_px(ref_px * if long { 1.0 - m } else { 1.0 + m }))
+                } else { "-- USDT".into() };
+                let liq_tip = if acct_wide { l("Unified account: liquidation is decided on the whole account (UniMMR / margin ratio in the account card), not per order.") }
+                    else { l("Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ.") };
                 let cost = format!("{} USDT", usd(qty_v * ref_px / lev));
-                pair_row(ui, [(l("Cost"), cost.clone(), fg()), (l("Cost"), cost, fg())], false);
-                ui.add_space(-6.0);
-                let mx = format!("{} {base}", fmt_qty(max_qty));
-                pair_row(ui, [(l("Max"), mx.clone(), fg()), (l("Max"), mx, fg())], false);
+                let can = format!("{} USDT", usd(max_qty * ref_px));
+                side_facts(ui, &[(l("Est. liq. price"), liq(true), liq(false), liq_tip), (l("Margin"), cost.clone(), cost, ""), (l("Max open"), can.clone(), can, "")]);
             }
+            ui.spacing_mut().item_spacing.y = 6.0;
             if read_only { kit::note(ui, l("This API key is read-only: trading is disabled. Allow trading for the key on the exchange to place orders."), WARN); }
             if let Some(p) = go { self.submit(p, st, ref_px, use_bbo, typed_price, call); }
             self.summary(ui, t, &base, qty_v * ref_px, use_bbo, has_key, qty_v);
@@ -499,14 +526,14 @@ impl OrderPanel {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let w = ui.available_width() - 82.0;
-            ui.allocate_ui(egui::vec2(w, 32.0), |ui| {
+            ui.allocate_ui(egui::vec2(w, 28.0), |ui| {
                 // a More type selected: no segment is lit; clicking one switches back
                 let mut k = (!in_more).then_some(self.kind);
                 let items: Vec<(Option<Kind>, &str)> = main.iter().map(|(k, n)| (Some(*k), *n)).collect();
-                if kit::segments(ui, &mut k, &items, 32.0) { if let Some(k) = k { self.kind = k; } }
+                if kit::segments(ui, &mut k, &items, 28.0) { if let Some(k) = k { self.kind = k; } }
             });
             let label = if in_more { more.iter().find(|m| m.0 == self.kind).map_or(l("More"), |m| m.1) } else { l("More") };
-            let r = secondary(ui, &format!("{label} ▾"), 32.0, Some(f32::INFINITY), in_more, true);
+            let r = secondary(ui, &format!("{label} ▾"), 28.0, Some(f32::INFINITY), in_more, true);
             egui::Popup::menu(&r).show(|ui| {
                 for (k, name) in &more { if ui.selectable_label(self.kind == *k, *name).clicked() { self.kind = *k; ui.close(); } }
             });
@@ -525,10 +552,10 @@ impl OrderPanel {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         let w = ui.available_width() - if bbo_levels.is_empty() { 0.0 } else { 54.0 };
-                        ui.allocate_ui(egui::vec2(w, 32.0), |ui| {
+                        ui.allocate_ui(egui::vec2(w, 28.0), |ui| {
                             if use_bbo {
                                 let name = |q: bool, lv: u64| format!("{} {lv}", if q { l("Queue") } else { l("Counterparty") });
-                                let r = kit::button(ui, &format!("BBO · {} ▾", name(self.bbo_queue, self.bbo_level)), Look::Secondary, 32.0, Some(f32::INFINITY), true)
+                                let r = kit::button(ui, &format!("BBO · {} ▾", name(self.bbo_queue, self.bbo_level)), Look::Secondary, 28.0, Some(f32::INFINITY), true)
                                     .on_hover_text(if self.bbo_queue { l("Own side of the book: rests as a maker at the best price.") } else { l("Opposite side of the book: fills like a taker at the price the venue sees on arrival.") });
                                 egui::Popup::menu(&r).show(|ui| {
                                     for q in [false, true] {
@@ -540,7 +567,7 @@ impl OrderPanel {
                                 enter |= kit::field(ui, l("Price"), &mut self.price, "USDT", "price", false).1;
                             }
                         });
-                        if !bbo_levels.is_empty() && secondary(ui, "BBO", 32.0, Some(ui.available_width()), self.bbo_on, true)
+                        if !bbo_levels.is_empty() && secondary(ui, "BBO", 28.0, Some(ui.available_width()), self.bbo_on, true)
                             .on_hover_text(l("Priced by the venue's book when the order arrives (Counterparty: opposite side; Queue: own side; number: book level)")).clicked() { self.bbo_on = !self.bbo_on; }
                     });
                     row(ui, l("Time in force"), |ui| {
@@ -568,8 +595,8 @@ impl OrderPanel {
             Kind::Trailing => {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.allocate_ui(egui::vec2(ui.available_width() - 38.0, 32.0), |ui| enter |= kit::field(ui, l("Callback rate"), &mut self.callback, "%", "cb", false).1);
-                    let r = kit::button(ui, "▾", Look::Secondary, 32.0, Some(32.0), true);
+                    ui.allocate_ui(egui::vec2(ui.available_width() - 34.0, 28.0), |ui| enter |= kit::field(ui, l("Callback rate"), &mut self.callback, "%", "cb", false).1);
+                    let r = kit::button(ui, "▾", Look::Secondary, 28.0, Some(28.0), true);
                     egui::Popup::menu(&r).show(|ui| { for v in ["0.5", "1.0", "2.0", "5.0"] { if ui.selectable_label(self.callback == v, format!("{v}%")).clicked() { self.callback = v.into(); ui.close(); } } });
                 });
                 enter |= kit::field(ui, l("Activation price (optional)"), &mut self.activation, "USDT", "act", false).1;
@@ -688,9 +715,16 @@ impl OrderPanel {
     fn summary(&self, ui: &mut Ui, t: &Value, base: &str, notional: f64, use_bbo: bool, has_key: bool, qty_v: f64) {
         let taker = matches!(self.kind, Kind::Market | Kind::Twap | Kind::Trailing) || (self.kind == Kind::Stop && !self.stop_limit)
             || (use_bbo && !self.bbo_queue) || (self.kind == Kind::Limit && matches!(self.tif, "ioc" | "fok"));
-        let rate = f(&t["fee"][if taker { "taker" } else { "maker" }]).unwrap_or(0.0);
+        let (mk, tk) = (f(&t["fee"]["maker"]).unwrap_or(0.0), f(&t["fee"]["taker"]).unwrap_or(0.0));
+        let rate = if taker { tk } else { mk };
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{} {:.3}%", if taker { l("Taker") } else { l("Maker") }, rate * 100.0)).font(mono(11.0)).color(dim()));
+            // both rates; the one this order pays is brighter
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for (name, r, on) in [(l("Maker"), mk, !taker), (l("Taker"), tk, taker)] {
+                ui.label(RichText::new(name).font(prop(11.0)).color(if on { mu() } else { dim() }));
+                ui.label(RichText::new(format!("{:.3}%", r * 100.0)).font(mono_m(11.0)).color(if on { fg() } else { dim() }));
+                ui.add_space(6.0);
+            }
             if notional > 0.0 {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(format!("{} USDT · {} ≈ {}", usd(notional), l("fee"), fmt_dp(notional * rate, 3))).font(mono(11.0)).color(dim()));

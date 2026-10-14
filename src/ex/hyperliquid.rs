@@ -102,6 +102,80 @@ fn next_hour(now: i64) -> i64 { (now / 3_600_000 + 1) * 3_600_000 }
 
 fn lvl(l: &Value) -> (f64, f64) { (num(&l["px"]), num(&l["sz"])) }
 
+/// Top-of-book snapshots with order counts -> `Counts` of the levels that changed. Levels gone
+/// inside the range the new snapshot still covers are sent with 0 orders; ones past its edge
+/// just left the window.
+#[derive(Default)]
+struct CountDiff { prev: [std::collections::BTreeMap<i64, (f64, f64, u32)>; 2], started: bool }
+
+impl CountDiff {
+    fn emit(&mut self, e: &Emit, coin: &str, ts: i64, levels: &Value) {
+        let mut out: [Vec<(f64, f64, u32)>; 2] = Default::default();
+        for i in 0..2 {
+            let cur: std::collections::BTreeMap<i64, (f64, f64, u32)> = levels[i].as_array().into_iter().flatten()
+                .map(|l| { let (p, q) = lvl(l); (key(p), (p, q, l["n"].as_u64().unwrap_or(0) as u32)) }).collect();
+            // bids (i = 0) cover prices down to their lowest, asks up to their highest
+            let edge = if i == 0 { cur.keys().next().copied() } else { cur.keys().next_back().copied() };
+            for (k, lv) in &cur { if !self.started || self.prev[i].get(k) != Some(lv) { out[i].push(*lv); } }
+            for (k, (p, _, _)) in &self.prev[i] {
+                let inside = edge.is_some_and(|e| if i == 0 { *k >= e } else { *k <= e });
+                if inside && !cur.contains_key(k) { out[i].push((*p, 0.0, 0)); }
+            }
+            self.prev[i] = cur;
+        }
+        let [bids, asks] = out;
+        let snapshot = !std::mem::replace(&mut self.started, true);
+        e.send(coin, ts, Event::Counts { snapshot, bids, asks });
+    }
+}
+
+/// Inferred L3 from the public l2Book: the top 20 levels with order counts, a full snapshot every
+/// few seconds (the UI gateway's faster deltas carry no counts). Started with the book view.
+pub fn spawn_l3(sub: &Sub, tx: Tx) -> JoinHandle<()> {
+    let e = Emit { ex: Exchange::Hyperliquid, market: Market::Perp, tx };
+    let coin = sub.base.to_uppercase();
+    let mut diff = CountDiff::default();
+    let spec = Spec::new("hyperliquid l3", "wss://api.hyperliquid.xyz/ws")
+        .sub(json!({"method": "subscribe", "subscription": {"type": "l2Book", "coin": coin}}).to_string())
+        .ping(Duration::from_secs(30), r#"{"method":"ping"}"#);
+    tokio::spawn(ws::run(spec, move |f| {
+        let Frame::Text(t) = f else { return };
+        let Ok(v) = serde_json::from_str::<Value>(t) else { return };
+        if v["channel"] != "l2Book" { return }
+        diff.emit(&e, &coin, v["data"]["time"].as_i64().unwrap_or(0), &v["data"]["levels"]);
+    }))
+}
+
+/// The same inference from Flowscan's node-fed book (third party, opt-in in Settings): full top
+/// levels with order counts about every 130 ms, so far fewer updates are ambiguous. Its token
+/// lives about two minutes, so every (re)connect fetches a new one.
+/// ponytail: an undocumented endpoint of someone else's site; when it fails the loop just retries
+/// with backoff (turn the setting off to go back to the public l2Book).
+pub fn spawn_l3_flowscan(sub: &Sub, tx: Tx) -> JoinHandle<()> {
+    let e = Emit { ex: Exchange::Hyperliquid, market: Market::Perp, tx };
+    let coin = sub.base.to_uppercase();
+    tokio::spawn(async move {
+        let mut wait = 2u64;
+        loop {
+            let tok = ws::post_json("https://www.flowscan.xyz/api/l4-book/token", &json!({})).await.ok().and_then(|v| v["token"].as_str().map(String::from));
+            if let Some(tok) = tok {
+                let spec = Spec::new("flowscan l4", format!("wss://api.flossington.com/l4/ws?token={tok}"))
+                    .sub(json!({"type": "sub", "coin": coin, "nSigFigs": null, "mantissa": null}).to_string());
+                let mut diff = CountDiff::default();
+                let (e2, c2) = (e.clone(), coin.clone());
+                let r = ws::once(&spec, move |f| {
+                    let Frame::Text(t) = f else { return true };
+                    let Ok(v) = serde_json::from_str::<Value>(t) else { return true };
+                    if v["type"] == "book" { diff.emit(&e2, &c2, v["time"].as_i64().unwrap_or(0), &v["levels"]); }
+                    true
+                }).await;
+                if let Err(err) = r { eprintln!("[flowscan l4] {err:#}"); } else { wait = 2; }
+            }
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            wait = (wait * 2).min(60);
+        }
+    })
+}
 /// Book grouping the UI shows, in price units: the grouped l2Book session follows it.
 static GROUP: std::sync::OnceLock<tokio::sync::watch::Sender<f64>> = std::sync::OnceLock::new();
 fn group() -> &'static tokio::sync::watch::Sender<f64> { GROUP.get_or_init(|| tokio::sync::watch::channel(0.0).0) }

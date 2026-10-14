@@ -220,3 +220,7 @@ Est. liquidations at = 预估强平 @
 Longs = 多头
 Shorts = 空头
 above: shorts · below: longs = 上方 = 空头强平 · 下方 = 多头强平
+Est. liq. price = 强平价格
+Max open = 可开
+Unified account: liquidation is decided on the whole account (UniMMR / margin ratio in the account card), not per order. = 统一账户：强平按整个账户判断（看账户卡片里的 UniMMR / 保证金率），不是按单笔订单。
+Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ. = 按逐仓、当前杠杆、0.5% 维持保证金率估算；交易所的实际数值可能不同。

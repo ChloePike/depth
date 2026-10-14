@@ -601,7 +601,7 @@ impl Agg {
                 }
                 fp.entry((Some(ex), mk)).or_default().add(ts, *px, *qty, *side);
                 // taker volume per level for the L3 inference (only books that infer)
-                if let Some(b) = l3.get_mut(&(ex, mk)).filter(|_| ex == Exchange::Okx) { b.trade(*px, *qty, *side == Side::Buy); }
+                if let Some(b) = l3.get_mut(&(ex, mk)).filter(|_| matches!(ex, Exchange::Okx | Exchange::Hyperliquid)) { b.trade(*px, *qty, *side == Side::Buy); }
                 fp.entry((None, mk)).or_default().add(ts, px * k_usdt, *qty, *side);
                 // the cross-venue bar is in USDT; the venue bar stays in native quote
                 v.last = Some(*px);

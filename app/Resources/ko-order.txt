@@ -220,3 +220,7 @@ Est. liquidations at = 예상 청산 @
 Longs = 롱
 Shorts = 숏
 above: shorts · below: longs = 위 = 숏 청산 · 아래 = 롱 청산
+Est. liq. price = 청산가
+Max open = 최대 오픈
+Unified account: liquidation is decided on the whole account (UniMMR / margin ratio in the account card), not per order. = 통합 계정: 청산은 계정 전체(계정 카드의 UniMMR / 증거금률)로 결정되며 주문별이 아닙니다.
+Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ. = 격리, 현재 레버리지, 유지율 0.5% 기준 추정치입니다. 거래소 값과 다를 수 있습니다.

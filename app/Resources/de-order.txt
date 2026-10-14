@@ -220,3 +220,7 @@ Est. liquidations at = Geschätzte Liquidationen bei
 Longs = Longs
 Shorts = Shorts
 above: shorts · below: longs = oben: Shorts · unten: Longs
+Est. liq. price = Geschätzte Liq.
+Max open = Max. eröffnen
+Unified account: liquidation is decided on the whole account (UniMMR / margin ratio in the account card), not per order. = Einheitskonto: Liquidation hängt am ganzen Konto (UniMMR / Margin-Quote), nicht an der einzelnen Order.
+Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ. = Schätzung isoliert bei diesem Hebel und 0,5 % Maintenance; der Wert der Börse kann abweichen.

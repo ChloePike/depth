@@ -280,7 +280,7 @@ impl App {
         picker.open = env("T1_PICK").is_some();
         // T1_BOOK_PANE=<0..4>: book, trades, venues, quant, L3 (screenshots, as in the SwiftUI host)
         let mut book = book::BookView::default();
-        match env("T1_BOOK_PANE").and_then(|s| s.parse::<u8>().ok()) { Some(1) => book.native_set(&serde_json::json!({"trades": true})), Some(p @ 2..=4) => book.page = p, _ => {} }
+        match env("T1_BOOK_PANE").and_then(|s| s.parse::<u8>().ok()) { Some(1) => book.native_set(&serde_json::json!({"trades": true})), Some(p @ 2..=3) => book.page = p, _ => {} }
         if let Some(tf) = env("T1_TF").and_then(|s| s.parse().ok()) { chart.tf = tf; }
         let layout = env("T1_LAYOUT").or(st.layout).unwrap_or_else(|| "1".into());
         App {
@@ -692,7 +692,7 @@ impl App {
                 let panel = if self.hosted { panel.resizable(false).exact_size(300.0) } else { panel.resizable(true).default_size(320.0) };
                 let pane = if self.hosted { 0 } else { self.book.pane() };
                 // the L3 page starts the exact order feeds (REST polls) only while someone looks at it
-                if pane == book::L3_PAGE { self.eng.wants_l3.store(true, std::sync::atomic::Ordering::Relaxed); }
+                if self.mode == Market::Perp && self.book.wants_l3() { self.eng.wants_l3.store(true, std::sync::atomic::Ordering::Relaxed); }
                 let r = if pane == 2 || pane == 3 {
                     // the venue_share op takes the agg lock itself
                     drop(a);
@@ -796,6 +796,11 @@ impl App {
         let n = layout_cells(&self.layout, egui::Rect::NOTHING).len();
         let tfs: Vec<i64> = self.others.iter().filter(|o| o.0 < n).map(|o| o.1.tf).collect();
         for tf in tfs { self.eng.ensure_tf(chart::native_tf(tf) as u32, &ctx); }
+        if self.eng.l3_flowscan != self.prefs.hl_flowscan {
+            self.eng.l3_flowscan = self.prefs.hl_flowscan;
+            // a running Hyperliquid L3 feed switches source now
+            self.eng.wants_l3.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         if self.eng.wants_options.swap(false, std::sync::atomic::Ordering::Relaxed) { self.eng.ensure(Market::Option); }
         if self.eng.wants_l3.swap(false, std::sync::atomic::Ordering::Relaxed) { self.eng.ensure_l3(); }
     }

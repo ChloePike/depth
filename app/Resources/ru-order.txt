@@ -220,3 +220,7 @@ Est. liquidations at = Оценка ликвидаций на
 Longs = Лонги
 Shorts = Шорты
 above: shorts · below: longs = выше: шорты · ниже: лонги
+Est. liq. price = Оценка ликв.
+Max open = Макс. открыть
+Unified account: liquidation is decided on the whole account (UniMMR / margin ratio in the account card), not per order. = Единый счёт: ликвидация определяется по всему счёту (UniMMR / уровень маржи), а не по ордеру.
+Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ. = Оценка для изолированной позиции при этом плече и 0,5% поддержки; значение биржи может отличаться.
