@@ -175,6 +175,8 @@ pub struct Engine {
     tx: Option<UnboundedSender<Msg>>,
     started: Vec<Market>,
     tfs: Vec<u32>,
+    /// live connector tasks per venue, so one venue can be switched off or on alone
+    venue_tasks: HashMap<Exchange, Vec<tokio::task::JoinHandle<()>>>,
     /// symbol universe for the picker, by 24h quote volume (kept across base switches)
     pub tickers: Arc<Mutex<Vec<Ticker>>>,
     /// (venue, "BTCUSDT") -> funding, for every listed perp (positions in symbols not on screen)
@@ -203,7 +205,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new() -> Self {
-        Engine { agg: Default::default(), stats: Default::default(), base: String::new(), rt: None, tx: None, started: vec![], tfs: vec![], tickers: Default::default(), funding: Default::default(), signals: Default::default(), account: {
+        Engine { agg: Default::default(), stats: Default::default(), base: String::new(), rt: None, tx: None, started: vec![], tfs: vec![], venue_tasks: HashMap::new(), tickers: Default::default(), funding: Default::default(), signals: Default::default(), account: {
             let mut a = Account::default();
             for ex in trade::TRADABLE { if let Some(k) = trade::keychain(ex) { a.keys.insert(ex, k); } }
             Arc::new(Mutex::new(a))
@@ -219,6 +221,7 @@ impl Engine {
         self.stats = Arc::new(Mutex::new(Stats { hist_pending: self.venues().len() * HISTORY_MARKETS.len(), hist_total: self.venues().len() * HISTORY_MARKETS.len(), ..Default::default() }));
         self.started = vec![];
         self.tfs = vec![];
+        self.venue_tasks.clear();
         let _guard = rt.enter();
 
         // pump: apply messages in batches under one lock
@@ -524,7 +527,55 @@ impl Engine {
     fn spawn_market(&mut self, market: Market, tx: &UnboundedSender<Msg>) {
         if self.started.contains(&market) { return; }
         self.started.push(market);
-        for e in self.venues() { ex::spawn(e, &self.sub(market), tx.clone()); }
+        for e in self.venues() {
+            let hs = ex::spawn(e, &self.sub(market), tx.clone());
+            self.venue_tasks.entry(e).or_default().extend(hs);
+        }
+    }
+
+    /// Switch one venue off (its connections close, its data leaves the cross-venue views) or on
+    /// (it connects and loads its own history); every other venue keeps its connections.
+    pub fn set_venue(&mut self, e: Exchange, on: bool, ctx: &eframe::egui::Context) {
+        if on == !self.off.contains(&e) { return; }
+        if !on {
+            self.off.insert(e);
+            for h in self.venue_tasks.remove(&e).unwrap_or_default() { h.abort(); }
+            self.agg.lock().unwrap().drop_venue(e);
+            return;
+        }
+        self.off.remove(&e);
+        let (Some(rt), Some(tx)) = (self.rt.as_ref(), self.tx.clone()) else { return };
+        let _guard = rt.enter();
+        {
+            let mut a = self.agg.lock().unwrap();
+            for m in HISTORY_MARKETS { a.expect_history(e, m); }
+        }
+        for market in HISTORY_MARKETS {
+            let (agg, stats, ctx, sub) = (self.agg.clone(), self.stats.clone(), ctx.clone(), self.sub(market));
+            rt.spawn(async move {
+                let h = cached_history(e, &sub, 1, &stats).await;
+                let mut a = agg.lock().unwrap();
+                a.load_history(e, market, &h);
+                a.finish_history();
+                ctx.request_repaint();
+            });
+        }
+        for &tf in &self.tfs {
+            for market in HISTORY_MARKETS {
+                let (agg, stats, ctx, sub) = (self.agg.clone(), self.stats.clone(), ctx.clone(), self.sub(market));
+                rt.spawn(async move {
+                    let h = cached_history(e, &sub, tf, &stats).await;
+                    let mut a = agg.lock().unwrap();
+                    a.load_history_tf(e, market, tf, &h);
+                    a.finish_history_tf(tf);
+                    ctx.request_repaint();
+                });
+            }
+        }
+        for &market in &self.started {
+            let hs = ex::spawn(e, &self.sub(market), tx.clone());
+            self.venue_tasks.entry(e).or_default().extend(hs);
+        }
     }
 
     /// Fetch native `tf`-minute history for every venue the first time a timeframe is shown.

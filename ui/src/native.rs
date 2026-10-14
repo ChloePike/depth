@@ -211,8 +211,11 @@ impl App {
             "set_mode" => { if let Some(m) = Market::parse(&s("mode")) { self.pending_mode = Some(m); } }
             "toggle_venue" => {
                 let e = exv()?;
-                if !self.eng.off.remove(&e) { if self.eng.off.len() + 1 >= Exchange::ALL.len() { return Err("keep at least one venue".into()); } self.eng.off.insert(e); }
-                self.pending_restart = true;
+                let on = self.eng.off.contains(&e);
+                if !on && self.eng.off.len() + 1 >= Exchange::ALL.len() { return Err("keep at least one venue".into()); }
+                // only this venue connects / disconnects; the others keep streaming
+                self.eng.set_venue(e, on, ctx);
+                if !on { if self.chart.src == Some(e) { self.chart.src = None; } if self.book.src == Some(e) { self.book.src = None; } }
             }
             "set_trade_venue" => { let e = exv()?; if !trade::TRADABLE.contains(&e) { return Err("not tradable".into()); } self.trade.ex = e; self.route.fixed = e; }
             "cache_size" => return Ok(json!({"bytes": depth::sys::cache_bytes()})),

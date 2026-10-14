@@ -830,6 +830,20 @@ impl Agg {
 
     /// Announce that history for this venue is being fetched: until `load_history` is called for
     /// it, its trades/marks/OI/liquidations/ratios are queued (books and BBOs apply immediately).
+    /// A venue switched off at runtime: its state goes and the cross-venue series are rebuilt
+    /// from the venues that remain (the others keep streaming untouched).
+    pub fn drop_venue(&mut self, ex: Exchange) {
+        self.venues.retain(|(e, _), _| *e != ex);
+        self.series.retain(|(e, _), _| *e != Some(ex));
+        self.fp.retain(|(e, _), _| *e != Some(ex));
+        self.pending.retain(|(e, _), _| *e != ex);
+        self.seeded.retain(|(e, _)| *e != ex);
+        for set in self.tf.values_mut() { set.venues.retain(|(e, _), _| *e != ex); }
+        let tfs: Vec<u32> = self.tf.keys().copied().collect();
+        for tf in tfs { self.finish_history_tf(tf); }
+        self.finish_history();
+    }
+
     pub fn expect_history(&mut self, ex: Exchange, market: Market) { self.pending.entry((ex, market)).or_default(); }
 
     /// Seed one venue's series with REST history, then replay its queued live messages.

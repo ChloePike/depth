@@ -397,9 +397,8 @@ impl App {
         }
     }
 
-    /// Bottom status bar; returns true when a venue was switched on/off (engine must restart).
-    fn status(&mut self, ui: &mut Ui, stats: &engine::Stats) -> bool {
-        let mut restart = false;
+    /// Bottom status bar (venue switches connect / disconnect only that venue).
+    fn status(&mut self, ui: &mut Ui, stats: &engine::Stats) {
         let now = Instant::now();
         if now.duration_since(self.rate.0) >= Duration::from_secs(1) {
             // saturating: switching the base asset resets the engine's counters
@@ -417,10 +416,11 @@ impl App {
                 let lat_col = match lat { Some(l) if l < 150.0 => up(), Some(l) if l < 400.0 => WARN, Some(_) => dn(), None => dim() };
                 let resp = status_venue(ui, e, on, alive, lat, lat_col)
                     .on_hover_text(format!("{e:?}: {}", if on { t("status.scope_on") } else { t("status.scope_off") }));
-                // switching a venue off disconnects it: the engine restarts without it
-                if resp.clicked() {
-                    if on && self.eng.off.len() + 1 < Exchange::ALL.len() { self.eng.off.insert(e); restart = true; }
-                    else if !on { self.eng.off.remove(&e); restart = true; }
+                // switching a venue off disconnects only that venue; on connects only it
+                if resp.clicked() && (!on || self.eng.off.len() + 1 < Exchange::ALL.len()) {
+                    self.eng.set_venue(e, !on, ui.ctx());
+                    if on && self.chart.src == Some(e) { self.chart.src = None; }
+                    if on && self.book.src == Some(e) { self.book.src = None; }
                 }
             }
             ui.separator();
@@ -446,7 +446,6 @@ impl App {
                 ui.label(RichText::new(format!("{} {}", tz_label(local_offset_ms() / 60_000), hms(now_ms()))).font(mono(10.5)).color(mu()));
             });
         });
-        restart
     }
 
     /// T1_SHOT=<png path> [T1_SHOT_AFTER=<s>]: save one screenshot and exit (used for visual checks).
@@ -646,7 +645,7 @@ impl App {
             if !self.hosted {
             egui::Panel::top("hdr").show_separator_line(false).frame(Frame::new().fill(bg()).inner_margin(Margin::symmetric(10, 3)))
                 .show(ui, |ui| self.header(ui, &a, &hdr_st, &mut new_base, &mut new_mode));
-            egui::Panel::bottom("status").show_separator_line(false).frame(flat(12)).exact_size(24.0).show(ui, |ui| restart = self.status(ui, &stats));
+            egui::Panel::bottom("status").show_separator_line(false).frame(flat(12)).exact_size(24.0).show(ui, |ui| self.status(ui, &stats));
             drop(stats);
             // ops from the account strip and the order panel take the agg lock themselves
             // (route planning reads books): never hold it across them
