@@ -6,6 +6,8 @@ mod order;
 mod engine;
 mod options;
 mod picker;
+mod top;
+mod venues;
 pub mod theme;
 mod trade;
 mod wallet;
@@ -217,6 +219,9 @@ pub struct App {
     order: order::OrderPanel,
     /// order panel shown (Perp; Cmd-Opt-I or the header button), persisted
     order_panel: bool,
+    /// header price flash; the book column's Venues / Quant pages
+    top: top::TopBar,
+    venue_pages: venues::VenuePages,
 }
 
 /// Cell rects of a chart layout: "2" side by side, "2v" stacked, "3" one left and two right,
@@ -270,20 +275,23 @@ impl App {
         if let Some(n) = env("T1_ACC_TAB").and_then(|s| s.parse().ok()) { trade.set_tab(n); }
         let mut picker = picker::Picker::default();
         picker.open = env("T1_PICK").is_some();
+        // T1_BOOK_PANE=<0..3>: book, trades, venues, quant (screenshots, as in the SwiftUI host)
+        let mut book = book::BookView::default();
+        match env("T1_BOOK_PANE").and_then(|s| s.parse::<u8>().ok()) { Some(1) => book.native_set(&serde_json::json!({"trades": true})), Some(p @ 2..=3) => book.page = p, _ => {} }
         if let Some(tf) = env("T1_TF").and_then(|s| s.parse().ok()) { chart.tf = tf; }
         let layout = env("T1_LAYOUT").or(st.layout).unwrap_or_else(|| "1".into());
         App {
-            eng, prefs, settings: Default::default(), saved: (saved, Instant::now()), mode, chart, book: Default::default(), opt: Default::default(), picker, trade,
+            eng, prefs, settings: Default::default(), saved: (saved, Instant::now()), mode, chart, book, opt: Default::default(), picker, trade,
             rate: (Instant::now(), 0, 0.0),
             shot: env("T1_SHOT").map(|p| (p, env("T1_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(30.0))),
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
             route: st.route.clone().unwrap_or_default(), pending_base: None, pending_mode: None, pending_restart: false, book_w: 0.0,
             layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(),
-            st: (Default::default(), Instant::now(), true), order: Default::default(), order_panel: st.order_panel.unwrap_or(true),
+            st: (Default::default(), Instant::now(), true), order: Default::default(), order_panel: st.order_panel.unwrap_or(true), top: Default::default(), venue_pages: Default::default(),
         }
     }
 
-    fn header(&mut self, ui: &mut Ui, a: &Agg, new_base: &mut Option<String>, new_mode: &mut Option<Market>) {
+    fn header(&mut self, ui: &mut Ui, a: &Agg, st: &serde_json::Value, new_base: &mut Option<String>, new_mode: &mut Option<Market>) {
         // the header is the title bar: drag empty space to move, double-click to maximize
         let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
         // own window only: the SwiftUI host's title bar handles dragging and zooming
@@ -303,37 +311,9 @@ impl App {
             for (m, k) in MODES {
                 if tab(ui, t(k), self.mode == m, 13.0).clicked() && self.mode != m { *new_mode = Some(m); }
             }
-            ui.spacing_mut().item_spacing.x = 18.0;
-            ui.add_space(18.0);
+            ui.add_space(14.0);
             let book_market = match self.mode { Market::Margin | Market::Option => Market::Spot, m => m };
-            let last = a.mid(book_market);
-            ui.label(RichText::new(last.map(fmt_px).unwrap_or("-".into())).font(display(20.0)).color(fg()));
-            let stat = |ui: &mut Ui, k: &'static str, v: String, col: Color32| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.label(RichText::new(t(k)).font(prop(10.5)).color(dim()));
-                    ui.label(RichText::new(v).font(mono(12.0)).color(col));
-                }).response
-            };
-            let sc = |v: Option<f64>| match v { Some(x) if x > 0.0 => up(), Some(x) if x < 0.0 => dn(), _ => fg() };
-            if self.mode == Market::Perp {
-                let (oi, oi_usd) = a.oi_total();
-                stat(ui, "hdr.oi", format!("{} ({:.2}B$)", fmt_qty(oi), oi_usd / 1e9), fg());
-                let (fp, fs) = (a.funding_oi_weighted(), a.funding_settled_oi_weighted());
-                stat(ui, "hdr.funding_pred", fp.map(|f| format!("{:+.4}bp/h", f * 1e4)).unwrap_or("-".into()), sc(fp))
-                    .on_hover_text(fp.map(|f| format!("{} {:+.2}%", t("hdr.apr"), f * 24.0 * 365.0 * 100.0)).unwrap_or_default());
-                stat(ui, "hdr.funding_settled", fs.map(|f| format!("{:+.4}bp/h", f * 1e4)).unwrap_or("-".into()), sc(fs));
-                let b = {
-                    let mut v: Vec<f64> = a.venues.keys().filter(|(_, m)| *m == Market::Perp).filter_map(|(e, _)| a.basis_bps(*e)).collect();
-                    v.sort_by(f64::total_cmp);
-                    v.get(v.len() / 2).copied()
-                };
-                stat(ui, "hdr.basis", b.map(|x| format!("{x:+.2}bp")).unwrap_or("-".into()), sc(b));
-            }
-            if self.mode != Market::Option {
-                let c = a.cvd_total(book_market);
-                stat(ui, "hdr.cvd", format!("{c:+.1}"), sc(Some(c)));
-            }
+            self.top.price(ui, a.mid(book_market));
             // settings gear at the far right of the title bar
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(6.0);
@@ -363,9 +343,16 @@ impl App {
                 p.vline(x, b.y_range().shrink(1.0), egui::Stroke::new(1.4, col));
                 if self.order_panel { p.rect_filled(egui::Rect::from_min_max(egui::pos2(x, b.top() + 1.5), b.max - egui::vec2(1.5, 1.5)), 1, col.linear_multiply(0.5)); }
                 if resp.on_hover_text(l("Show or hide the order panel (Option-Command-I)")).clicked() { self.order_panel = !self.order_panel; }
+                ui.add_space(4.0);
+                top::TopBar::clock(ui);
             });
 
         });
+        // market strip under the title bar (the SwiftUI host's TopStats); scrolls when the window is narrow
+        egui::ScrollArea::horizontal().id_salt("hdr_stats").auto_shrink([false, true])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| ui.horizontal(|ui| { ui.add_space(4.0); top::TopBar::stats(ui, st, self.mode); }));
+        ui.add_space(2.0);
     }
 
     /// Keyboard shortcuts of the SwiftUI menus (App.swift): Cmd-, settings, Cmd-Opt-I order panel,
@@ -378,12 +365,7 @@ impl App {
         if k(M::COMMAND, Key::Comma) { self.settings.open = true; }
         if self.settings.open { return; }
         if k(M::COMMAND | M::ALT, Key::I) { self.order_panel = !self.order_panel; }
-        if k(M::COMMAND, Key::K) { self.picker.open_search(); }
-        let base = self.eng.base.clone();
-        for (key, d) in [(Key::OpenBracket, -1), (Key::CloseBracket, 1)] {
-            if k(M::COMMAND, key) { if let Some(b) = self.picker.step(&base, d).filter(|b| *b != base) { self.pending_base = Some(b); } }
-        }
-        if k(M::COMMAND, Key::D) { self.picker.toggle_fav(&base); }
+        // Cmd-K, Cmd-[ / Cmd-], Cmd-D are the pair picker's own (picker.rs)
         const NUM: [Key; 6] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6];
         for (i, (m, _)) in MODES.iter().enumerate() {
             if k(M::COMMAND, NUM[i]) && self.mode != *m { self.pending_mode = Some(*m); }
@@ -650,6 +632,8 @@ impl App {
             if self.eng.base != want { new_base = Some(want.to_string()); eprintln!("[cycle] -> {want}"); }
         }
         {
+            // the header's stats come from the state document, built before the agg lock (it takes it itself)
+            let hdr_st = if self.hosted { Default::default() } else { self.state_doc() };
             let agg = self.eng.agg.clone();
             let mut a = agg.lock().unwrap();
             let stats_arc = self.eng.stats.clone();
@@ -660,7 +644,7 @@ impl App {
 
             if !self.hosted {
             egui::Panel::top("hdr").show_separator_line(false).frame(Frame::new().fill(bg()).inner_margin(Margin::symmetric(10, 3)))
-                .show(ui, |ui| self.header(ui, &a, &mut new_base, &mut new_mode));
+                .show(ui, |ui| self.header(ui, &a, &hdr_st, &mut new_base, &mut new_mode));
             egui::Panel::bottom("status").show_separator_line(false).frame(flat(12)).exact_size(24.0).show(ui, |ui| restart = self.status(ui, &stats));
             drop(stats);
             // without keys the account strip is just its tab row and a hint
@@ -692,8 +676,28 @@ impl App {
             if self.mode != Market::Option {
                 let panel = egui::Panel::right("book").show_separator_line(theme::native()).frame(card(8));
                 let panel = if self.hosted { panel.resizable(false).exact_size(300.0) } else { panel.resizable(true).default_size(320.0) };
-                let r = panel
-                    .show(ui, |ui| self.book.show(ui, &a, self.mode, &self.eng.venues().into_iter().collect(), &self.eng.base.clone()));
+                let pane = if self.hosted { 0 } else { self.book.pane() };
+                let r = if pane >= 2 {
+                    // the venue_share op takes the agg lock itself
+                    drop(a);
+                    let st = self.state_doc();
+                    let mut vp = std::mem::take(&mut self.venue_pages);
+                    let r = panel.show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        self.book.tabs(ui);
+                        ui.horizontal(|ui| {
+                            ui.set_height(26.0);
+                            if pane == 2 { ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| vp.window_picker(ui)); }
+                        });
+                        ui.add_space(2.0);
+                        if pane == 2 { vp.venues(ui, &mut |v| self.call(&ctx, &v)); } else { vp.quant(ui, &st["quant"]); }
+                    });
+                    self.venue_pages = vp;
+                    a = agg.lock().unwrap();
+                    r
+                } else {
+                    panel.show(ui, |ui| self.book.show(ui, &a, self.mode, &self.eng.venues().into_iter().collect(), &self.eng.base.clone()))
+                };
                 self.book_w = r.response.rect.width();
                 if let Some(c) = self.book.clicked.take() { self.trade.fill = Some(c); }
             }

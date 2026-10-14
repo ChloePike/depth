@@ -1,5 +1,5 @@
 //! Order book (cross-venue USD or one venue) and the trade tape.
-use super::{fmt_dp, fmt_px, fmt_qty, step_dp, t, theme::*};
+use super::{fmt_dp, fmt_px, fmt_qty, l, step_dp, t, theme::*};
 use eframe::egui::{self, pos2, vec2, Align2, Rect, RichText, Sense, Ui};
 use std::collections::HashSet;
 use depth::agg::{Agg, Level};
@@ -12,7 +12,9 @@ pub const NATIVE_HEADER: f32 = 62.0;
 const GROUPS: [f64; 5] = [1.0, 2.0, 5.0, 10.0, 50.0];
 
 /// `quote`: sizes in quote currency (size x price) instead of base.
-pub struct BookView { trades: bool, pub src: Option<Exchange>, group: usize, pub clicked: Option<(Exchange, f64)>, quote: bool,
+pub struct BookView { trades: bool,
+    /// 2 venues, 3 quant (own window only); otherwise `trades` picks book or tape
+    pub page: u8, pub src: Option<Exchange>, group: usize, pub clicked: Option<(Exchange, f64)>, quote: bool,
     /// tape filter: index into MIN_USD
     min_usd: usize,
     /// levels last computed: (when, what they were computed for, bids, asks). The rows repaint every
@@ -23,7 +25,7 @@ pub struct BookView { trades: bool, pub src: Option<Exchange>, group: usize, pub
 /// (and the aggregation across ten venues is not free).
 const REFRESH: std::time::Duration = std::time::Duration::from_millis(100);
 
-impl Default for BookView { fn default() -> Self { BookView { trades: false, src: None, group: 1, clicked: None, quote: false, min_usd: 0, cache: None } } }
+impl Default for BookView { fn default() -> Self { BookView { trades: false, page: 0, src: None, group: 1, clicked: None, quote: false, min_usd: 0, cache: None } } }
 
 /// Quote amounts: 12.3K / 4.56M style, whole units below a thousand.
 fn fmt_big_book(v: f64) -> String {
@@ -113,45 +115,24 @@ impl BookView {
         ui.set_min_width(ui.available_width());
         // hosted: the native header sits over the top of this column
         if native() { ui.add_space(NATIVE_HEADER); }
+        let mid = match self.src { None => a.mid(market), Some(e) => a.venues.get(&(e, market)).and_then(|v| v.mid()) };
         // hosted: tabs, unit, source and grouping are native controls (native_set)
-        if !native() { ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            if tab(ui, t("book.title"), !self.trades, 12.5).clicked() { self.trades = false; }
-            if tab(ui, t("book.trades"), self.trades, 12.5).clicked() { self.trades = true; }
-            // size unit: base coin or quote (USDT)
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if tab(ui, "USDT", self.quote, 11.5).clicked() { self.quote = true; }
-                if tab(ui, base, !self.quote, 11.5).clicked() { self.quote = false; }
-            });
-        }); ui.add_space(2.0); }
+        if !native() {
+            if self.tabs(ui) { return; }
+            self.controls(ui, a, market, base, mid);
+        }
         if self.trades {
             let r = ui.available_rect_before_wrap();
             ui.allocate_rect(r, Sense::hover());
             return self.tape(ui, r, a, market, scope);
         }
 
-        let Some(mid) = (match self.src { None => a.mid(market), Some(e) => a.venues.get(&(e, market)).and_then(|v| v.mid()) }) else {
+        let Some(mid) = mid else {
             ui.label(t("chart.loading"));
             return;
         };
         let base_bin = depth::agg::nice(mid * 1e-5);
         let bin = base_bin * GROUPS[self.group];
-        if !native() { ui.horizontal(|ui| {
-            let cur = self.src.map(|e| format!("{e:?}")).unwrap_or_else(|| format!("{} USD", t("src.agg")));
-            if self.src.is_none() { ui.label(RichText::new(t("book.aligned")).font(prop(10.5)).color(dim())).on_hover_text(t("book.aligned_tip")); }
-            egui::ComboBox::from_id_salt("book_src").icon(chevron).selected_text(cur).width(120.0).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.src, None, format!("{} USD", t("src.agg")));
-                let mut vs: Vec<Exchange> = a.venues.keys().filter(|(_, m)| *m == market).map(|(e, _)| *e).collect();
-                vs.sort_by_key(|e| format!("{e:?}"));
-                for e in vs { ui.selectable_value(&mut self.src, Some(e), format!("{e:?}")); }
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                egui::ComboBox::from_id_salt("book_group").icon(chevron).selected_text(fmt_dp(bin, step_dp(bin))).width(70.0).show_ui(ui, |ui| {
-                    for (i, g) in GROUPS.iter().enumerate() { ui.selectable_value(&mut self.group, i, fmt_dp(base_bin * g, step_dp(base_bin * g))); }
-                });
-                ui.label(egui::RichText::new(t("book.group")).color(mu()));
-            });
-        }); }
 
         let full = ui.available_rect_before_wrap();
         ui.allocate_rect(full, Sense::hover());
@@ -264,6 +245,60 @@ impl BookView {
             painter.text(pos2(rect.left() + 6.0, y + 4.0), Align2::LEFT_CENTER, format!("B {:.1}%", sb / (sb + sa) * 100.0), mono(10.5), up());
             painter.text(pos2(rect.right() - 6.0, y + 4.0), Align2::RIGHT_CENTER, format!("{:.1}% S", sa / (sb + sa) * 100.0), mono(10.5), dn());
         }
+    }
+
+    /// Shown page: 0 book, 1 trades, 2 venues, 3 quant.
+    pub fn pane(&self) -> u8 { if self.page > 1 { self.page } else { self.trades as u8 } }
+
+    /// Tab row: Book / Trades / Venues / Quant. True when a page other than book / trades is shown
+    /// (its content is drawn by the caller, without the agg lock).
+    pub fn tabs(&mut self, ui: &mut Ui) -> bool {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for (i, name) in [l("Book"), l("Trades"), l("Venues"), l("Quant")].into_iter().enumerate() {
+                let i = i as u8;
+                if tab(ui, name, self.pane() == i, 12.5).clicked() && self.pane() != i {
+                    if i < 2 { self.trades = i == 1; self.page = 0; } else { self.page = i; }
+                    ui.ctx().request_repaint();
+                }
+            }
+        });
+        self.page > 1
+    }
+
+    /// Second header row of Book and Trades: source (all venues or one), price grouping (book
+    /// only) and size unit, as the native header's `bookRight`.
+    fn controls(&mut self, ui: &mut Ui, a: &Agg, market: Market, base: &str, mid: Option<f64>) {
+        ui.horizontal(|ui| {
+            ui.set_height(26.0);
+            let cur = self.src.map(|e| format!("{e:?}")).unwrap_or_else(|| l("All venues").to_string());
+            let tip = if self.src.is_none() { l("All venues, mid-aligned (view only)") } else { l("This venue's raw book (click a level to fill the price)") };
+            if let Some(e) = self.src {
+                let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                icon(ui.painter(), e, r, false);
+            }
+            egui::ComboBox::from_id_salt("book_src").icon(chevron).selected_text(RichText::new(cur).font(prop(12.0))).width(112.0).show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.src, None, l("All venues"));
+                ui.separator();
+                let mut vs: Vec<Exchange> = a.venues.keys().filter(|(_, m)| *m == market).map(|(e, _)| *e).collect();
+                vs.sort_by_key(|e| format!("{e:?}"));
+                for e in vs { ui.selectable_value(&mut self.src, Some(e), format!("{e:?}")); }
+            }).response.on_hover_text(tip);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mut unit = self.quote as usize;
+                if segment(ui, &[base, "USDT"], &mut unit) { self.quote = unit == 1; }
+                if !self.trades {
+                    if let Some(mid) = mid {
+                        let base_bin = depth::agg::nice(mid * 1e-5);
+                        let bin = base_bin * GROUPS[self.group];
+                        egui::ComboBox::from_id_salt("book_group").icon(chevron).selected_text(RichText::new(fmt_dp(bin, step_dp(bin))).font(mono(12.0))).width(64.0).show_ui(ui, |ui| {
+                            for (i, g) in GROUPS.iter().enumerate() { ui.selectable_value(&mut self.group, i, fmt_dp(base_bin * g, step_dp(base_bin * g))); }
+                        }).response.on_hover_text(l("Price grouping"));
+                    }
+                }
+            });
+        });
+        ui.add_space(2.0);
     }
 
     /// The trade tape in `rect`: a filter row (minimum USDT notional), then the newest prints.
