@@ -692,10 +692,13 @@ impl App {
                     let r = panel.show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         self.book.tabs(ui);
-                        ui.horizontal(|ui| {
-                            ui.set_height(26.0);
-                            if pane == 2 { ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| vp.window_picker(ui)); }
-                        });
+                        // the window picker row belongs to Venues only (Quant has no window)
+                        if pane == 2 {
+                            ui.horizontal(|ui| {
+                                ui.set_height(26.0);
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| vp.window_picker(ui));
+                            });
+                        }
                         ui.add_space(2.0);
                         if pane == 2 { vp.venues(ui, &mut |v| self.call(&ctx, &v)); } else { vp.quant(ui, &st["quant"]); }
                     });
