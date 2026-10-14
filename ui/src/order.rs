@@ -311,6 +311,29 @@ impl OrderPanel {
         {
             card(ui, |ui| {
                 self.header(ui, t, &venue, smart, has_key, call);
+                // the venue's own touch on its own row: bid left, spread centre, ask right; a click
+                // puts that price in the limit field
+                if let (Some(b), Some(k)) = (bid, ask) {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+                    ui.painter().rect_filled(r, 6, panel2());
+                    let half = r.width() / 2.0;
+                    for (i, (lab, v, col)) in [(l("Bid"), b, up()), (l("Ask"), k, dn())].into_iter().enumerate() {
+                        let cell = egui::Rect::from_min_size(egui::pos2(r.left() + half * i as f32, r.top()), egui::vec2(half, r.height()));
+                        let resp = ui.interact(cell, ui.id().with(("touch", i)), egui::Sense::click());
+                        if resp.hovered() { ui.painter().rect_filled(cell.shrink(2.0), 5, hl()); }
+                        let (al, x) = if i == 0 { (egui::Align2::LEFT_CENTER, cell.left() + 10.0) } else { (egui::Align2::RIGHT_CENTER, cell.right() - 10.0) };
+                        let g = ui.painter().layout_no_wrap(lab.to_string(), prop(11.0), dim());
+                        let (lx, vx) = if i == 0 { (x, x + g.size().x + 6.0) } else { (x, x - g.size().x - 6.0) };
+                        ui.painter().text(egui::pos2(lx, cell.center().y), al, lab, prop(11.0), dim());
+                        ui.painter().text(egui::pos2(vx, cell.center().y), al, fmt_px(v), mono(12.5), col);
+                        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(l("Use this price")).clicked() && self.kind != Kind::Market {
+                            if self.kind != Kind::Stop { self.kind = Kind::Limit; }
+                            (self.bbo_on, self.price) = (false, px_str(v, tick));
+                        }
+                    }
+                    let mid = (b + k) / 2.0;
+                    if mid > 0.0 { ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, format!("{:.1}bp", (k - b) / mid * 1e4), mono(10.0), dim()); }
+                }
                 if segments(ui, &mut self.close, &[(false, l("Open")), (true, l("Close"))]) { (self.pct, self.qty, self.error) = (0.0, String::new(), None); }
                 self.type_tabs(ui, caps);
                 ui.separator();
@@ -319,17 +342,6 @@ impl OrderPanel {
                     ui.label(RichText::new(l("Avbl")).font(prop(12.0)).color(dim()));
                     ui.label(RichText::new(f(&t["available"]).map(|a| format!("{} USDT", usd(a))).unwrap_or("–".into())).font(mono(12.0)));
                     if has_key && link(ui, "⇄").on_hover_text(l("Move funds between accounts on this venue")).clicked() { self.open_transfer = Some(venue.clone()); }
-                    // the venue's own touch, right-aligned; a click puts it in the limit price
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        for (v, col) in [(ask, dn()), (bid, up())] {
-                            let Some(v) = v else { continue };
-                            let r = ui.add(egui::Label::new(RichText::new(fmt_px(v)).font(mono(12.0)).color(col)).sense(egui::Sense::click()));
-                            if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(l("Use this price")).clicked() && self.kind != Kind::Market {
-                                (self.kind, self.bbo_on, self.price) = (if self.kind == Kind::Stop { Kind::Stop } else { Kind::Limit }, false, px_str(v, tick));
-                            }
-                        }
-                    });
                 });
                 enter |= self.kind_fields(ui, t, &venue, &bbo_levels, use_bbo, tick);
                 let (r, e) = field(ui, l("Size"), &mut self.qty, &base, "qty");
