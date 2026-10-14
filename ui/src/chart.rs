@@ -1,6 +1,6 @@
 //! Candle chart painted with egui: heatmap background, candles, liquidation bubbles, and
 //! stacked sub-panes (volume, CVD, OI, funding predicted + settled, basis, long/short).
-use super::{fmt_dp, fmt_px, t, theme::*};
+use super::{fmt_dp, fmt_px, kit, t, theme::*};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Pos2, Rect, RichText, Sense, Stroke, Ui};
 use depth::agg::{Agg, Bar, Heatmap};
 use depth::{Exchange, Market};
@@ -226,6 +226,14 @@ fn countdown(ms: i64) -> String {
 fn dashed(painter: &egui::Painter, x0: f32, x1: f32, y: f32, col: Color32) {
     painter.extend(egui::Shape::dashed_line(&[pos2(x0, y), pos2(x1, y)], Stroke::new(1.0, col), 4.0, 3.0));
 }
+
+/// Grid line, TradingView-style: 1 px dots, faint (dashes, not circles: cheap to tessellate).
+fn grid_line(painter: &egui::Painter, a: Pos2, b: Pos2) {
+    painter.extend(egui::Shape::dashed_line(&[a, b], Stroke::new(1.0, line()), 1.5, 2.5));
+}
+
+/// Axis label color for ordinary levels and times (round price levels use `mu()`).
+fn axis_c() -> Color32 { lerp(dim(), mu(), 0.5) }
 
 /// A user drawing anchored in (bar time ms, price), so it survives timeframe changes.
 /// `col` 0xRRGGBB (0 = the accent), `dash` 0 solid / 1 dashed / 2 dotted; `c` is a channel's third
@@ -849,7 +857,7 @@ impl Chart {
         if !(hi > lo && lo.is_finite() && hi.is_finite()) { (lo, hi) = (alo, ahi); self.y_range = None; }
         // legend rows sit above the plot: OHLC, MAs, then the overlays' key values when any is on
         let overlays = self.sr || self.vwap || self.cone || self.bb || ((self.mark || self.liqmap) && smarket == Market::Perp);
-        let main_plot = Rect::from_min_max(pos2(main.left(), main.top() + if overlays { 66.0 } else { 48.0 }), pos2(main.right(), main.bottom() - 6.0));
+        let main_plot = Rect::from_min_max(pos2(main.left(), main.top() + if overlays && self.ma && self.mas.iter().any(|m| m.on) { 70.0 } else if overlays { 52.0 } else { 48.0 }), pos2(main.right(), main.bottom() - 6.0));
         let ps = PScale { lo, hi, log: self.scale == Scale::Log && lo > 0.0, r: main_plot };
         let y = |v: f64| ps.y(v);
         // percent scale: labels relative to the first visible close
@@ -857,15 +865,15 @@ impl Chart {
         let pct = self.scale == Scale::Percent;
         // as many decimals as the grid step needs (83,000 not 83,000.0; 0.4512 when the step is 0.0005)
         let gv: Vec<f64> = grid(lo, hi, (main_plot.height() as f64 / 60.0).max(2.0));
-        let gdp = gv.windows(2).map(|w| (w[1] - w[0]).abs()).fold(f64::MAX, f64::min);
-        let gdp = if gdp.is_finite() && gdp > 0.0 { super::step_dp(gdp) } else { 2 };
+        let gdp_step = gv.windows(2).map(|w| (w[1] - w[0]).abs()).fold(f64::MAX, f64::min);
+        let gdp = if gdp_step.is_finite() && gdp_step > 0.0 { super::step_dp(gdp_step) } else { 2 };
         let axis_label = |v: f64| if pct { format!("{:+.2}%", (v / base_px - 1.0) * 100.0) } else { super::fmt_dp(v, gdp) };
 
-        // grid + price axis
+        // grid + price axis (TradingView: faint dotted grid; round levels a shade brighter)
+        let round = |v: f64| { let k = v / (gdp_step * 5.0); (k - k.round()).abs() < 1e-6 };
         for v in gv.iter().copied() {
             let yy = y(v);
-            painter.hline(main.left()..=main.right(), yy, Stroke::new(1.0, super::theme::grid()));
-            painter.text(pos2(main.right() + 8.0, yy), Align2::LEFT_CENTER, axis_label(v), mono(11.0), mu());
+            grid_line(&painter, pos2(main.left(), yy), pos2(main.right(), yy));
         }
         // watermark: the Depth mark and wordmark, faint, bottom-left of the plot (as TradingView does)
         {
@@ -1019,7 +1027,7 @@ impl Chart {
                 painter.galley(r.center() - g.size() / 2.0, g, col);
                 let ax = place(Rect::from_min_size(pos2(main.right() + 2.0, y(px) - 8.0), vec2(AXIS_W - 4.0, 16.0)), &mut taken);
                 painter.rect_filled(ax, 2, col.linear_multiply(0.85));
-                painter.text(ax.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, fmt_px(px), mono(10.5), Color32::BLACK);
+                painter.text(ax.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(px), mono_m(11.0), Color32::BLACK);
             }
         }
         if let (true, Some(p)) = (self.breakouts, prof.as_ref()) {
@@ -1096,7 +1104,7 @@ impl Chart {
                     if m > lo && m < hi {
                         let r = place(Rect::from_min_size(pos2(main.right() + 2.0, y(m) - 9.0), vec2(AXIS_W - 4.0, 18.0)), &mut taken);
                         painter.rect_filled(r, 3, cyan.linear_multiply(0.85));
-                        painter.text(r.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, fmt_px(m), mono(10.5), Color32::BLACK);
+                        painter.text(r.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(m), mono_m(11.0), Color32::BLACK);
                     }
                 }
             }
@@ -1289,7 +1297,7 @@ impl Chart {
             let ax = place(Rect::from_min_size(pos2(main.right() + 2.0, ly - 9.0), vec2(AXIS_W - 4.0, 18.0)), &mut taken);
             painter.rect_filled(ax, 3, label_bg());
             painter.rect_stroke(ax, 3, Stroke::new(1.0, l.col), egui::StrokeKind::Inside);
-            painter.text(ax.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(l.price), mono(11.0), l.col);
+            painter.text(ax.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(l.price), mono_m(11.0), l.col);
             if l.act.is_some() && hover_p.is_some_and(|p| both.contains(p)) { line_hot = Some(li); }
         }
         // dragging an order / TP / SL line: a ghost follows the pointer; release moves it (after a
@@ -1327,12 +1335,13 @@ impl Chart {
             let (mut open, mut done) = (true, None);
             egui::Popup::menu(&resp).id(ui.id().with("move_confirm")).at_position(at).open_bool(&mut open)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                ui.label(RichText::new(format!("{tag}:  {} → {}", fmt_px(from), fmt_px(to))).strong());
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.label(RichText::new(format!("{tag}:  {} → {}", fmt_px(from), fmt_px(to))).font(mono_s(12.5)).color(fg_strong()));
                 // only Bybit / Binance orders are amended in place; elsewhere the order is cancelled and placed again
-                if matches!(act, LineAct::Order(..)) && !self.amends { ui.label(RichText::new(t("tr.move_replace")).color(WARN).small()); }
+                if matches!(act, LineAct::Order(..)) && !self.amends { kit::note(ui, t("tr.move_replace"), WARN); }
                 ui.horizontal(|ui| {
-                    if ui.button(t("tr.move")).clicked() { done = Some(true); ui.close(); }
-                    if ui.button(t("tr.cancel_action")).clicked() { done = Some(false); ui.close(); }
+                    if kit::button(ui, t("tr.move"), kit::Look::Fill(accent()), kit::H, None, true).clicked() { done = Some(true); ui.close(); }
+                    if kit::button(ui, t("tr.cancel_action"), kit::Look::Secondary, kit::H, None, true).clicked() { done = Some(false); ui.close(); }
                 });
             });
             if done == Some(true) { self.actions.push(ChartAct::Move(act, to)); }
@@ -1346,9 +1355,9 @@ impl Chart {
         dashed(&painter, main.left(), main.right(), ly, lc.linear_multiply(0.7));
         let lab = Rect::from_min_size(pos2(main.right() + 2.0, ly - 10.0), vec2(AXIS_W - 4.0, 34.0));
         painter.rect_filled(lab, 3, lc);
-        painter.text(pos2(lab.left() + 6.0, ly), Align2::LEFT_CENTER, fmt_px(last.c), mono(11.5), Color32::WHITE);
+        painter.text(pos2(lab.left() + 6.0, ly), Align2::LEFT_CENTER, fmt_px(last.c), mono_s(11.5), Color32::WHITE);
         let left_ms = last.t + self.tf * 60_000 - depth::now_ms();
-        if live { painter.text(pos2(lab.left() + 6.0, ly + 15.0), Align2::LEFT_CENTER, countdown(left_ms), mono(10.5), Color32::from_white_alpha(210)); }
+        if live { painter.text(pos2(lab.left() + 6.0, ly + 15.0), Align2::LEFT_CENTER, countdown(left_ms), mono_m(10.5), Color32::from_white_alpha(210)); }
         if let (Some((bid, ask)), Some(bx)) = (ba, ba_rect) {
             let (ka, kb) = (t("tr.ask"), t("tr.bid"));
             let w = bx.width();
@@ -1378,7 +1387,7 @@ impl Chart {
                 painter.extend(egui::Shape::dashed_line(&[pos2(main.left(), my), pos2(main.right(), my)], Stroke::new(1.0, PURPLE.linear_multiply(0.75)), 2.0, 3.0));
                 let ax = place(Rect::from_min_size(pos2(main.right() + 2.0, my - 9.0), vec2(AXIS_W - 4.0, 18.0)), &mut taken);
                 painter.rect_filled(ax, 3, PURPLE.linear_multiply(0.9));
-                painter.text(ax.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, fmt_px(mk), mono(10.5), Color32::WHITE);
+                painter.text(ax.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(mk), mono_m(11.0), Color32::WHITE);
                 painter.text(pos2(main.right() - 4.0, my - 7.0), Align2::RIGHT_CENTER, t("chart.mark"), prop(10.0), PURPLE);
             }
         }
@@ -1408,8 +1417,8 @@ impl Chart {
         for (k, b) in vis.iter().enumerate() {
             if ((b.t / (self.tf * 60_000)) as usize) % every != 0 { continue; }
             let x = fr.x((i0 + k) as f32);
-            painter.vline(x, main.top()..=top, Stroke::new(1.0, super::theme::grid()));
-            painter.text(pos2(x, ty), Align2::CENTER_CENTER, fmt_time(b.t, every as i64 * self.tf >= 1440), mono(10.5), mu());
+            grid_line(&painter, pos2(x, main.top()), pos2(x, top));
+            painter.text(pos2(x, ty), Align2::CENTER_CENTER, fmt_time(b.t, every as i64 * self.tf >= 1440), mono(11.5), axis_c());
         }
         painter.vline(main.right(), rect.top()..=rect.bottom(), Stroke::new(1.0, line()));
         // scale toggles in the corner under the price axis: % and log (click again for linear)
@@ -1418,15 +1427,22 @@ impl Chart {
         let auto_resp = ui.interact(ar, ui.id().with("auto"), Sense::click());
         let auto = self.y_range.is_none();
         if auto || auto_resp.hovered() { painter.rect_filled(ar, 3, hl()); }
-        painter.text(ar.center(), Align2::CENTER_CENTER, "A", mono(10.5), if auto { accent() } else { mu() });
+        painter.text(ar.center(), Align2::CENTER_CENTER, "A", prop_m(11.0), if auto { accent() } else { mu() });
         if auto_resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t("chart.auto_tip")).clicked() { self.y_range = None; }
         for (i, (sc, lab)) in [(Scale::Percent, "%"), (Scale::Log, "log")].into_iter().enumerate() {
             let r = Rect::from_min_size(pos2(corner.left() + 2.0 + i as f32 * 22.0, corner.top() + 1.0), vec2(20.0 + i as f32 * 6.0, corner.height() - 2.0));
             let rs = ui.interact(r, ui.id().with(("scale", i)), Sense::click());
             let on = self.scale == sc;
             if on || rs.hovered() { painter.rect_filled(r, 3, hl()); }
-            painter.text(r.center(), Align2::CENTER_CENTER, lab, mono(10.5), if on { accent() } else { mu() });
+            painter.text(r.center(), Align2::CENTER_CENTER, lab, prop_m(11.0), if on { accent() } else { mu() });
             if rs.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.scale = if on { Scale::Linear } else { sc }; }
+        }
+
+        // price labels last: a level hidden by an axis tag is skipped, not half covered
+        for v in gv.iter().copied() {
+            let yy = y(v);
+            if taken.iter().any(|t| t.y_range().intersects(egui::Rangef::new(yy - 6.0, yy + 6.0)) && t.left() > main.right()) { continue; }
+            painter.text(pos2(main.right() + 8.0, yy), Align2::LEFT_CENTER, axis_label(v), mono(11.5), if round(v) { mu() } else { axis_c() });
         }
 
         // crosshair
@@ -1445,7 +1461,7 @@ impl Chart {
                 painter.extend(egui::Shape::dashed_line(&[pos2(main.left(), py), pos2(main.right(), py)], cross, 4.0, 4.0));
                 let lab = Rect::from_min_size(pos2(main.right() + 1.0, py - 9.0), vec2(AXIS_W - 2.0, 18.0));
                 painter.rect_filled(lab, 2, cross_bg());
-                painter.text(lab.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, axis_label(ps.v(py)), mono(11.0), Color32::WHITE);
+                painter.text(lab.left_center() + vec2(7.0, 0.0), Align2::LEFT_CENTER, axis_label(ps.v(py)), mono_m(11.5), Color32::WHITE);
                 // TradingView's "+": puts the crosshair price into the order panel
                 if self.trading && live && !editing {
                     let pb = Rect::from_min_size(pos2(main.right() - 22.0, py - 9.0), vec2(20.0, 18.0));
@@ -1464,11 +1480,12 @@ impl Chart {
                 let v = plo + (inner.bottom() - p.y) as f64 / inner.height() as f64 * (phi - plo);
                 let lab = Rect::from_min_size(pos2(main.right() + 1.0, p.y - 8.0), vec2(AXIS_W - 2.0, 16.0));
                 painter.rect_filled(lab, 2, cross_bg());
-                painter.text(lab.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, fmt_big(v), mono(10.5), Color32::WHITE);
+                painter.text(lab.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_big(v), mono_m(11.0), Color32::WHITE);
             }
-            let tl = Rect::from_center_size(pos2(x, ty), vec2(110.0, TIME_H - 2.0));
+            let g = painter.layout_no_wrap(fmt_time_full(bars[hi_idx].t), mono_m(11.5), Color32::WHITE);
+            let tl = Rect::from_center_size(pos2(x, ty), vec2(g.size().x + 16.0, TIME_H - 2.0));
             painter.rect_filled(tl, 2, cross_bg());
-            painter.text(tl.center(), Align2::CENTER_CENTER, fmt_time_full(bars[hi_idx].t), mono(10.5), Color32::WHITE);
+            painter.galley(tl.center() - g.size() / 2.0, g, Color32::WHITE);
         }
 
         // legend: row 1 time + OHLC + change + range (labels muted, values colored), row 2 MAs
@@ -1476,36 +1493,38 @@ impl Chart {
         let chg = (b.c / b.o - 1.0) * 100.0;
         let range = if b.l > 0.0 { (b.h / b.l - 1.0) * 100.0 } else { 0.0 };
         let c = if b.c >= b.o { up() } else { dn() };
+        // design: text-only rows, 12 medium, grey keys, colored tabular values, 14 px apart
         let kv = |x: f32, yy: f32, k: &str, v: String, col: Color32| -> f32 {
-            let r = painter.text(pos2(x, yy), Align2::LEFT_CENTER, k, prop(11.5), dim());
-            painter.text(pos2(r.right() + 5.0, yy), Align2::LEFT_CENTER, v, mono(11.5), col).right() + 12.0
+            let r = painter.text(pos2(x, yy), Align2::LEFT_CENTER, k, prop_m(12.0), dim());
+            painter.text(pos2(r.right() + 4.0, yy), Align2::LEFT_CENTER, v, mono_m(12.0), col).right() + 14.0
         };
-        let y1 = main.top() + 12.0;
-        let mut lx = main.left() + 8.0;
+        let y1 = main.top() + 14.0;
+        let mut lx = main.left() + 6.0;
         if self.multi {
             let tf = TFS.iter().find(|(m, _)| *m == self.tf).map_or("", |x| x.1);
-            lx = painter.text(pos2(lx, y1), Align2::LEFT_CENTER, tf, prop(12.5), fg()).right() + 10.0;
+            lx = painter.text(pos2(lx, y1), Align2::LEFT_CENTER, tf, prop_s(12.5), fg_strong()).right() + 12.0;
         }
-        lx = painter.text(pos2(lx, y1), Align2::LEFT_CENTER, fmt_time_full(b.t), mono(11.5), mu()).right() + 12.0;
+        lx = painter.text(pos2(lx, y1), Align2::LEFT_CENTER, fmt_time_full(b.t), mono_m(12.0), mu()).right() + 14.0;
         for (k, v) in [("chart.o", b.o), ("chart.h", b.h), ("chart.l", b.l), ("chart.c", b.c)] { lx = kv(lx, y1, t(k), fmt_px(v), c); }
         lx = kv(lx, y1, t("chart.chg"), format!("{chg:+.2}%"), c);
         kv(lx, y1, t("chart.range"), format!("{range:.2}%"), c);
-        let y2 = main.top() + 30.0;
-        let mut lx = main.left() + 8.0;
+        let y2 = main.top() + 33.0;
+        let mut lx = main.left() + 6.0;
         for (m, l) in &mas {
             lx = kv(lx, y2, &format!("{}({})", if l.ema { "EMA" } else { "MA" }, l.n), m[hi_idx].map(fmt_px).unwrap_or("-".into()), rgb(l.col));
         }
         if lmax > 0.0 {
             kv(lx, y2, t("chart.liq"), format!("{} / {}", fmt_big(b.liq_long), fmt_big(b.liq_short)), dim());
         }
-        let y3 = main.top() + 48.0;
-        let mut lx = main.left() + 8.0;
+        // the overlay row moves up when there is no MA / liquidation row
+        let y3 = main.top() + if mas.is_empty() && lmax <= 0.0 { 33.0 } else { 52.0 };
+        let mut lx = main.left() + 6.0;
         for (k, v, col) in &legend3 {
             painter.circle_filled(pos2(lx + 3.0, y3), 3.0, *col);
             lx = kv(lx + 10.0, y3, k, v.clone(), *col);
         }
         if loading_tf {
-            painter.text(pos2(main.left() + 8.0, main.top() + 76.0), Align2::LEFT_CENTER, t("chart.loading"), prop(11.0), WARN);
+            painter.text(pos2(main.left() + 6.0, main.top() + 80.0), Align2::LEFT_CENTER, t("chart.loading"), prop_m(12.0), WARN);
         }
         self.replay_ui(ui, &resp, &painter, main_plot, &fr, hover.map(|_| bars[hi_idx].t), next_t, now);
         if let Some((msg, until)) = self.toast.clone() {
@@ -1515,10 +1534,13 @@ impl Chart {
                 let age = 8.0 - left.as_secs_f32();
                 let t = (age / 0.25).min(1.0).min(left.as_secs_f32() / 0.4);
                 let ease = 1.0 - (1.0 - t).powi(3);
-                let g = painter.layout_no_wrap(msg, prop(13.0), Color32::WHITE.gamma_multiply(ease));
-                let r = Rect::from_center_size(pos2(main_plot.center().x, main_plot.top() + 6.0 + 14.0 * ease), g.size() + vec2(24.0, 12.0));
-                painter.rect_filled(r, 6, accent().gamma_multiply(ease));
-                painter.galley(r.center() - g.size() / 2.0, g, Color32::WHITE.gamma_multiply(ease));
+                // design banner: popup surface, accent dot, 12.5 semibold
+                let g = painter.layout_no_wrap(msg, prop_s(12.5), fg_strong().gamma_multiply(ease));
+                let r = Rect::from_center_size(pos2(main_plot.center().x, main_plot.top() + 6.0 + 14.0 * ease), g.size() + vec2(42.0, 20.0));
+                painter.add(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(((if light() { 40.0 } else { 115.0 }) * ease) as u8) }.as_shape(r, 6));
+                painter.rect(r, 6, popup_bg().gamma_multiply(ease), Stroke::new(1.0, line().gamma_multiply(ease)), egui::StrokeKind::Inside);
+                painter.circle_filled(pos2(r.left() + 16.0, r.center().y), 4.0, accent().gamma_multiply(ease));
+                painter.galley(pos2(r.left() + 30.0, r.center().y - g.size().y / 2.0), g, fg_strong().gamma_multiply(ease));
                 if t < 1.0 { ui.ctx().request_repaint(); } else { ui.ctx().request_repaint_after(left.saturating_sub(std::time::Duration::from_millis(400))); }
             } else { self.toast = None; }
         }
@@ -1539,20 +1561,41 @@ impl Chart {
         } else if resp.hovered() && ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
             if let Some(n) = next_t { r.at = Some(n); }
         }
-        let bar = Rect::from_center_size(pos2(plot.center().x, plot.bottom() - 24.0), vec2(if r.at.is_some() { 236.0 } else { 300.0 }, 32.0));
-        painter.rect_filled(bar, 8, panel2());
-        painter.rect_stroke(bar, 8, Stroke::new(1.0, line()), egui::StrokeKind::Inside);
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(10.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        // a floating control bar, styled as a popup (radius 6, hairline, soft shadow)
+        let w = if r.at.is_some() { 252.0 } else { painter.layout_no_wrap(t("replay.pick").to_string(), prop_m(12.5), fg()).size().x + 64.0 };
+        let bar = Rect::from_center_size(pos2(plot.center().x, plot.bottom() - 26.0), vec2(w, 36.0));
+        painter.add(egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(if light() { 32 } else { 120 }) }.as_shape(bar, 6));
+        painter.rect(bar, 6, popup_bg(), Stroke::new(1.0, line()), egui::StrokeKind::Inside);
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(4.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        child.spacing_mut().item_spacing.x = 2.0;
         let mut exit = false;
         if r.at.is_some() {
-            if child.button(if r.playing { "❚❚" } else { "▶" }).on_hover_text(t("replay.play")).clicked() { r.playing = !r.playing; r.last = now; }
-            if child.button("▶|").on_hover_text(t("replay.step")).clicked() { if let Some(n) = next_t { r.at = Some(n); } }
-            if child.button(format!("{}x", SPEEDS[r.speed])).on_hover_text(t("replay.speed")).clicked() { r.speed = (r.speed + 1) % SPEEDS.len(); }
-            child.label(RichText::new(t("replay.title")).color(mu()));
+            let playing = r.playing;
+            if kit::icon_button(&mut child, kit::H, false, |p, rr, c| {
+                let m = rr.center();
+                if playing { for dx in [-2.5f32, 2.5] { p.rect_filled(Rect::from_center_size(m + vec2(dx, 0.0), vec2(2.5, 10.0)), 1, c); } }
+                else { p.add(egui::Shape::convex_polygon(vec![m + vec2(-3.5, -5.5), m + vec2(5.5, 0.0), m + vec2(-3.5, 5.5)], c, Stroke::NONE)); }
+            }).on_hover_text(t("replay.play")).clicked() { r.playing = !r.playing; r.last = now; }
+            if kit::icon_button(&mut child, kit::H, false, |p, rr, c| {
+                let m = rr.center();
+                p.add(egui::Shape::convex_polygon(vec![m + vec2(-4.5, -5.0), m + vec2(3.0, 0.0), m + vec2(-4.5, 5.0)], c, Stroke::NONE));
+                p.rect_filled(Rect::from_center_size(m + vec2(4.5, 0.0), vec2(2.0, 10.0)), 0, c);
+            }).on_hover_text(t("replay.step")).clicked() { if let Some(n) = next_t { r.at = Some(n); } }
+            if kit::button(&mut child, &format!("{}x", SPEEDS[r.speed]), kit::Look::Ghost, kit::H, Some(40.0), true).on_hover_text(t("replay.speed")).clicked() { r.speed = (r.speed + 1) % SPEEDS.len(); }
+            child.add_space(6.0);
+            child.label(RichText::new(t("replay.title")).font(prop_m(12.5)).color(mu()));
         } else {
-            child.label(RichText::new(t("replay.pick")).color(fg()));
+            child.add_space(8.0);
+            child.label(RichText::new(t("replay.pick")).font(prop_m(12.5)).color(fg()));
         }
-        child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if ui.button("✕").on_hover_text(t("replay.exit")).clicked() { exit = true; } });
+        child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let x = kit::icon_button(ui, kit::H, false, |p, rr, c| {
+                let m = rr.center();
+                p.line_segment([m + vec2(-4.0, -4.0), m + vec2(4.0, 4.0)], Stroke::new(1.4, c));
+                p.line_segment([m + vec2(-4.0, 4.0), m + vec2(4.0, -4.0)], Stroke::new(1.4, c));
+            });
+            if x.on_hover_text(t("replay.exit")).clicked() { exit = true; }
+        });
         if exit { self.replay = None; }
     }
 
@@ -1562,14 +1605,14 @@ impl Chart {
         let (vis, hb) = (&bars[i0..=i1], &bars[hi]);
         // the top 18px hold the legend, so lines never run through it
         let inner = Rect::from_min_max(pos2(r.left(), r.top() + 18.0), pos2(r.right(), r.bottom() - 4.0));
-        let label = |s: String, col: Color32, x: f32| painter.text(pos2(x, r.top() + 9.0), Align2::LEFT_CENTER, s, mono(10.5), col).right() + 10.0;
-        // pane name in the UI font, values in mono
-        let mut lx = painter.text(pos2(r.left() + 8.0, r.top() + 9.0), Align2::LEFT_CENTER, t(p.key()), prop(11.5), mu()).right() + 10.0;
+        let label = |s: String, col: Color32, x: f32| painter.text(pos2(x, r.top() + 10.0), Align2::LEFT_CENTER, s, mono_m(11.5), col).right() + 12.0;
+        // design: pane name 12 medium grey, values tabular
+        let mut lx = painter.text(pos2(r.left() + 6.0, r.top() + 10.0), Align2::LEFT_CENTER, t(p.key()), prop_m(12.0), mu()).right() + 8.0;
         let scale = std::cell::Cell::new(None);
         let axis = |lo: f64, hi: f64, fmt: &dyn Fn(f64) -> String| {
             scale.set(Some((lo, hi)));
-            painter.text(pos2(r.right() + 6.0, inner.top() + 4.0), Align2::LEFT_CENTER, fmt(hi), mono(10.0), dim());
-            painter.text(pos2(r.right() + 6.0, inner.bottom() - 4.0), Align2::LEFT_CENTER, fmt(lo), mono(10.0), dim());
+            painter.text(pos2(r.right() + 8.0, inner.top() + 4.0), Align2::LEFT_CENTER, fmt(hi), mono(11.0), axis_c());
+            painter.text(pos2(r.right() + 8.0, inner.bottom() - 4.0), Align2::LEFT_CENTER, fmt(lo), mono(11.0), axis_c());
         };
         let line = |vals: Vec<(usize, f64)>, lo: f64, hi: f64, col: Color32, step: bool| {
             let mut pts: Vec<Pos2> = vec![];
@@ -1879,7 +1922,7 @@ impl Chart {
             let mut del = false;
             egui::Popup::menu(resp).id(ui.id().with("chart_menu")).at_position(at).open_bool(&mut open)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                ui.set_min_width(200.0);
+                menu_rows(ui, 220.0);
                 match m {
                     Menu::Drawing(i, focus) => {
                         let Some(d) = list.get_mut(i) else { ui.close(); return };
@@ -1905,17 +1948,17 @@ impl Chart {
                             });
                         }
                         if d.alertable() {
-                            ui.separator();
+                            menu_sep(ui);
                             let mut on = d.alert.is_some();
                             if ui.checkbox(&mut on, t("alert.on")).on_hover_text(t("alert.tip")).changed() { d.alert = on.then(|| sound.clone()); }
                             if let Some(s) = &mut d.alert { sound_menu(ui, s); }
                         }
                         if d.tool == Tool::Position {
-                            ui.separator();
+                            menu_sep(ui);
                             ui.horizontal(|ui| { ui.label(t("pos.risk")); ui.add(egui::DragValue::new(&mut self.risk_pct).range(0.05..=100.0).speed(0.05).suffix("%")); });
                             if self.trading && ui.button(t("pos.use")).clicked() { self.actions.push(ChartAct::Fill(d.a.1)); ui.close(); }
                         }
-                        ui.separator();
+                        menu_sep(ui);
                         ui.checkbox(&mut d.locked, t("draw.lock"));
                         if ui.button(t("draw.delete")).clicked() { del = true; ui.close(); }
                         if focus { self.menu = Some((Menu::Drawing(i, false), at)); }
@@ -1929,7 +1972,7 @@ impl Chart {
                         }
                         if ui.button(format!("{}  {}", t("draw.hline_at"), fmt_px(px))).clicked() { list.push(Drawing::new(Tool::HLine, (ts, px), (ts, px))); ui.close(); }
                         if ui.button(t("replay.from_here")).clicked() { self.replay = Some(Replay::new(Some(ts), ui.input(|i| i.time))); ui.close(); }
-                        ui.separator();
+                        menu_sep(ui);
                         if ui.button(t("chart.reset")).clicked() { self.right = 0.0; self.bar_w = 7.0; self.y_range = None; ui.close(); }
                     }
                 }
@@ -2188,61 +2231,75 @@ impl Chart {
     }
 
     fn toolbar(&mut self, ui: &mut Ui, a: &Agg, market: Market, base: &str) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            for (m, l) in &TFS[..TF_QUICK] {
-                if tab(ui, l, self.tf == *m, 12.0).clicked() { self.tf = *m; }
-            }
-            // a menu interval in use shows as a selected tab after the quick ones
-            if let Some((_, l)) = TFS[TF_QUICK..].iter().find(|(m, _)| *m == self.tf) { tab(ui, l, true, 12.0); }
-            ui.menu_button(RichText::new("▾").color(mu()), |ui| {
-                ui.set_min_width(90.0);
-                for (m, l) in &TFS[TF_QUICK..] { if ui.selectable_label(self.tf == *m, *l).clicked() { self.tf = *m; ui.close(); } }
-            });
+        // design: a 40 px bar over a hairline; compact interval pills, outlined menus, tools on a strip
+        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
+        ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, line()));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(0.0, 6.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        let ui = &mut child;
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for (m, l) in &TFS[..TF_QUICK] {
+            if pill(ui, l, self.tf == *m).clicked() { self.tf = *m; }
+        }
+        // a menu interval in use shows as a selected pill after the quick ones
+        if let Some((_, l)) = TFS[TF_QUICK..].iter().find(|(m, _)| *m == self.tf) { pill(ui, l, true); }
+        let more = pill(ui, "", false);
+        chevron_down(ui.painter(), more.rect.center(), mu());
+        egui::Popup::menu(&more).show(|ui| {
+            menu_rows(ui, 120.0);
+            for (m, l) in &TFS[TF_QUICK..] { if menu_row(ui, self.tf == *m, l, None).clicked() { self.tf = *m; ui.close(); } }
+        });
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.add_space(6.0);
+        vsep(ui);
+        let mut venues: Vec<Exchange> = a.series.keys().filter(|(e, m)| *m == market && e.is_some()).filter_map(|(e, _)| *e).collect();
+        venues.sort_by_key(|e| format!("{e:?}"));
+        let cur = self.src.map(|e| format!("{e:?}")).unwrap_or_else(|| t("src.agg").to_string());
+        let src = tb_button(ui, &cur, Tb::Outline, 0, true);
+        egui::Popup::menu(&src).show(|ui| {
+            menu_rows(ui, 180.0);
+            menu_head(ui, super::l("Source"));
+            if menu_row(ui, self.src.is_none(), t("src.agg"), None).clicked() { self.src = None; ui.close(); }
+            for e in venues { if menu_row(ui, self.src == Some(e), &format!("{e:?}"), None).clicked() { self.src = Some(e); ui.close(); } }
+        });
+        self.indicators_menu(ui, market);
+        self.layout_menu(ui);
+        self.alerts_menu(ui, base);
+        if tb_button(ui, t("replay.title"), if self.replay.is_some() { Tb::Tint } else { Tb::Ghost }, 0, false).on_hover_text(super::l("Bar replay: pick a bar, then play forward")).clicked() {
+            self.replay = if self.replay.is_some() { None } else { Some(Replay::new(None, 0.0)) };
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            ui.add_space(4.0);
-            ui.separator();
-            let mut venues: Vec<Exchange> = a.series.keys().filter(|(e, m)| *m == market && e.is_some()).filter_map(|(e, _)| *e).collect();
-            venues.sort_by_key(|e| format!("{e:?}"));
-            let cur = self.src.map(|e| format!("{e:?}")).unwrap_or_else(|| t("src.agg").to_string());
-            egui::ComboBox::from_id_salt("chart_src").icon(chevron).selected_text(cur).width(96.0).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.src, None, t("src.agg"));
-                for e in venues { ui.selectable_value(&mut self.src, Some(e), format!("{e:?}")); }
-            });
-            self.indicators_menu(ui, market);
-            self.layout_menu(ui);
-            self.alerts_menu(ui, base);
-            if tab(ui, t("replay.title"), self.replay.is_some(), 11.5).on_hover_text(super::l("Bar replay: pick a bar, then play forward")).clicked() {
-                self.replay = if self.replay.is_some() { None } else { Some(Replay::new(None, 0.0)) };
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // the drawing tools on one subtle strip; the everyday ones as buttons, the rest behind "⋯"
+            let more = [(Tool::Channel, "draw.channel"), (Tool::Text, "draw.text"), (Tool::Measure, "draw.measure"), (Tool::Position, "draw.position")];
+            let in_more = more.iter().find(|(k, _)| self.tool == Some(*k)).map(|x| x.0);
+            let n = self.drawings.get(base).map_or(0, |v| v.len());
+            egui::Frame::new().fill(panel2()).corner_radius(5).inner_margin(2).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if (self.right.abs() > 0.5 || self.bar_w != 7.0 || self.y_range.is_some()) && tab(ui, t("chart.reset"), false, 11.5).on_hover_text(super::l("Back to the live edge and default zoom")).clicked() {
-                    self.right = 0.0; self.bar_w = 7.0; self.y_range = None;
-                }
-                let n = self.drawings.get(base).map_or(0, |v| v.len());
                 if n > 0 {
-                    if tool_button(ui, None, false).on_hover_text(format!("{} ({n})", t("draw.clear"))).clicked() { self.drawings.remove(base); }
-                    if tab(ui, if self.hide { "◌" } else { "◉" }, self.hide, 12.0).on_hover_text(super::l("Hide drawings")).clicked() { self.hide = !self.hide; }
+                    if tool_button(ui, Glyph::Trash, false).on_hover_text(format!("{} ({n})", t("draw.clear"))).clicked() { self.drawings.remove(base); }
+                    if tool_button(ui, Glyph::Eye(self.hide), self.hide).on_hover_text(super::l("Hide drawings")).clicked() { self.hide = !self.hide; }
+                    let (r, _) = ui.allocate_exact_size(vec2(5.0, 16.0), Sense::hover());
+                    ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, line()));
                 }
-                // the everyday tools as buttons, the rest behind "⋯" (as in the native toolbar)
-                let more = [(Tool::Channel, "draw.channel"), (Tool::Text, "draw.text"), (Tool::Measure, "draw.measure"), (Tool::Position, "draw.position")];
-                let in_more = more.iter().any(|(k, _)| self.tool == Some(*k));
-                ui.menu_button(RichText::new(if in_more { "⋯ ●" } else { "⋯" }).color(if in_more { accent() } else { mu() }), |ui| {
+                // the "more" button shows the armed tool from its menu
+                let mb = tool_button(ui, in_more.map_or(Glyph::More, Glyph::Tool), in_more.is_some()).on_hover_text(super::l("More drawing tools"));
+                egui::Popup::menu(&mb).show(|ui| {
+                    menu_rows(ui, 180.0);
                     for (tool, key) in more {
-                        ui.horizontal(|ui| {
-                            tool_button(ui, Some(tool), self.tool == Some(tool));
-                            if ui.selectable_label(self.tool == Some(tool), t(key)).clicked() { self.tool = if self.tool == Some(tool) { None } else { Some(tool) }; self.pending.clear(); ui.close(); }
-                        });
+                        let on = self.tool == Some(tool);
+                        if menu_row(ui, on, t(key), Some(Glyph::Tool(tool))).clicked() { self.tool = if on { None } else { Some(tool) }; self.pending.clear(); ui.close(); }
                     }
-                }).response.on_hover_text(super::l("More drawing tools"));
+                });
                 for (tool, key) in [(Tool::Rect, "draw.rect"), (Tool::Fib, "draw.fib"), (Tool::Ray, "draw.ray"), (Tool::Trend, "draw.trend"), (Tool::HLine, "draw.hline")] {
-                    if tool_button(ui, Some(tool), self.tool == Some(tool)).on_hover_text(t(key)).clicked() {
+                    if tool_button(ui, Glyph::Tool(tool), self.tool == Some(tool)).on_hover_text(t(key)).clicked() {
                         self.tool = if self.tool == Some(tool) { None } else { Some(tool) };
                         self.pending.clear();
                     }
                 }
             });
+            if (self.right.abs() > 0.5 || self.bar_w != 7.0 || self.y_range.is_some()) && tb_button(ui, t("chart.reset"), Tb::Ghost, 0, false).on_hover_text(super::l("Back to the live edge and default zoom")).clicked() {
+                self.right = 0.0; self.bar_w = 7.0; self.y_range = None;
+            }
         });
     }
 
@@ -2251,27 +2308,30 @@ impl Chart {
         let perp = market == Market::Perp;
         let n_on = self.panes.iter().filter(|(p, on)| *on && (!p.perp_only() || perp)).count()
             + [self.heat, self.ma, self.bb, self.liqmap && perp, self.sr, self.breakouts, self.vwap, self.cone, self.walls, self.mark && perp].iter().filter(|x| **x).count();
-        ui.menu_button(format!("{} {n_on} ▾", t("chart.indicators")), |ui| {
-            ui.set_min_width(240.0);
-            let head = |ui: &mut Ui, s: &str| { ui.add_space(4.0); ui.label(RichText::new(s).small().color(dim())); };
-            head(ui, super::l("Panes"));
+        let resp = tb_button(ui, t("chart.indicators"), Tb::Outline, n_on, false);
+        egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            menu_rows(ui, 260.0);
+            let indent = |ui: &mut Ui| ui.add_space(26.0);
+            menu_head(ui, super::l("Panes"));
             for (p, on) in self.panes.iter_mut() {
                 if p.perp_only() && !perp { continue; }
                 ui.checkbox(on, t(p.key()));
             }
             ui.horizontal(|ui| {
-                ui.label(RichText::new("RSI").color(mu()));
+                indent(ui);
+                ui.label(RichText::new("RSI").font(prop(12.0)).color(mu()));
                 ui.add(egui::DragValue::new(&mut self.ind.rsi).range(1..=500).speed(0.3));
-                ui.label(RichText::new("MACD").color(mu()));
+                ui.add_space(6.0);
+                ui.label(RichText::new("MACD").font(prop(12.0)).color(mu()));
                 for x in self.ind.macd.iter_mut() { ui.add(egui::DragValue::new(x).range(1..=500).speed(0.3)); }
             });
-            ui.separator();
-            head(ui, super::l("Overlays"));
+            menu_sep(ui);
+            menu_head(ui, super::l("Overlays"));
             ui.checkbox(&mut self.ma, super::l("Moving averages"));
             if self.ma {
                 for m in self.mas.iter_mut() {
                     ui.horizontal(|ui| {
-                        ui.add_space(18.0);
+                        indent(ui);
                         ui.checkbox(&mut m.on, "");
                         let mut c = rgb(m.col);
                         if ui.color_edit_button_srgba(&mut c).changed() { m.col = super::theme::pack(c); }
@@ -2284,7 +2344,7 @@ impl Chart {
             ui.checkbox(&mut self.bb, super::l("Bollinger bands"));
             if self.bb {
                 ui.horizontal(|ui| {
-                    ui.add_space(18.0);
+                    indent(ui);
                     ui.add(egui::DragValue::new(&mut self.ind.bb_n).range(1..=500).speed(0.3));
                     ui.add(egui::DragValue::new(&mut self.ind.bb_k).range(0.1..=10.0).speed(0.05).fixed_decimals(1).suffix(" σ"));
                 });
@@ -2292,7 +2352,7 @@ impl Chart {
             ui.checkbox(&mut self.fp, super::l("Footprint (traded value per price)")).on_hover_text(super::l("Live trades since Depth started; zoom in to read the numbers"));
             if self.fp {
                 ui.horizontal(|ui| {
-                    ui.add_space(18.0);
+                    indent(ui);
                     ui.selectable_value(&mut self.fp_style, 0, super::l("Cluster bars"));
                     ui.selectable_value(&mut self.fp_style, 1, super::l("Side clusters"));
                 });
@@ -2303,15 +2363,15 @@ impl Chart {
             });
             ui.checkbox(&mut self.heat, super::l("Book heatmap"));
             if perp { ui.checkbox(&mut self.liqmap, super::l("Liquidation map")).on_hover_text(t("chart.liqmap_tip")); }
-            ui.separator();
-            head(ui, super::l("Levels"));
+            menu_sep(ui);
+            menu_head(ui, super::l("Levels"));
             ui.checkbox(&mut self.sr, super::l("Volume profile (POC · value area · HVN)"));
             ui.checkbox(&mut self.breakouts, super::l("Breakouts (closes through VAH / VAL / HVN)"));
             ui.checkbox(&mut self.vwap, super::l("Session VWAP ±1σ ±2σ"));
             ui.checkbox(&mut self.cone, super::l("Expected move cone (volatility model)"));
             ui.checkbox(&mut self.walls, super::l("Liquidity walls"));
             if perp { ui.checkbox(&mut self.mark, super::l("Mark price")); }
-            ui.separator();
+            menu_sep(ui);
             ui.checkbox(&mut self.magnet, super::l("Magnet crosshair"));
         });
     }
@@ -2319,16 +2379,13 @@ impl Chart {
     /// Chart layout (the app owns the cells: the choice goes out through `layout_req`).
     fn layout_menu(&mut self, ui: &mut Ui) {
         const LAYOUTS: [(&str, &str); 5] = [("1", "One chart"), ("2", "Two side by side"), ("2v", "Two stacked"), ("3", "Three"), ("4", "Four")];
-        let (r, resp) = ui.allocate_exact_size(vec2(26.0, 22.0), Sense::click());
-        if resp.hovered() { ui.painter().rect_filled(r, 3, hl()); }
-        layout_glyph(ui.painter(), r.shrink2(vec2(5.0, 4.0)), &self.layout, if resp.hovered() { fg() } else { mu() });
+        let layout = self.layout.clone();
+        let resp = kit::icon_button(ui, kit::H, false, |p, r, col| layout_glyph(p, Rect::from_center_size(r.center(), vec2(16.0, 12.0)), &layout, col));
         egui::Popup::menu(&resp.on_hover_text(super::l("Chart layout: the toolbar drives the highlighted chart"))).show(|ui| {
+            menu_rows(ui, 200.0);
+            menu_head(ui, super::l("Layout"));
             for (id, name) in LAYOUTS {
-                ui.horizontal(|ui| {
-                    let (g, _) = ui.allocate_exact_size(vec2(18.0, 13.0), Sense::hover());
-                    layout_glyph(ui.painter(), g, id, if self.layout == id { accent() } else { mu() });
-                    if ui.selectable_label(self.layout == id, super::l(name)).clicked() { self.layout_req = Some(id.to_string()); ui.close(); }
-                });
+                if menu_row(ui, self.layout == id, super::l(name), Some(Glyph::Layout(id))).clicked() { self.layout_req = Some(id.to_string()); ui.close(); }
             }
         });
     }
@@ -2339,86 +2396,205 @@ impl Chart {
             Some((b.clone(), i, d.level_at(depth::now_ms())?, d.alert.clone()?))
         })).collect();
         rows.sort_by(|x, y| (x.0 != base, &x.0).cmp(&(y.0 != base, &y.0)));
-        let label = if rows.is_empty() { "🔔".to_string() } else { format!("🔔 {}", rows.len()) };
-        ui.menu_button(RichText::new(label).color(if rows.is_empty() { mu() } else { accent() }), |ui| {
-            ui.set_min_width(240.0);
-            if rows.is_empty() { ui.label(RichText::new(super::l("Right-click the chart or a line to add an alert")).color(dim())); }
+        let resp = tb_button(ui, super::l("Alerts"), if rows.is_empty() { Tb::Ghost } else { Tb::Tint }, rows.len(), false).on_hover_text(super::l("Price alerts"));
+        egui::Popup::menu(&resp).show(|ui| {
+            menu_rows(ui, 260.0);
+            menu_head(ui, super::l("Price alerts"));
+            if rows.is_empty() {
+                ui.horizontal(|ui| { ui.add_space(8.0); ui.label(RichText::new(super::l("Right-click the chart or a line to add an alert")).font(prop(12.0)).color(dim())); });
+            }
             for (b, i, px, snd) in rows {
                 ui.menu_button(format!("{b}  {}  ·  {}", fmt_px(px), sound_name(&snd)), |ui| {
+                    menu_rows(ui, 160.0);
                     if let Some(d) = self.drawings.get_mut(&b).and_then(|l| l.get_mut(i)) {
                         if let Some(s) = d.alert.as_mut() {
-                            for (id, name) in sounds() { if ui.selectable_label(*s == id, name).clicked() { play_sound(&id); *s = id; } }
+                            for (id, name) in sounds() { if menu_row(ui, *s == id, &name, None).clicked() { play_sound(&id); *s = id; } }
                         }
-                        ui.separator();
+                        menu_sep(ui);
                         if ui.button(RichText::new(super::l("Remove alert")).color(dn())).clicked() { d.alert = None; ui.close(); }
                     }
                 });
             }
-            ui.separator();
+            menu_sep(ui);
             ui.menu_button(super::l("Sound of new alerts"), |ui| {
-                for (id, name) in sounds() { if ui.selectable_label(self.alert_sound == id, name).clicked() { play_sound(&id); self.alert_sound = id; } }
+                menu_rows(ui, 160.0);
+                for (id, name) in sounds() { if menu_row(ui, self.alert_sound == id, &name, None).clicked() { play_sound(&id); self.alert_sound = id; } }
             });
-        }).response.on_hover_text(super::l("Price alerts"));
+        });
     }
 }
 
-/// Small painted icon button for drawing tools; `None` is the clear (trash) button.
-fn tool_button(ui: &mut Ui, tool: Option<Tool>, on: bool) -> egui::Response {
-    let (r, resp) = ui.allocate_exact_size(vec2(26.0, 22.0), Sense::click());
-    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered() || on, 0.1);
-    let p = ui.painter();
-    if hv > 0.0 { p.rect_filled(r, 3, hl().linear_multiply(if on { 1.0 } else { 0.6 * hv })); }
-    let col = if on { accent() } else { lerp(mu(), fg(), hv) };
-    let s = Stroke::new(1.4, col);
-    let c = r.center();
-    match tool {
-        Some(Tool::HLine) => {
-            p.hline(egui::Rangef::new(c.x - 8.0, c.x + 8.0), c.y, s);
-            p.circle_filled(c, 2.2, col);
-        }
-        Some(Tool::Trend) => {
-            let (a, b) = (c + vec2(-7.0, 6.0), c + vec2(7.0, -6.0));
-            p.line_segment([a, b], s);
-            p.circle_filled(a, 2.0, col);
-            p.circle_filled(b, 2.0, col);
-        }
-        Some(Tool::Ray) => {
-            let (a, b) = (c + vec2(-7.0, 6.0), c + vec2(8.0, -7.0));
-            p.line_segment([a, b], s);
-            p.circle_filled(a, 2.0, col);
-            p.line_segment([b, b + vec2(-5.0, 0.5)], s);
-            p.line_segment([b, b + vec2(-0.5, 5.0)], s);
-        }
-        Some(Tool::Fib) => {
-            for (k, dy) in [-6.0f32, -2.0, 2.0, 6.0].into_iter().enumerate() { p.hline(egui::Rangef::new(c.x - 8.0, c.x + 8.0 - k as f32 * 2.0), c.y + dy, Stroke::new(1.2, col)); }
-        }
-        Some(Tool::Rect) => { p.rect_stroke(Rect::from_center_size(c, vec2(15.0, 11.0)), 1, s, egui::StrokeKind::Middle); }
-        Some(Tool::Channel) => {
-            p.line_segment([c + vec2(-8.0, 2.0), c + vec2(6.0, -7.0)], s);
-            p.line_segment([c + vec2(-6.0, 7.0), c + vec2(8.0, -2.0)], s);
-        }
-        Some(Tool::Text) => { p.text(c, Align2::CENTER_CENTER, "T", prop(14.0), col); }
-        Some(Tool::Position) => {
-            p.rect_filled(Rect::from_min_max(c + vec2(-8.0, -7.0), c + vec2(8.0, 0.0)), 1, up().linear_multiply(0.7));
-            p.rect_filled(Rect::from_min_max(c + vec2(-8.0, 0.0), c + vec2(8.0, 5.0)), 1, dn().linear_multiply(0.7));
-        }
-        Some(Tool::Measure) => {
-            p.vline(c.x, egui::Rangef::new(c.y - 7.0, c.y + 7.0), s);
-            p.line_segment([c + vec2(0.0, -7.0), c + vec2(-3.0, -4.0)], s);
-            p.line_segment([c + vec2(0.0, -7.0), c + vec2(3.0, -4.0)], s);
-            p.line_segment([c + vec2(0.0, 7.0), c + vec2(-3.0, 4.0)], s);
-            p.line_segment([c + vec2(0.0, 7.0), c + vec2(3.0, 4.0)], s);
-        }
-        None => {
-            // trash can
-            p.hline(egui::Rangef::new(c.x - 6.0, c.x + 6.0), c.y - 5.0, s);
-            p.hline(egui::Rangef::new(c.x - 2.0, c.x + 2.0), c.y - 7.0, s);
-            p.line_segment([c + vec2(-4.5, -5.0), c + vec2(-3.5, 6.0)], s);
-            p.line_segment([c + vec2(4.5, -5.0), c + vec2(3.5, 6.0)], s);
-            p.hline(egui::Rangef::new(c.x - 3.5, c.x + 3.5), c.y + 6.0, s);
-        }
-    }
+// ---------------------------------------------------------------------- chrome primitives
+// Local to the chart (the kit has no pill / menu row / painted glyph yet).
+
+/// Interval pill (design: 26 px, 12.5; selected = hl fill, semibold, strong text).
+fn pill(ui: &mut Ui, text: &str, on: bool) -> egui::Response {
+    let font = if on { prop_s(12.5) } else { prop_m(12.5) };
+    let w = if text.is_empty() { 22.0 } else { ui.painter().layout_no_wrap(text.to_string(), prop_s(12.5), fg()).size().x + 16.0 };
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click());
+    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() && !on, 0.1);
+    if on { ui.painter().rect_filled(r, kit::R, hl()); } else if hv > 0.0 { ui.painter().rect_filled(r, kit::R, hl().gamma_multiply(0.6 * hv)); }
+    if !text.is_empty() { ui.painter().text(r.center(), Align2::CENTER_CENTER, text, font, if on { fg_strong() } else { lerp(mu(), fg(), hv) }); }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Tb { Outline, Ghost, Tint }
+
+/// Toolbar button, 28 px: outlined (menus), text only, or accent-tinted (armed alerts, replay on);
+/// `badge` > 0 adds a count pill, `chev` a down chevron.
+fn tb_button(ui: &mut Ui, text: &str, look: Tb, badge: usize, chev: bool) -> egui::Response {
+    let font = if look == Tb::Tint { prop_s(12.0) } else { prop_m(12.5) };
+    let g = ui.painter().layout_no_wrap(text.to_string(), font, fg());
+    let bg = (badge > 0 && look != Tb::Tint).then(|| ui.painter().layout_no_wrap(badge.to_string(), mono_s(11.0), fg()));
+    let w = g.size().x + 20.0 + bg.as_ref().map_or(0.0, |b| b.size().x + 16.0) + if chev { 14.0 } else { 0.0 } + if look == Tb::Tint && badge > 0 { 14.0 } else { 0.0 };
+    let (r, resp) = ui.allocate_exact_size(vec2(w, kit::H), Sense::click());
+    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered(), 0.1);
+    let p = ui.painter();
+    let (fill, stroke, col) = match look {
+        Tb::Outline => (lerp(panel2(), hl(), hv), Stroke::new(1.0, lerp(line(), edge(), hv)), lerp(fg(), fg_strong(), hv)),
+        Tb::Ghost => (hl().gamma_multiply(0.7 * hv), Stroke::NONE, lerp(mu(), fg_strong(), hv)),
+        Tb::Tint => (accent().gamma_multiply(0.16 + 0.06 * hv), Stroke::NONE, accent()),
+    };
+    p.rect(r, kit::R, fill, stroke, egui::StrokeKind::Inside);
+    let mut x = r.left() + 10.0;
+    p.text(pos2(x, r.center().y), Align2::LEFT_CENTER, text, if look == Tb::Tint { prop_s(12.0) } else { prop_m(12.5) }, col);
+    x += g.size().x;
+    if look == Tb::Tint && badge > 0 { p.text(pos2(x + 5.0, r.center().y), Align2::LEFT_CENTER, badge.to_string(), mono_s(12.0), col); }
+    if let Some(b) = bg {
+        let br = Rect::from_min_size(pos2(x + 6.0, r.center().y - 9.0), vec2(b.size().x + 12.0, 18.0));
+        p.rect_filled(br, 5, accent().gamma_multiply(0.2));
+        p.text(br.center(), Align2::CENTER_CENTER, badge.to_string(), mono_s(11.0), lerp(accent(), Color32::WHITE, 0.35));
+    }
+    if chev { chevron_down(p, pos2(r.right() - 13.0, r.center().y), mu()); }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Small down chevron centered on `c`.
+fn chevron_down(p: &egui::Painter, c: Pos2, col: Color32) {
+    p.add(egui::Shape::line(vec![c + vec2(-3.5, -1.5), c + vec2(0.0, 2.0), c + vec2(3.5, -1.5)], Stroke::new(1.3, col)));
+}
+
+/// Vertical hairline between toolbar groups.
+fn vsep(ui: &mut Ui) {
+    let (r, _) = ui.allocate_exact_size(vec2(1.0, 18.0), Sense::hover());
+    ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, line()));
+}
+
+/// Menu body (design: popups radius 6 with a soft shadow come from the style): 28 px rows.
+fn menu_rows(ui: &mut Ui, w: f32) {
+    ui.set_min_width(w);
+    let s = ui.spacing_mut();
+    s.interact_size.y = 26.0;
+    s.button_padding = vec2(8.0, 0.0);
+    s.item_spacing.y = 2.0;
+    s.icon_spacing = 8.0;
+}
+
+/// Section overline inside a menu.
+fn menu_head(ui: &mut Ui, s: &str) {
+    ui.add_space(2.0);
+    ui.horizontal(|ui| { ui.add_space(8.0); kit::overline(ui, s); });
+}
+
+/// Hairline between menu sections.
+fn menu_sep(ui: &mut Ui) {
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 7.0), Sense::hover());
+    ui.painter().hline(r.x_range().shrink(4.0), r.center().y, Stroke::new(1.0, line()));
+}
+
+/// A 28 px menu row: check mark (or `glyph`) column, label; hover fill.
+fn menu_row(ui: &mut Ui, on: bool, text: &str, glyph: Option<Glyph>) -> egui::Response {
+    let tw = ui.painter().layout_no_wrap(text.to_string(), prop(12.5), fg()).size().x + 44.0;
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.min_rect().width().max(tw), 26.0), Sense::click());
+    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered(), 0.08);
+    let p = ui.painter();
+    if hv > 0.0 { p.rect_filled(r, kit::R, hl().gamma_multiply(hv)); }
+    let lead = Rect::from_center_size(pos2(r.left() + 17.0, r.center().y), vec2(18.0, 18.0));
+    match glyph {
+        Some(g) => paint_glyph(p, lead, g, if on { accent() } else { mu() }),
+        None if on => { p.add(egui::Shape::line(vec![lead.center() + vec2(-4.0, 0.0), lead.center() + vec2(-1.0, 3.0), lead.center() + vec2(4.5, -3.5)], Stroke::new(1.5, accent()))); }
+        None => {}
+    }
+    p.text(pos2(r.left() + 32.0, r.center().y), Align2::LEFT_CENTER, text, prop(12.5), if on || hv > 0.5 { fg_strong() } else { fg() });
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Painted toolbar glyphs.
+#[derive(Clone, Copy)]
+enum Glyph { Tool(Tool), Trash, Eye(bool), More, Layout(&'static str) }
+
+/// Drawing-tool button on the toolbar strip (design: 28 x 24; selected = hl fill, strong glyph).
+fn tool_button(ui: &mut Ui, g: Glyph, on: bool) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(28.0, 24.0), Sense::click());
+    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered() && !on, 0.1);
+    let p = ui.painter();
+    if on { p.rect_filled(r, kit::R, hl()); } else if hv > 0.0 { p.rect_filled(r, kit::R, hl().gamma_multiply(0.7 * hv)); }
+    paint_glyph(p, r, g, if on { fg_strong() } else { lerp(mu(), fg_strong(), hv) });
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Paints `g` centered in `r` (glyphs are ~14 px).
+fn paint_glyph(p: &egui::Painter, r: Rect, g: Glyph, col: Color32) {
+    let s = Stroke::new(1.3, col);
+    let c = r.center();
+    match g {
+        Glyph::Tool(Tool::HLine) => {
+            p.hline(egui::Rangef::new(c.x - 7.0, c.x + 7.0), c.y, s);
+            p.circle_filled(c, 2.0, col);
+        }
+        Glyph::Tool(Tool::Trend) => {
+            let (a, b) = (c + vec2(-6.0, 5.0), c + vec2(6.0, -5.0));
+            p.line_segment([a, b], s);
+            p.circle_stroke(a, 1.8, s);
+            p.circle_stroke(b, 1.8, s);
+        }
+        Glyph::Tool(Tool::Ray) => {
+            let (a, b) = (c + vec2(-6.0, 5.0), c + vec2(6.5, -5.5));
+            p.line_segment([a, b], s);
+            p.circle_stroke(a, 1.8, s);
+            p.line_segment([b, b + vec2(-4.5, 0.3)], s);
+            p.line_segment([b, b + vec2(-0.3, 4.5)], s);
+        }
+        Glyph::Tool(Tool::Fib) => {
+            for (k, dy) in [-5.0f32, -1.7, 1.7, 5.0].into_iter().enumerate() { p.hline(egui::Rangef::new(c.x - 7.0, c.x + 7.0 - (k % 2) as f32 * 3.0), c.y + dy, Stroke::new(1.2, col)); }
+        }
+        Glyph::Tool(Tool::Rect) => { p.rect_stroke(Rect::from_center_size(c, vec2(13.0, 10.0)), 1, s, egui::StrokeKind::Middle); }
+        Glyph::Tool(Tool::Channel) => {
+            p.line_segment([c + vec2(-7.0, 2.0), c + vec2(5.0, -6.0)], s);
+            p.line_segment([c + vec2(-5.0, 6.0), c + vec2(7.0, -2.0)], s);
+        }
+        Glyph::Tool(Tool::Text) => { p.text(c, Align2::CENTER_CENTER, "T", prop_m(13.5), col); }
+        Glyph::Tool(Tool::Position) => {
+            p.rect_stroke(Rect::from_min_max(c + vec2(-7.0, -6.0), c + vec2(7.0, 0.0)), 1, Stroke::new(1.2, up()), egui::StrokeKind::Middle);
+            p.rect_stroke(Rect::from_min_max(c + vec2(-7.0, 0.0), c + vec2(7.0, 5.0)), 1, Stroke::new(1.2, dn()), egui::StrokeKind::Middle);
+        }
+        Glyph::Tool(Tool::Measure) => {
+            p.vline(c.x, egui::Rangef::new(c.y - 6.5, c.y + 6.5), s);
+            for d in [-1.0f32, 1.0] {
+                let tip = c + vec2(0.0, 6.5 * d);
+                p.line_segment([tip, tip + vec2(-3.0, -3.0 * d)], s);
+                p.line_segment([tip, tip + vec2(3.0, -3.0 * d)], s);
+            }
+        }
+        Glyph::Trash => {
+            p.hline(egui::Rangef::new(c.x - 5.5, c.x + 5.5), c.y - 4.5, s);
+            p.hline(egui::Rangef::new(c.x - 2.0, c.x + 2.0), c.y - 6.5, s);
+            p.line_segment([c + vec2(-4.0, -4.5), c + vec2(-3.2, 6.0)], s);
+            p.line_segment([c + vec2(4.0, -4.5), c + vec2(3.2, 6.0)], s);
+            p.hline(egui::Rangef::new(c.x - 3.2, c.x + 3.2), c.y + 6.0, s);
+        }
+        Glyph::Eye(hidden) => {
+            // almond outline from two arcs, the pupil; struck through when drawings are hidden
+            let arc = |up: f32| (0..=12).map(|k| { let t = k as f32 / 12.0; pos2(c.x - 7.0 + 14.0 * t, c.y + up * 4.5 * (std::f32::consts::PI * t).sin()) }).collect::<Vec<_>>();
+            p.add(egui::Shape::line(arc(-1.0), s));
+            p.add(egui::Shape::line(arc(1.0), s));
+            p.circle_stroke(c, 2.0, s);
+            if hidden { p.line_segment([c + vec2(-6.0, 6.0), c + vec2(6.0, -6.0)], s); }
+        }
+        Glyph::More => { for dx in [-4.5f32, 0.0, 4.5] { p.circle_filled(c + vec2(dx, 0.0), 1.3, col); } }
+        Glyph::Layout(id) => layout_glyph(p, Rect::from_center_size(c, vec2(15.0, 11.0)), id, col),
+    }
 }
 
 /// Small picture of a chart layout ("1", "2", "2v", "3", "4") inside `r`.
