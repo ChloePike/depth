@@ -131,7 +131,7 @@ impl VenuePages {
                 Some(net) if net > 0.0 => {
                     let s = |k: &str| arb[k].as_str().unwrap_or_default().to_string();
                     let text = lf("Buy %@ %@, sell %@ %@: %+.1f bp after fees", &[s("buy"), fmt_px(f(&arb["ask"]).unwrap_or(0.0)), s("sell"), fmt_px(f(&arb["bid"]).unwrap_or(0.0)), format!("{net:+.1}")]);
-                    ui.add(egui::Label::new(egui::RichText::new(format!("⇄  {text}")).font(prop_m(12.0)).color(up())).wrap())
+                    ui.add(egui::Label::new(egui::RichText::new(format!("↔  {text}")).font(prop_m(12.0)).color(up())).wrap())
                         .on_hover_text(lf("%@ books only, gross %+.1f bp, taker fees from Settings → Trading. Top of book only: size and latency decide whether it fills.",
                             &[s("quote"), format!("{:+.1}", f(&arb["gross_bps"]).unwrap_or(0.0))]));
                 }

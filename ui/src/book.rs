@@ -14,10 +14,17 @@ const RATIO_H: f32 = 36.0;
 /// height of the native header laid over the book column (points)
 pub const NATIVE_HEADER: f32 = 62.0;
 
-const GROUPS: [f64; 5] = [1.0, 2.0, 5.0, 10.0, 50.0];
+/// Price grouping steps: powers of ten from the finest (as on the venues: 0.1 / 1 / 10 / 100 for BTC).
+const GROUPS: [f64; 4] = [1.0, 10.0, 100.0, 1000.0];
+
+/// Finest grouping for a price: 10^(digits before the point - 6), so BTC ~83,000 starts at 0.1,
+/// ETH ~2,500 at 0.01, HYPE ~80 at 0.0001.
+fn base_step(mid: f64) -> f64 { 10f64.powi(mid.max(1e-12).log10().floor() as i32 - 5) }
 
 /// `quote`: sizes in quote currency (size x price) instead of base.
 pub struct BookView { trades: bool,
+    /// the trade tape under the book (Settings); off, the book fills the column
+    pub show_tape: bool,
 
     /// 2 venues, 3 quant (own window only); otherwise `trades` picks book or tape
     pub page: u8, pub src: Option<Exchange>, group: usize, pub clicked: Option<(Exchange, f64)>, quote: bool,
@@ -41,7 +48,7 @@ const FLASH_GAP: Duration = Duration::from_millis(300);
 /// (and the aggregation across ten venues is not free).
 const REFRESH: Duration = Duration::from_millis(100);
 
-impl Default for BookView { fn default() -> Self { BookView { trades: false, page: 0, src: None, group: 1, clicked: None, quote: false, min_usd: 0, cache: None, flash: Default::default(), seen: Default::default(), last_mid: (0.0, true) } } }
+impl Default for BookView { fn default() -> Self { BookView { trades: false, show_tape: true, page: 0, src: None, group: 0, clicked: None, quote: false, min_usd: 0, cache: None, flash: Default::default(), seen: Default::default(), last_mid: (0.0, true) } } }
 
 /// Quote amounts: 12.3K / 4.56M style, whole units below a thousand.
 fn fmt_big_book(v: f64) -> String {
@@ -68,7 +75,7 @@ impl BookView {
         let mut vs: Vec<String> = a.venues.keys().filter(|(_, m)| *m == market).map(|(e, _)| format!("{e:?}")).collect();
         vs.sort();
         let mid = match self.src { None => a.mid(market), Some(e) => a.venues.get(&(e, market)).and_then(|v| v.mid()) };
-        let groups: Vec<String> = mid.map(|m| { let b = depth::agg::nice(m * 1e-5); GROUPS.iter().map(|g| fmt_dp(b * g, step_dp(b * g))).collect() }).unwrap_or_default();
+        let groups: Vec<String> = mid.map(|m| { let b = base_step(m); GROUPS.iter().map(|g| fmt_dp(b * g, step_dp(b * g))).collect() }).unwrap_or_default();
         serde_json::json!({"trades": self.trades, "quote": self.quote, "src": self.src.map(|e| format!("{e:?}")), "venues": vs, "group": self.group, "groups": groups})
     }
 
@@ -86,7 +93,7 @@ impl BookView {
                 "big": x.qty >= big, "t": super::hms(x.ts), "ex": format!("{:?}", x.ex)})).collect::<Vec<_>>()});
         }
         let Some(mid) = (match self.src { None => a.mid(market), Some(e) => a.venues.get(&(e, market)).and_then(|v| v.mid()) }) else { return json!({}) };
-        let base_bin = depth::agg::nice(mid * 1e-5);
+        let base_bin = base_step(mid);
         let bin = base_bin * GROUPS[self.group.min(GROUPS.len() - 1)];
         depth::ex::hyperliquid::set_book_group(bin);
         let (bids, asks) = match self.src {
@@ -147,17 +154,17 @@ impl BookView {
             ui.label(t("chart.loading"));
             return;
         };
-        let base_bin = depth::agg::nice(mid * 1e-5);
-        let bin = base_bin * GROUPS[self.group];
+        let base_bin = base_step(mid);
+        let bin = base_bin * GROUPS[self.group.min(GROUPS.len() - 1)];
         // last move of the mid colors the mid row
         if (mid - self.last_mid.0).abs() > bin * 1e-6 { self.last_mid = (mid, mid >= self.last_mid.0); }
 
         let full = ui.available_rect_before_wrap();
         ui.allocate_rect(full, Sense::hover());
-        // depth on top, the (filterable) tape under it: both at a glance, as on a venue's own page
-        let split = (full.top() + full.height() * 0.62).round();
+        // depth on top, the (filterable) tape under it unless Settings hides it: then the book fills the column
+        let split = if self.show_tape { (full.top() + full.height() * 0.62).round() } else { full.bottom() };
         let rect = Rect::from_min_max(full.min, pos2(full.right(), split));
-        self.tape(ui, Rect::from_min_max(pos2(full.left(), split), full.max), a, market, scope, true);
+        if self.show_tape { self.tape(ui, Rect::from_min_max(pos2(full.left(), split), full.max), a, market, scope, true); }
         let painter = ui.painter_at(rect.expand2(vec2(2.0, 0.0)));
         // rows stretch to fill the column: header, mid line and ratio bar are fixed, the rest is levels
         let fixed = HEAD + MID_H + RATIO_H;
@@ -188,7 +195,8 @@ impl BookView {
 
         // columns as the design: price left, size and total right-aligned (76 / 70 wide); the
         // aggregate adds a narrow per-venue split on the far right
-        let split_w = if self.src.is_none() { 24.0 } else { 0.0 };
+        // (the per-venue split of a level is in its hover tooltip, not on the row)
+        let split_w = 0.0f32;
         let x_px = rect.left() + 2.0;
         let x_tot = rect.right() - 2.0 - split_w;
         let x_size = x_tot - 70.0;
@@ -232,6 +240,15 @@ impl BookView {
                     blocks.entry((ask, key)).or_default().extend(orders.iter().map(|o| (o.qty, o.src, e, o.since, o.since_known)));
                 }
             }
+        }
+        if !blocks.is_empty() {
+            // what the thin strip under the rows is
+            let c = pos2(rect.left() + rect.width() * 0.30, hy);
+            painter.rect_filled(Rect::from_min_size(pos2(c.x, c.y - 1.5), vec2(12.0, 4.0)), 1, mu());
+            let lr = painter.text(pos2(c.x + 16.0, c.y), Align2::LEFT_CENTER, l("orders"), prop(10.5), mu());
+            let zone = Rect::from_min_max(pos2(c.x - 2.0, rect.top()), pos2(lr.right() + 2.0, rect.top() + HEAD));
+            ui.interact(zone, ui.id().with("l3legend"), Sense::hover())
+                .on_hover_text(l("The strip under each level shows its individual resting orders, largest separate, small ones merged. Lighter: exact. OKX and Hyperliquid: inferred from order counts (faint = only the count is known)."));
         }
         let hover = ui.input(|i| i.pointer.hover_pos());
         // strings for the block tooltip (the row closure's `l` is a level)
@@ -291,15 +308,12 @@ impl BookView {
             painter.text(pos2(x_px, cy), Align2::LEFT_CENTER, fmt_dp(l.px, dp), mono_m(12.0), col);
             painter.text(pos2(x_size, cy), Align2::RIGHT_CENTER, fs(size(l)), mono(12.0), fg());
             painter.text(pos2(x_tot, cy), Align2::RIGHT_CENTER, ft(c), mono(12.0), mu());
-            if split_w > 0.0 {
-                // per-venue split of this level, venue colors, rounded ends
-                let (mut x, total, bw) = (x_tot + 6.0, l.qty.max(1e-12), split_w - 6.0);
-                let back = Rect::from_min_size(pos2(x, cy - 2.0), vec2(bw, 4.0));
-                for (e, q) in &l.by {
-                    let ww = (q / total) as f32 * bw;
-                    painter.with_clip_rect(back).rect_filled(Rect::from_min_size(pos2(x, cy - 2.0), vec2(ww, 4.0)), 0, ex_color(*e));
-                    x += ww;
-                }
+            // hovering a row of the aggregate: where its size rests (an order block's tooltip wins)
+            if l.by.len() > 1 && hover.is_some_and(|h| r.contains(h)) && tip.borrow().is_none() {
+                let total = l.qty.max(1e-12);
+                let mut by: Vec<&(Exchange, f64)> = l.by.iter().collect();
+                by.sort_by(|x, y| y.1.total_cmp(&x.1));
+                *tip.borrow_mut() = Some(by.iter().map(|(e, q)| format!("{e:?}  {}  {:.0}%", qty_sig(*q), q / total * 100.0)).collect::<Vec<_>>().join("\n"));
             }
         };
         let top = rect.top() + HEAD;
@@ -418,8 +432,8 @@ impl BookView {
         if seg_fit(&mut c, &mut unit, &[(0, base), (1, "USDT")]) { self.quote = unit == 1; }
         if !self.trades {
             if let Some(mid) = mid {
-                let base_bin = depth::agg::nice(mid * 1e-5);
-                let bin = base_bin * GROUPS[self.group];
+                let base_bin = base_step(mid);
+                let bin = base_bin * GROUPS[self.group.min(GROUPS.len() - 1)];
                 let group = &mut self.group;
                 dropdown(&mut c, 56.0, &fmt_dp(bin, step_dp(bin)), mono_m(12.0), None, l("Price grouping"), |ui| {
                     for (i, g) in GROUPS.iter().enumerate() {

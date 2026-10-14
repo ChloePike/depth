@@ -331,6 +331,17 @@ impl App {
                 }
                 ui.add_space(6.0);
                 top::TopBar::clock(ui);
+                // the chart toolbar uses the free middle of the title bar (drives the active chart)
+                if self.mode != Market::Option {
+                    ui.add_space(16.0);
+                    let w = ui.available_width();
+                    let base = self.eng.base.clone();
+                    let mk = if self.mode == Market::Margin { Market::Spot } else { self.mode };
+                    ui.allocate_ui_with_layout(egui::vec2(w, 30.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add_space(8.0);
+                        self.chart.toolbar(ui, a, mk, &base);
+                    });
+                }
             });
         });
         // stats strip, 44 px, hairline below; scrolls when the window is narrow
@@ -581,6 +592,8 @@ impl App {
         self.chart.layout = self.layout.clone();
         for o in self.others.iter_mut() { o.1.layout = self.layout.clone(); if let Some(l) = o.1.layout_req.take() { self.layout = l; } }
         if let Some(l) = self.chart.layout_req.take() { self.layout = l; }
+        self.chart.toolbar_in_header = !self.hosted;
+        for o in self.others.iter_mut() { o.1.toolbar_in_header = !self.hosted; }
         let cells = layout_cells(&self.layout, ui.available_rect_before_wrap());
         if cells.len() == 1 { self.chart.multi = false; return self.chart.show(ui, a, self.mode, &base); }
         self.fill_cells(cells.len());
@@ -796,6 +809,7 @@ impl App {
         let n = layout_cells(&self.layout, egui::Rect::NOTHING).len();
         let tfs: Vec<i64> = self.others.iter().filter(|o| o.0 < n).map(|o| o.1.tf).collect();
         for tf in tfs { self.eng.ensure_tf(chart::native_tf(tf) as u32, &ctx); }
+        self.book.show_tape = self.prefs.book_tape;
         if self.eng.l3_flowscan != self.prefs.hl_flowscan {
             self.eng.l3_flowscan = self.prefs.hl_flowscan;
             // a running Hyperliquid L3 feed switches source now

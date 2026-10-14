@@ -508,17 +508,25 @@ impl AccountPanel {
         let mut bals: Vec<&Value> = st["balances"].as_array().map(|a| a.iter().collect()).unwrap_or_default();
         bals.sort_by(|a, b| s(&b["ex"]).cmp(s(&a["ex"])));
         let (k, v) = (|t: &str| Seg::T(t.to_string(), prop(12.0), dim()), |t: String, c: Color32| Seg::T(t, mono_s(12.0), c));
-        for b in bals {
+        // what differs per venue is only its liquidation metric: one small group each (venues with
+        // money only), right-most; equity and available are summed across venues, per venue in the tooltip
+        let funded: Vec<&Value> = bals.into_iter().filter(|b| f(&b["equity"]) > 0.0).collect();
+        for b in &funded {
             let mut segs = vec![];
             if let Some(e) = Exchange::parse(s(&b["ex"])) { segs.push(Seg::I(e)); }
-            segs.extend([k(l("Equity")), v(usd(f(&b["equity"])), fg()), k(l("Available")), v(usd(f(&b["available"])), fg())]);
             if let Some(m) = b["uni_mmr"].as_f64() { segs.extend([k("uniMMR"), Seg::G(mmr_risk(m)), v(fmt_dp(m, 2), if m > 1.5 { up() } else if m > 1.2 { WARN } else { dn() })]); }
-            if let Some(r) = b["mm_rate"].as_f64() { segs.extend([k(l("MM rate")), Seg::G(r as f32), v(format!("{:.1}%", r * 100.0), if r < 0.5 { up() } else if r < 0.8 { WARN } else { dn() })]); }
-            let mut tip = format!("{} · {} {} USD · {} {} USD", s(&b["ex"]), l("Equity"), usd(f(&b["equity"])), l("Available"), usd(f(&b["available"])));
-            if let Some(m) = b["maint_margin"].as_f64() { tip += &format!("\n{} {} USD", l("Maintenance margin"), usd(m)); }
+            else if let Some(r) = b["mm_rate"].as_f64() { segs.extend([k(l("MM rate")), Seg::G(r as f32), v(format!("{:.1}%", r * 100.0), if r < 0.5 { up() } else if r < 0.8 { WARN } else { dn() })]); }
+            else { continue; }
+            let mut tip = s(&b["ex"]).to_string();
+            if let Some(m) = b["maint_margin"].as_f64() { tip += &format!(" · {} {} USD", l("Maintenance margin"), usd(m)); }
             if !b["uni_mmr"].is_null() { tip += "\n"; tip += l("Portfolio Margin maintenance ratio: below 1.20 margin call, below 1.05 the whole account is liquidated. Higher is safer."); }
             if !b["mm_rate"].is_null() { tip += "\n"; tip += l("Unified account maintenance margin rate: 100% triggers liquidation. Lower is safer."); }
             if !segs_group(ui, &segs, &tip) { return; }
+        }
+        if !funded.is_empty() {
+            let (eq, av): (f64, f64) = funded.iter().fold((0.0, 0.0), |(a, b), x| (a + f(&x["equity"]), b + f(&x["available"])));
+            let tip = funded.iter().map(|b| format!("{}  {} {}  ·  {} {}", s(&b["ex"]), l("Equity"), usd(f(&b["equity"])), l("Available"), usd(f(&b["available"])))).collect::<Vec<_>>().join("\n");
+            if !segs_group(ui, &[k(l("Equity")), v(usd(eq), fg()), k(l("Available")), v(usd(av), fg())], &tip) { return; }
         }
         let sum = |g: &dyn Fn(&Value) -> f64| ps.iter().map(g).sum::<f64>();
         let upnl = sum(&|p| f(&p["upnl"]));
@@ -1032,7 +1040,7 @@ impl AccountPanel {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    if kit::button(ui, &format!("⇄ {}", l("Transfer")), Look::Link, H_SM, None, true).clicked() { acts.push(Act::Transfer(ex.to_string())); }
+                    if kit::button(ui, &format!("↔ {}", l("Transfer")), Look::Link, H_SM, None, true).clicked() { acts.push(Act::Transfer(ex.to_string())); }
                     if w["loading"] == true {
                         let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
                         spinner(ui, r.center(), 5.0);

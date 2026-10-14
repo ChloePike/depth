@@ -401,7 +401,7 @@ impl OrderPanel {
                 ui.label(RichText::new(l("Available")).font(prop(12.0)).color(mu()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    if has_key && kit::button(ui, "⇄", Look::Link, 18.0, Some(18.0), true).on_hover_text(l("Move funds between accounts on this venue")).clicked() { self.open_transfer = Some(venue.clone()); }
+                    if has_key && kit::button(ui, "↔", Look::Link, 18.0, Some(18.0), true).on_hover_text(l("Move funds between accounts on this venue")).clicked() { self.open_transfer = Some(venue.clone()); }
                     ui.label(RichText::new(f(&t["available"]).map(|a| format!("{} USDT", usd(a))).unwrap_or("–".into())).font(mono_m(12.0)).color(fg()));
                 });
             });
@@ -504,7 +504,7 @@ impl OrderPanel {
             }
             if t["verified"] == false { kit::chip(ui, l("Untested"), Tone::Warn).on_hover_text(l("Order placement on this venue is not yet verified on a live account: start with the minimum size.")); }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let name = if smart { format!("⑂ {}", l("Smart")) } else { format!("{venue} ▾") };
+                let name = if smart { format!("{} ▾", l("Smart")) } else { format!("{venue} ▾") };
                 let r = kit::button(ui, &name, Look::Link, H_SM, None, true)
                     .on_hover_text(format!("{} {} · {} {}", l("Push"), ms(f(&t["push_ms"])), l("RTT"), ms(f(&t["rtt_ms"]))));
                 egui::Popup::menu(&r).show(|ui| {
@@ -759,7 +759,7 @@ impl OrderPanel {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(l("Account")).font(prop_s(14.0)).color(fg_strong()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if kit::button(ui, &format!("⇄ {}", l("Transfer")), Look::Link, H_SM, None, true).on_hover_text(l("Move funds between this venue's accounts")).clicked() { self.open_transfer = Some(venue.to_string()); }
+                    if kit::button(ui, &format!("↔ {}", l("Transfer")), Look::Link, H_SM, None, true).on_hover_text(l("Move funds between this venue's accounts")).clicked() { self.open_transfer = Some(venue.to_string()); }
                 });
             });
             // the account-level number that liquidates a unified account, with a risk gauge beside it

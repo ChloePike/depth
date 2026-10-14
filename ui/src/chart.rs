@@ -391,13 +391,15 @@ pub struct Chart {
     /// set by the app: its chart layout; the toolbar's choice goes back through `layout_req`
     #[serde(skip)] pub layout: String,
     #[serde(skip)] pub layout_req: Option<String>,
+    /// set by the app: the toolbar sits in the window's title bar, not above the chart
+    #[serde(skip)] pub toolbar_in_header: bool,
 }
 
 impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, whale_usd: 100_000.0, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, toolbar_in_header: false, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, whale_usd: 100_000.0, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
             panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false), (Pane::Delta, false)],
         }
     }
@@ -716,7 +718,8 @@ impl Chart {
         for p in [Pane::Premium, Pane::Ofi, Pane::BookFlow, Pane::Rsi, Pane::Macd, Pane::Delta] { if !self.panes.iter().any(|x| x.0 == p) { self.panes.push((p, false)); } }
         let smarket = if market == Market::Margin { Market::Spot } else { market };
         // hosted: the native toolbar above the chart drives these through native_set
-        if !native() { self.toolbar(ui, a, smarket, base); }
+        // the plain app draws the toolbar in its title bar (toolbar_in_header); hosted, the native toolbar
+        if !native() && !self.toolbar_in_header { self.toolbar(ui, a, smarket, base); }
         self.base_unit = base.to_string();
         let Some(series) = a.series.get(&(self.src, smarket)) else {
             ui.centered_and_justified(|ui| ui.label(t("chart.loading")));
@@ -968,6 +971,31 @@ impl Chart {
             taken.push(cand);
             cand
         };
+        // context levels (POC / VA / S/R / VWAP / breakouts) may slide one tag height at most; further
+        // away the tag would name the wrong price, so it is dropped (the line and the legend stay)
+        let try_place = |r: Rect, taken: &mut Vec<Rect>| -> Option<Rect> {
+            let h = r.height() + 2.0;
+            let cand = [0.0, -h * 0.5, h * 0.5, -h, h].iter().map(|d| r.translate(vec2(0.0, *d))).find(|c| taken.iter().all(|t| !t.intersects(*c)))?;
+            taken.push(cand);
+            Some(cand)
+        };
+        // the tags that matter most are reserved before any context level: mark price, then the
+        // account's own position / order lines (drawn later, in their reserved slots)
+        let mark = if self.mark && smarket == Market::Perp && live {
+            match self.src {
+                Some(e) => a.venues.get(&(e, Market::Perp)).and_then(|v| v.mark),
+                None => {
+                    let (mut num, mut den) = (0.0, 0.0);
+                    for ((e, m), v) in a.venues.iter().filter(|((_, m), _)| *m == Market::Perp) {
+                        if let (Some(mk), Some(oi)) = (v.mark, v.oi) { let w = oi.max(1e-9); num += mk * a.usdt(*e, *m) * w; den += w; }
+                    }
+                    (den > 0.0).then(|| num / den)
+                }
+            }
+        } else { None };
+        let mark_ax = mark.filter(|m| *m > lo && *m < hi).map(|mk| place(Rect::from_min_size(pos2(main.right() + 2.0, y(mk) - 9.0), vec2(AXIS_W - 4.0, 18.0)), &mut taken));
+        let line_ax: Vec<Option<Rect>> = self.lines.iter().map(|l| (live && l.price > lo && l.price < hi)
+            .then(|| place(Rect::from_min_size(pos2(main.right() + 2.0, y(l.price) - 9.0), vec2(AXIS_W - 4.0, 18.0)), &mut taken))).collect();
 
         // volume profile of the visible range (1m bars): histogram on the right, POC, value area,
         // high-volume nodes as support / resistance, and closes through them as breakouts
@@ -1025,9 +1053,10 @@ impl Chart {
                 let r = Rect::from_min_size(pos2(main.left() + 4.0, y(px) - 13.0), vec2(g.size().x + 6.0, 12.0));
                 painter.rect_filled(r, 2, label_bg().gamma_multiply(0.8));
                 painter.galley(r.center() - g.size() / 2.0, g, col);
-                let ax = place(Rect::from_min_size(pos2(main.right() + 2.0, y(px) - 8.0), vec2(AXIS_W - 4.0, 16.0)), &mut taken);
-                painter.rect_filled(ax, 2, col.linear_multiply(0.85));
-                painter.text(ax.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(px), mono_m(11.0), Color32::BLACK);
+                if let Some(ax) = try_place(Rect::from_min_size(pos2(main.right() + 2.0, y(px) - 8.0), vec2(AXIS_W - 4.0, 16.0)), &mut taken) {
+                    painter.rect_filled(ax, 2, col.linear_multiply(0.85));
+                    painter.text(ax.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(px), mono_m(11.0), Color32::BLACK);
+                }
             }
         }
         if let (true, Some(p)) = (self.breakouts, prof.as_ref()) {
@@ -1042,17 +1071,22 @@ impl Chart {
                 if !(l.px > lo && l.px < hi) { continue; }
                 // a failed break up traps longs (bearish), a failed break down traps shorts: color by that
                 let col = if is_up != failed { up() } else { dn() };
+                // TradingView-style level: a thin line (dashed when the break failed), a small solid
+                // label at the right edge of the plot and the price on the axis; nothing over the candles
                 let ly = y(l.px);
                 let clip = painter.with_clip_rect(main_plot);
-                if failed { clip.extend(egui::Shape::dashed_line(&[pos2(main.left(), ly), pos2(main.right(), ly)], Stroke::new(1.2, col), 6.0, 4.0)); }
-                else { clip.hline(main.left()..=main.right(), ly, Stroke::new(1.5, col)); }
+                let st = Stroke::new(1.0, col.gamma_multiply(0.75));
+                if failed { clip.extend(egui::Shape::dashed_line(&[pos2(main.left(), ly), pos2(main.right(), ly)], st, 5.0, 4.0)); }
+                else { clip.hline(main.left()..=main.right(), ly, st); }
                 let key = match (is_up, failed) { (true, false) => "chart.broke_up", (false, false) => "chart.broke_down", (true, true) => "chart.failed_up", (false, true) => "chart.failed_down" };
-                let tag = format!("{} {} {}", if failed { "✕" } else if is_up { "↑" } else { "↓" }, t(key), fmt_px(l.px));
-                let g = painter.layout_no_wrap(tag, mono(10.5), col);
-                let r = place(Rect::from_min_size(pos2(main.center().x, ly - 9.0), g.size() + vec2(10.0, 4.0)), &mut taken);
-                painter.rect_filled(r, 3, label_bg());
-                painter.rect_stroke(r, 3, Stroke::new(1.0, col), egui::StrokeKind::Inside);
-                painter.galley(r.min + vec2(5.0, 2.0), g, col);
+                let g = painter.layout_no_wrap(t(key).to_string(), prop_s(10.5), Color32::WHITE);
+                let r = place(Rect::from_min_size(pos2(main.right() - g.size().x - 14.0, ly - 9.0), g.size() + vec2(10.0, 4.0)), &mut taken);
+                painter.rect_filled(r, 2, col.gamma_multiply(0.9));
+                painter.galley(r.min + vec2(5.0, 2.0), g, Color32::WHITE);
+                if let Some(ax) = try_place(Rect::from_min_size(pos2(main.right() + 2.0, ly - 8.0), vec2(AXIS_W - 4.0, 16.0)), &mut taken) {
+                    painter.rect_filled(ax, 2, col.gamma_multiply(0.9));
+                    painter.text(ax.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, fmt_px(l.px), mono_m(10.5), Color32::WHITE);
+                }
             }
         }
         // expected move: EWMA volatility of 1m returns, widened with sqrt(time) over the next 30 bars
@@ -1101,8 +1135,7 @@ impl Chart {
                 }
                 if let Some(&(_, m, sd)) = vw.last() {
                     legend3.push(("VWAP".into(), format!("{}  ±1σ {} – {}", fmt_px(m), fmt_px(m - sd), fmt_px(m + sd)), cyan));
-                    if m > lo && m < hi {
-                        let r = place(Rect::from_min_size(pos2(main.right() + 2.0, y(m) - 9.0), vec2(AXIS_W - 4.0, 18.0)), &mut taken);
+                    if let Some(r) = (m > lo && m < hi).then(|| try_place(Rect::from_min_size(pos2(main.right() + 2.0, y(m) - 9.0), vec2(AXIS_W - 4.0, 18.0)), &mut taken)).flatten() {
                         painter.rect_filled(r, 3, cyan.linear_multiply(0.85));
                         painter.text(r.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(m), mono_m(11.0), Color32::BLACK);
                     }
@@ -1124,12 +1157,13 @@ impl Chart {
                         let col = if ask { dn() } else { up() };
                         let ly = y(px);
                         let x0 = main.right() - main.width() * 0.35;
-                        painter.extend(egui::Shape::dotted_line(&[pos2(x0, ly), pos2(main.right(), ly)], col.linear_multiply(0.8), 5.0, 1.2));
+                        painter.extend(egui::Shape::dashed_line(&[pos2(x0, ly), pos2(main.right(), ly)], Stroke::new(1.0, col.gamma_multiply(0.55)), 2.0, 3.0));
+                        // a small outlined label at the line's right end (walls are context, not signals)
                         let tag = format!("{} ${}", if ask { "Ask wall" } else { "Bid wall" }, fmt_usd_short(qty * px));
-                        let g = painter.layout_no_wrap(tag, mono(10.5), col);
-                        let r = place(Rect::from_min_size(pos2(x0 + 2.0, ly - 15.0), g.size() + vec2(6.0, 2.0)), &mut taken);
-                        painter.rect_filled(r, 2, label_bg().gamma_multiply(0.85));
-                        painter.galley(r.min + vec2(3.0, 1.0), g, col);
+                        let g = painter.layout_no_wrap(tag, mono_m(10.0), col);
+                        let r = place(Rect::from_min_size(pos2(main.right() - g.size().x - 14.0, ly - 8.0), g.size() + vec2(8.0, 3.0)), &mut taken);
+                        painter.rect(r, 2, panel().gamma_multiply(0.9), Stroke::new(1.0, col.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+                        painter.galley(r.min + vec2(4.0, 1.5), g, col);
                     }
                 }
             }
@@ -1294,7 +1328,7 @@ impl Chart {
             painter.rect_stroke(r1.union(r2), 3, Stroke::new(1.0, l.col), egui::StrokeKind::Inside);
             painter.galley(r1.center() - g1.size() / 2.0, g1, Color32::WHITE);
             painter.galley(r2.center() - g2.size() / 2.0, g2, l.col);
-            let ax = place(Rect::from_min_size(pos2(main.right() + 2.0, ly - 9.0), vec2(AXIS_W - 4.0, 18.0)), &mut taken);
+            let ax = line_ax.get(li).copied().flatten().unwrap_or_else(|| Rect::from_min_size(pos2(main.right() + 2.0, ly - 9.0), vec2(AXIS_W - 4.0, 18.0)));
             painter.rect_filled(ax, 3, label_bg());
             painter.rect_stroke(ax, 3, Stroke::new(1.0, l.col), egui::StrokeKind::Inside);
             painter.text(ax.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(l.price), mono_m(11.0), l.col);
@@ -1370,26 +1404,12 @@ impl Chart {
         }
 
         // mark price: the charted venue's, or the OI-weighted mark across perp venues (USDT) on the aggregate
-        if self.mark && smarket == Market::Perp && live {
-            let mark = match self.src {
-                Some(e) => a.venues.get(&(e, Market::Perp)).and_then(|v| v.mark),
-                None => {
-                    let (mut num, mut den) = (0.0, 0.0);
-                    for ((e, m), v) in a.venues.iter().filter(|((_, m), _)| *m == Market::Perp) {
-                        if let (Some(mk), Some(oi)) = (v.mark, v.oi) { let w = oi.max(1e-9); num += mk * a.usdt(*e, *m) * w; den += w; }
-                    }
-                    (den > 0.0).then(|| num / den)
-                }
-            };
-            if let Some(mk) = mark { legend3.push((t("chart.mark").into(), fmt_px(mk), PURPLE)); }
-            if let Some(mk) = mark.filter(|m| *m > lo && *m < hi) {
-                let my = y(mk);
-                painter.extend(egui::Shape::dashed_line(&[pos2(main.left(), my), pos2(main.right(), my)], Stroke::new(1.0, PURPLE.linear_multiply(0.75)), 2.0, 3.0));
-                let ax = place(Rect::from_min_size(pos2(main.right() + 2.0, my - 9.0), vec2(AXIS_W - 4.0, 18.0)), &mut taken);
-                painter.rect_filled(ax, 3, PURPLE.linear_multiply(0.9));
-                painter.text(ax.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(mk), mono_m(11.0), Color32::WHITE);
-                painter.text(pos2(main.right() - 4.0, my - 7.0), Align2::RIGHT_CENTER, t("chart.mark"), prop(10.0), PURPLE);
-            }
+        if let Some(mk) = mark { legend3.push((t("chart.mark").into(), fmt_px(mk), PURPLE)); }
+        if let (Some(mk), Some(ax)) = (mark, mark_ax) {
+            let my = y(mk);
+            painter.extend(egui::Shape::dashed_line(&[pos2(main.left(), my), pos2(main.right(), my)], Stroke::new(1.0, PURPLE.linear_multiply(0.75)), 2.0, 3.0));
+            painter.rect_filled(ax, 3, PURPLE.linear_multiply(0.9));
+            painter.text(ax.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(mk), mono_m(11.0), Color32::WHITE);
         }
 
         self.drawings_ui(ui, &resp, &painter, &bars, &fr, main, ps, base);
@@ -2230,7 +2250,7 @@ impl Chart {
         if v["reset_view"].as_bool() == Some(true) { self.right = 0.0; self.bar_w = 7.0; self.y_range = None; }
     }
 
-    fn toolbar(&mut self, ui: &mut Ui, a: &Agg, market: Market, base: &str) {
+    pub(crate) fn toolbar(&mut self, ui: &mut Ui, a: &Agg, market: Market, base: &str) {
         // design: a 40 px bar over a hairline; compact interval pills, outlined menus, tools on a strip
         let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
         ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, line()));

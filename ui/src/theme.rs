@@ -428,6 +428,9 @@ pub fn install(ctx: &egui::Context) {
     #[cfg(not(any(target_os = "macos", windows)))]
     let fall = [(sys("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"), 0), (sys("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"), 0)];
     let fallbacks: Vec<String> = fall.into_iter().enumerate().filter_map(|(i, (b, face))| b.map(|b| { let n = format!("fb{i}"); add(&n, b, face, &[]); n })).collect();
+    // egui's built-in fallbacks (emoji / icon fonts: ⏰ and friends) end every family; the weight
+    // families are new entries and would otherwise miss them
+    let builtin = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     // `mono()` is the numbers family: Inter with tabular figures, not a monospaced face
     for (fam, first) in [(FontFamily::Proportional, "inter"), (FontFamily::Monospace, "inter-num"), (FontFamily::Name("display".into()), "inter-display"),
                          (FontFamily::Name("m".into()), "inter-m"), (FontFamily::Name("s".into()), "inter-s"),
@@ -435,6 +438,7 @@ pub fn install(ctx: &egui::Context) {
                          (FontFamily::Name("display-s".into()), "inter-display-s")] {
         let v = fonts.families.entry(fam).or_default();
         for (i, n) in std::iter::once(first.to_string()).chain(fallbacks.iter().cloned()).enumerate() { v.insert(i, n); }
+        for n in &builtin { if !v.contains(n) { v.push(n.clone()); } }
     }
     ctx.set_fonts(fonts);
 
