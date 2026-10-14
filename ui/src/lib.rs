@@ -172,10 +172,10 @@ pub fn hms(ms: i64) -> String {
 /// Written when it changes (checked once a second); env overrides (T1_BASE, ...) win on load.
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
-struct Settings { route: Option<depth::route::Policy>, prefs: Option<settings::Prefs>, lang: Option<String>, base: Option<String>, mode: Option<Market>, chart: Option<chart::Chart>, layout: Option<String>, cell: Option<usize>, charts: Option<Vec<(usize, chart::Chart)>>, trade_ex: Option<Exchange>, off: Option<Vec<Exchange>>, auto: Option<HashMap<Exchange, engine::AutoTopUp>>, order_panel: Option<bool>, window: Option<[f32; 4]> }
+struct Settings { route: Option<depth::route::Policy>, prefs: Option<settings::Prefs>, lang: Option<String>, base: Option<String>, mode: Option<Market>, chart: Option<chart::Chart>, layout: Option<String>, cell: Option<usize>, charts: Option<Vec<(usize, chart::Chart)>>, trade_ex: Option<Exchange>, off: Option<Vec<Exchange>>, auto: Option<HashMap<Exchange, engine::AutoTopUp>>, order_panel: Option<bool>, window: Option<[f32; 4]>, book: Option<book::BookView> }
 
 #[derive(serde::Serialize)]
-struct SettingsRef<'a> { route: &'a depth::route::Policy, prefs: &'a settings::Prefs, lang: &'static str, base: &'a str, mode: Market, chart: &'a chart::Chart, layout: &'a str, cell: usize, charts: &'a [(usize, chart::Chart)], trade_ex: Exchange, off: Vec<Exchange>, auto: std::collections::BTreeMap<String, engine::AutoTopUp>, order_panel: bool, window: Option<[f32; 4]> }
+struct SettingsRef<'a> { route: &'a depth::route::Policy, prefs: &'a settings::Prefs, lang: &'static str, base: &'a str, mode: Market, chart: &'a chart::Chart, layout: &'a str, cell: usize, charts: &'a [(usize, chart::Chart)], trade_ex: Exchange, off: Vec<Exchange>, auto: std::collections::BTreeMap<String, engine::AutoTopUp>, order_panel: bool, window: Option<[f32; 4]>, book: &'a book::BookView }
 
 fn settings_path() -> Option<std::path::PathBuf> {
     Some(depth::sys::data_dir()?.join("settings.json"))
@@ -287,7 +287,7 @@ impl App {
         let mut picker = picker::Picker::default();
         picker.open = env("T1_PICK").is_some();
         // T1_BOOK_PANE=<0..4>: book, trades, venues, quant, L3 (screenshots, as in the SwiftUI host)
-        let mut book = book::BookView::default();
+        let mut book = st.book.unwrap_or_default();
         match env("T1_BOOK_PANE").and_then(|s| s.parse::<u8>().ok()) { Some(1) => book.native_set(&serde_json::json!({"trades": true})), Some(p @ 2..=3) => book.page = p, _ => {} }
         if let Some(tf) = env("T1_TF").and_then(|s| s.parse().ok()) { chart.tf = tf; }
         let layout = env("T1_LAYOUT").or(st.layout).unwrap_or_else(|| "1".into());
@@ -504,7 +504,7 @@ impl App {
         off.sort_by_key(|e| *e as u8);
         // sorted keys so an unchanged state serializes identically (no rewrite every second)
         let auto = self.eng.account.lock().unwrap().auto.iter().map(|(e, r)| (format!("{e:?}"), *r)).collect();
-        let s = SettingsRef { route: &self.route, prefs: &self.prefs, lang: lang_code(), base: &self.eng.base, mode: self.mode, chart: &self.chart, layout: &self.layout, cell: self.cell, charts: &self.others, trade_ex: self.trade.ex, off, auto, order_panel: self.order_panel, window: self.window };
+        let s = SettingsRef { route: &self.route, prefs: &self.prefs, lang: lang_code(), base: &self.eng.base, mode: self.mode, chart: &self.chart, layout: &self.layout, cell: self.cell, charts: &self.others, trade_ex: self.trade.ex, off, auto, order_panel: self.order_panel, window: self.window, book: &self.book };
         let Ok(json) = serde_json::to_string_pretty(&s) else { return };
         if json == self.saved.0 { return; }
         let Some(p) = settings_path() else { return };

@@ -313,6 +313,21 @@ fn side_facts(ui: &mut Ui, rows: &[(&str, String, String, &str)]) {
     }
 }
 
+/// Account-wide liquidation price of one symbol: equity `a0` and maintenance margin `mm0` now,
+/// gross position in the symbol before the order (`gross0`), net / gross after (`net`, `gross`) the
+/// order at price `r`, maintenance rate `mmr`; the account goes when equity / MM falls to `k`.
+/// Solves a0 + net (P - r) = k (mm0 - gross0 r mmr + gross P mmr). None when no price on the
+/// losing side reaches it (flat, or a hedge that does not lose).
+#[allow(clippy::too_many_arguments)]
+fn uni_liq(a0: f64, mm0: f64, gross0: f64, net: f64, gross: f64, r: f64, mmr: f64, k: f64) -> Option<f64> {
+    let mm_other = (mm0 - gross0 * r * mmr).max(0.0);
+    let den = net - k * gross * mmr;
+    // flat (fully hedged): equity does not move with the price
+    if den.abs() < 1e-12 || net.abs() < 1e-12 { return None; }
+    let p = (k * mm_other - a0 + net * r) / den;
+    (p > 0.0 && p.is_finite() && if net > 0.0 { p < r } else { p > r }).then_some(p)
+}
+
 /// Small close glyph button (painted, no font dependency).
 fn close_x(ui: &mut Ui, size: f32) -> Response {
     kit::icon_button(ui, size, false, |p, r, c| {
@@ -436,16 +451,28 @@ impl OrderPanel {
             if self.close {
                 side_facts(ui, &[(l("Max"), format!("{} {base}", fmt_qty(held(p1))), format!("{} {base}", fmt_qty(held(p2))), "")]);
             } else {
-                // a unified / portfolio-margin account liquidates on the whole account (uniMMR,
-                // margin ratio): no per-order price exists, so none is shown. Otherwise an
-                // isolated-margin estimate with a 0.5 % maintenance rate, marked ≈.
+                // a unified / portfolio-margin account liquidates on the whole account: the price of
+                // this symbol at which the account hits its threshold after the order, every other
+                // position held where it is (uni_liq). Otherwise an isolated-margin estimate. Both use
+                // a 0.5 % maintenance rate for this symbol and are marked ≈.
                 let bal = st["balances"].as_array().and_then(|a| a.iter().find(|b| s(&b["ex"]) == venue));
                 let acct_wide = bal.is_some_and(|b| !b["uni_mmr"].is_null() || !b["mm_rate"].is_null());
-                let liq = |long: bool| if !acct_wide && qty_v > 0.0 && ref_px > 0.0 {
-                    let m = 1.0 / lev - 0.005;
-                    format!("≈{} USDT", fmt_px(ref_px * if long { 1.0 - m } else { 1.0 + m }))
-                } else { "-- USDT".into() };
-                let liq_tip = if acct_wide { l("Unified account: liquidation is decided on the whole account (UniMMR / margin ratio in the account card), not per order.") }
+                let (l0, s0) = (held("long"), held("short"));
+                let liq = |long: bool| {
+                    if qty_v <= 0.0 || ref_px <= 0.0 { return "-- USDT".into(); }
+                    let px = if let Some(b) = bal.filter(|_| acct_wide) {
+                        // Binance PM liquidates at uniMMR 1.05, Bybit unified at a 100 % margin rate
+                        let k = if b["uni_mmr"].is_null() { 1.0 } else { 1.05 };
+                        let (Some(a0), Some(mm0)) = (f(&b["adj_equity"]), f(&b["maint_margin"])) else { return "-- USDT".into() };
+                        let (l1, s1) = if long { (l0 + qty_v, s0) } else { (l0, s0 + qty_v) };
+                        uni_liq(a0, mm0, l0 + s0, l1 - s1, l1 + s1, ref_px, 0.005, k)
+                    } else {
+                        let m = 1.0 / lev - 0.005;
+                        Some(ref_px * if long { 1.0 - m } else { 1.0 + m })
+                    };
+                    px.map_or_else(|| "-- USDT".into(), |p| format!("≈{} USDT", fmt_px(p)))
+                };
+                let liq_tip = if acct_wide { l("Unified account: the price at which the whole account would be liquidated after this order, other positions unchanged; estimated with a 0.5% maintenance rate.") }
                     else { l("Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ.") };
                 let cost = format!("{} USDT", usd(qty_v * ref_px / lev));
                 let can = format!("{} USDT", usd(max_qty * ref_px));
@@ -730,12 +757,16 @@ impl OrderPanel {
                 ui.label(RichText::new(format!("{:.3}%", r * 100.0)).font(mono_m(11.0)).color(if on { fg() } else { dim() }));
                 ui.add_space(6.0);
             }
-            if notional > 0.0 {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!("{} USDT · {} ≈ {}", usd(notional), l("fee"), fmt_dp(notional * rate, 3))).font(mono(11.0)).color(dim()));
-                });
-            }
         });
+        // order value and fee on their own row: beside the rates they collide in a narrow column
+        if notional > 0.0 {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(l("Order value")).font(prop(11.0)).color(mu()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(format!("{} USDT · {} ≈ {}", usd(notional), l("fee"), fmt_dp(notional * rate, 3))).font(mono_m(11.0)).color(fg()));
+                });
+            });
+        }
         if t["lev"].is_null() && has_key && !self.close { kit::note(ui, l("Leverage unknown: max size and cost assume 1x."), WARN); }
         if let Some(m) = f(&t["min_qty"]).filter(|m| qty_v > 0.0 && qty_v < *m) { kit::note(ui, &format!("{} {} {base}", l("Below the minimum size"), fmt_qty(m)), WARN); }
         else if let Some(m) = f(&t["min_notional"]).filter(|m| notional > 0.0 && notional < *m) { kit::note(ui, &format!("{} {} USDT", l("Below the minimum order value"), usd(m)), WARN); }
@@ -1209,6 +1240,17 @@ pub(crate) fn leak(s: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn uni_liq_matches_the_venue() {
+        // the user's Binance PM account: equity 4994.04, MM 274.10, 287.03 HYPE long at mark 81.39;
+        // Binance showed 64.84 for that position
+        let p = super::uni_liq(4994.04, 274.10, 287.03, 287.03, 287.03, 81.39, 0.005, 1.05).unwrap();
+        assert!((p - 64.84).abs() < 0.5, "{p}");
+        // a short is liquidated above the price; a flat hedge never
+        assert!(super::uni_liq(1000.0, 10.0, 0.0, -10.0, 10.0, 100.0, 0.005, 1.05).is_some_and(|p| p > 100.0));
+        assert!(super::uni_liq(1000.0, 10.0, 20.0, 0.0, 20.0, 100.0, 0.005, 1.05).is_none());
+    }
+
     use super::*;
     #[test]
     fn numbers_parse_like_the_swift_panel() {

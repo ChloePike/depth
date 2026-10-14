@@ -224,3 +224,4 @@ Est. liq. price = Geschätzte Liq.
 Max open = Max. eröffnen
 Unified account: liquidation is decided on the whole account (UniMMR / margin ratio in the account card), not per order. = Einheitskonto: Liquidation hängt am ganzen Konto (UniMMR / Margin-Quote), nicht an der einzelnen Order.
 Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ. = Schätzung isoliert bei diesem Hebel und 0,5 % Maintenance; der Wert der Börse kann abweichen.
+Unified account: the price at which the whole account would be liquidated after this order, other positions unchanged; estimated with a 0.5% maintenance rate. = Einheitskonto: Preis, bei dem nach dieser Order das ganze Konto liquidiert würde (andere Positionen unverändert; geschätzt mit 0,5 % Erhaltungsmarge).

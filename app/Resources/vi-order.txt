@@ -224,3 +224,4 @@ Est. liq. price = Giá thanh lý ước tính
 Max open = Mở tối đa
 Unified account: liquidation is decided on the whole account (UniMMR / margin ratio in the account card), not per order. = Tài khoản hợp nhất: thanh lý tính trên toàn tài khoản (UniMMR / tỷ lệ ký quỹ), không theo từng lệnh.
 Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ. = Ước tính ký quỹ riêng ở đòn bẩy này với tỷ lệ duy trì 0,5%; số của sàn có thể khác.
+Unified account: the price at which the whole account would be liquidated after this order, other positions unchanged; estimated with a 0.5% maintenance rate. = Tài khoản hợp nhất: giá mà toàn bộ tài khoản bị thanh lý sau lệnh này, các vị thế khác giữ nguyên; ước tính với tỷ lệ ký quỹ duy trì 0,5%.

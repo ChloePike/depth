@@ -224,3 +224,4 @@ Est. liq. price = 强平价格
 Max open = 可开
 Unified account: liquidation is decided on the whole account (UniMMR / margin ratio in the account card), not per order. = 统一账户：强平按整个账户判断（看账户卡片里的 UniMMR / 保证金率），不是按单笔订单。
 Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ. = 按逐仓、当前杠杆、0.5% 维持保证金率估算；交易所的实际数值可能不同。
+Unified account: the price at which the whole account would be liquidated after this order, other positions unchanged; estimated with a 0.5% maintenance rate. = 统一账户：下单后、其他持仓不变时整个账户被强平的价格；按 0.5% 维持保证金率估算。

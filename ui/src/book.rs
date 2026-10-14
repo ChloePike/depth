@@ -21,24 +21,27 @@ const GROUPS: [f64; 4] = [1.0, 10.0, 100.0, 1000.0];
 /// ETH ~2,500 at 0.01, HYPE ~80 at 0.0001.
 fn base_step(mid: f64) -> f64 { 10f64.powi(mid.max(1e-12).log10().floor() as i32 - 5) }
 
-/// `quote`: sizes in quote currency (size x price) instead of base.
+/// `quote`: sizes in quote currency (size x price) instead of base. The choices (page, venue,
+/// grouping, units, tape filter) persist in settings.json; the rest is runtime state.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct BookView { trades: bool,
     /// the trade tape under the book (Settings); off, the book fills the column
-    pub show_tape: bool,
+    #[serde(skip)] pub show_tape: bool,
 
     /// 2 venues, 3 quant (own window only); otherwise `trades` picks book or tape
-    pub page: u8, pub src: Option<Exchange>, group: usize, pub clicked: Option<(Exchange, f64)>, quote: bool,
+    pub page: u8, pub src: Option<Exchange>, group: usize, #[serde(skip)] pub clicked: Option<(Exchange, f64)>, quote: bool,
     /// tape filter: index into MIN_USD
     min_usd: usize,
     /// levels last computed: (when, what they were computed for, bids, asks). The rows repaint every
     /// frame from this; the cross-venue aggregation runs at most every REFRESH.
-    cache: Option<(Instant, (Option<Exchange>, Market, usize, u64), Vec<Level>, Vec<Level>)>,
+    #[serde(skip)] cache: Option<(Instant, (Option<Exchange>, Market, usize, u64), Vec<Level>, Vec<Level>)>,
     /// levels a taker trade printed into: (ask side, price bin) -> when lit
-    flash: HashMap<(bool, i64), Instant>,
+    #[serde(skip)] flash: HashMap<(bool, i64), Instant>,
     /// newest trade time already checked for hits, per venue
-    seen: HashMap<Exchange, i64>,
+    #[serde(skip)] seen: HashMap<Exchange, i64>,
     /// last mid and whether its last move was up (mid row color)
-    last_mid: (f64, bool) }
+    #[serde(skip)] last_mid: (f64, bool) }
 
 /// How long an eaten level stays lit, fading out; at most one flash per level per FLASH_GAP.
 const FLASH: Duration = Duration::from_millis(400);
