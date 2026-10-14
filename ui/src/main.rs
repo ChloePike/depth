@@ -4,9 +4,12 @@ use t1_ui as ui;
 fn main() -> eframe::Result<()> {
     #[cfg(feature = "hotpatch")]
     dioxus_devtools::connect_subsecond();
+    // opens where it was closed (settings.json); first launch: the default size, placed by the OS
+    let mut vp = eframe::egui::ViewportBuilder::default().with_inner_size([1680.0, 1020.0]);
+    if let Some([x, y, w, h]) = ui::saved_window() { vp = vp.with_inner_size([w, h]).with_position([x, y]); }
     let opts = eframe::NativeOptions {
         // no native title bar: the app draws its own (window buttons, drag, resize edges)
-        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1680.0, 1020.0]).with_min_inner_size([1100.0, 700.0])
+        viewport: vp.with_min_inner_size([1100.0, 700.0])
             .with_title("Depth").with_decorations(false).with_resizable(true)
             // screenshot runs never take focus from the user's windows
             .with_active(std::env::var_os("T1_SHOT").is_none())

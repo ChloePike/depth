@@ -13,8 +13,15 @@ pub mod okx;
 use crate::{Exchange, History, Sub, Tx};
 use tokio::task::JoinHandle;
 
+/// `sub` in the venue's own naming (`crate::alias`: XAU is "xyz:GOLD" on Hyperliquid); None when
+/// the venue's same-name market is a different asset, so the venue is left out.
+pub fn venue_sub(ex: Exchange, sub: &Sub) -> Option<Sub> {
+    crate::alias::venue_base(ex, sub.market, &sub.base).map(|base| Sub { base, ..sub.clone() })
+}
+
 /// Starts all tasks needed to stream `sub` from `ex`. Empty if the market is unsupported there.
 pub fn spawn(ex: Exchange, sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
+    let Some(sub) = &venue_sub(ex, sub) else { return vec![] };
     match ex {
         Exchange::Binance => binance::spawn(sub, tx),
         Exchange::Bybit => bybit::spawn(sub, tx),
@@ -31,6 +38,7 @@ pub fn spawn(ex: Exchange, sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
 
 /// Recent REST history (about `minutes` one-minute bars) for seeding the chart.
 pub async fn history(ex: Exchange, sub: &Sub, minutes: usize) -> anyhow::Result<History> {
+    let Some(sub) = &venue_sub(ex, sub) else { return Ok(History::default()) };
     match ex {
         Exchange::Binance => binance::history(sub, minutes).await,
         Exchange::Bybit => bybit::history(sub, minutes).await,
@@ -48,6 +56,7 @@ pub async fn history(ex: Exchange, sub: &Sub, minutes: usize) -> anyhow::Result<
 /// Recent REST history at `tf`-minute resolution (`bars` candles), for chart timeframes above 1m.
 /// OI / long-short / taker series use the venue's closest period not finer than needed.
 pub async fn history_tf(ex: Exchange, sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<History> {
+    let Some(sub) = &venue_sub(ex, sub) else { return Ok(History::default()) };
     match ex {
         Exchange::Binance => binance::history_tf(sub, tf, bars).await,
         Exchange::Bybit => bybit::history_tf(sub, tf, bars).await,

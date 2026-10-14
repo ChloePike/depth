@@ -67,6 +67,7 @@ impl Account {
 
 /// One USDT perpetual for the symbol picker.
 #[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ticker { pub base: String, pub last: f64, pub chg_pct: f64, pub quote_vol: f64,
     /// 24h high / low from the first venue listing it; base volume summed across venues
     pub high: f64, pub low: f64, pub base_vol: f64 }
@@ -365,12 +366,21 @@ impl Engine {
 
         let tickers = self.tickers.clone();
         let funding = self.funding.clone();
+        // the last list from disk first (the picker is usable at once), then refreshed every minute
+        let cache = depth::sys::cache_dir().map(|d| d.join("tickers.json"));
+        if let Some(t) = cache.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice::<Vec<Ticker>>(&b).ok()) {
+            let mut g = self.tickers.lock().unwrap();
+            if g.is_empty() { *g = t; }
+        }
         rt.spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(60));
             loop {
                 tick.tick().await;
                 let (t, f) = all_tickers().await;
-                if !t.is_empty() { *tickers.lock().unwrap() = t; }
+                if !t.is_empty() {
+                    if let (Some(p), Ok(j)) = (&cache, serde_json::to_vec(&t)) { let _ = std::fs::write(p, j); }
+                    *tickers.lock().unwrap() = t;
+                }
                 if !f.is_empty() { funding.lock().unwrap().extend(f); }
             }
         });
@@ -550,14 +560,16 @@ impl Engine {
         // Lighter exact (REST order snapshots)
         if !self.l3_started && !self.off.contains(&Exchange::Lighter) {
             self.l3_started = true;
-            let h = depth::ex::lighter::spawn_l3(&sub, tx.clone());
-            self.venue_tasks.entry(Exchange::Lighter).or_default().push(h);
+            if let Some(s) = depth::ex::venue_sub(Exchange::Lighter, &sub) {
+                let h = depth::ex::lighter::spawn_l3(&s, tx.clone());
+                self.venue_tasks.entry(Exchange::Lighter).or_default().push(h);
+            }
         }
         // Hyperliquid inferred: Flowscan's fast book when chosen in Settings, else the public l2Book;
         // a changed choice replaces the running feed
         if self.hl_l3.as_ref().is_some_and(|(f, _)| *f != self.l3_flowscan) { if let Some((_, h)) = self.hl_l3.take() { h.abort(); } }
-        if self.hl_l3.is_none() && !self.off.contains(&Exchange::Hyperliquid) {
-            let h = if self.l3_flowscan { depth::ex::hyperliquid::spawn_l3_flowscan(&sub, tx) } else { depth::ex::hyperliquid::spawn_l3(&sub, tx) };
+        if let (true, false, Some(s)) = (self.hl_l3.is_none(), self.off.contains(&Exchange::Hyperliquid), depth::ex::venue_sub(Exchange::Hyperliquid, &sub)) {
+            let h = if self.l3_flowscan { depth::ex::hyperliquid::spawn_l3_flowscan(&s, tx) } else { depth::ex::hyperliquid::spawn_l3(&s, tx) };
             self.hl_l3 = Some((self.l3_flowscan, h));
         }
     }
@@ -1297,6 +1309,9 @@ mod tests {
 async fn all_tickers() -> (Vec<Ticker>, HashMap<(Exchange, String), VenueFunding>) {
     use depth::{num, ws};
     let ok = |b: &str| !b.is_empty() && !b.contains('_') && !b.contains('-') && b.is_ascii();
+    // a venue's own name back to the unified (Binance) one (Bybit AMDSTOCK -> AMD); None when its
+    // same-name market is another asset (crate alias table), so it does not merge into that row
+    let unify = |ex: Exchange, b: &str| { let u = depth::alias::unified_base(ex, b); depth::alias::venue_base(ex, Market::Perp, &u).is_some().then_some(u) };
     let hl_req = serde_json::json!({"type": "metaAndAssetCtxs"});
     let mut fund: HashMap<(Exchange, String), VenueFunding> = HashMap::new();
     // Binance: rates and next times for all perps; intervals other than 8h are listed in fundingInfo
@@ -1343,16 +1358,16 @@ async fn all_tickers() -> (Vec<Ticker>, HashMap<(Exchange, String), VenueFunding
                     fund.insert((Exchange::Bybit, sym.into()), VenueFunding { rate: num(&x["fundingRate"]), interval_h: { let h = num(&x["fundingIntervalHour"]); if h > 0.0 { h } else { 8.0 } }, next_ms: num(&x["nextFundingTime"]) as i64 });
                 }
             }
-            if let Some(b) = x["symbol"].as_str().and_then(|s| s.strip_suffix("USDT")) { push(b, num(&x["lastPrice"]), num(&x["price24hPcnt"]) * 100.0, num(&x["turnover24h"]), num(&x["highPrice24h"]), num(&x["lowPrice24h"]), num(&x["volume24h"])); }
+            if let Some(b) = x["symbol"].as_str().and_then(|s| s.strip_suffix("USDT")).and_then(|b| unify(Exchange::Bybit, b)) { push(&b, num(&x["lastPrice"]), num(&x["price24hPcnt"]) * 100.0, num(&x["turnover24h"]), num(&x["highPrice24h"]), num(&x["lowPrice24h"]), num(&x["volume24h"])); }
         },
         Err(e) => eprintln!("[tickers bybit] {e:#}"),
     }
     match ox {
         Ok(v) => for x in v["data"].as_array().into_iter().flatten() {
-            if let Some(b) = x["instId"].as_str().and_then(|s| s.strip_suffix("-USDT-SWAP")) {
+            if let Some(b) = x["instId"].as_str().and_then(|s| s.strip_suffix("-USDT-SWAP")).and_then(|b| unify(Exchange::Okx, b)) {
                 let (l, o) = (num(&x["last"]), num(&x["open24h"]));
                 // volCcy24h is in base units for USDT swaps
-                push(b, l, if o > 0.0 { (l / o - 1.0) * 100.0 } else { 0.0 }, num(&x["volCcy24h"]) * l, num(&x["high24h"]), num(&x["low24h"]), num(&x["volCcy24h"]));
+                push(&b, l, if o > 0.0 { (l / o - 1.0) * 100.0 } else { 0.0 }, num(&x["volCcy24h"]) * l, num(&x["high24h"]), num(&x["low24h"]), num(&x["volCcy24h"]));
             }
         },
         Err(e) => eprintln!("[tickers okx] {e:#}"),
@@ -1363,9 +1378,9 @@ async fn all_tickers() -> (Vec<Ticker>, HashMap<(Exchange, String), VenueFunding
             for (u, c) in names.iter().zip(v[1].as_array().into_iter().flatten()) {
                 let (l, p) = (num(&c["markPx"]), num(&c["prevDayPx"]));
                 // Hyperliquid funds hourly
-                if let Some(b) = u["name"].as_str() {
+                if let Some(b) = u["name"].as_str().and_then(|b| unify(Exchange::Hyperliquid, b)) {
                     fund.insert((Exchange::Hyperliquid, format!("{b}USDT")), VenueFunding { rate: num(&c["funding"]), interval_h: 1.0, next_ms: (depth::now_ms() / 3_600_000 + 1) * 3_600_000 });
-                    push(b, l, if p > 0.0 { (l / p - 1.0) * 100.0 } else { 0.0 }, num(&c["dayNtlVlm"]), 0.0, 0.0, num(&c["dayBaseVlm"]));
+                    push(&b, l, if p > 0.0 { (l / p - 1.0) * 100.0 } else { 0.0 }, num(&c["dayNtlVlm"]), 0.0, 0.0, num(&c["dayBaseVlm"]));
                 }
             }
         }

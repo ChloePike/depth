@@ -344,7 +344,18 @@ impl BookView {
         }
         if let Some(t) = tip.into_inner() {
             egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), ui.id().with("l3tip"), egui::PopupAnchor::Pointer)
-                .show(|ui| { ui.label(egui::RichText::new(t).font(mono(11.5))); });
+                .show(|ui| {
+                    // never wrapped; "a  b  c" lines become aligned columns (names left, numbers right)
+                    egui::Grid::new("booktip").spacing(vec2(12.0, 3.0)).show(ui, |ui| {
+                        for line in t.lines() {
+                            for (i, cell) in line.split("  ").map(str::trim).filter(|c| !c.is_empty()).enumerate() {
+                                let lab = egui::Label::new(egui::RichText::new(cell).font(if i == 0 { prop(11.5) } else { mono(11.5) }).color(if i == 0 { fg() } else { fg_strong() })).extend();
+                                if i == 0 { ui.add(lab); } else { ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(lab)); }
+                            }
+                            ui.end_row();
+                        }
+                    });
+                });
         }
         // click-to-fill only on a single venue's raw book (aligned aggregate prices are not executable)
         if let Some(e) = self.src {

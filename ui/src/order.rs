@@ -297,14 +297,19 @@ fn pair_row(ui: &mut Ui, cells: [(&str, String, Color32); 2], big: bool) {
 /// rows; the buy column flush left, the sell column flush right, label grey right before its value.
 fn side_facts(ui: &mut Ui, rows: &[(&str, String, String, &str)]) {
     for (k, a, b, tip) in rows {
-        let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 17.0), Sense::hover());
+        // the two sides share a row; when they would touch (long values in a narrow column) they
+        // take a row each, the sell side right-aligned
+        let w = |t: &str, f: egui::FontId| ui.painter().layout_no_wrap(t.to_string(), f, fg()).size().x;
+        let need = 2.0 * w(k, prop(11.5)) + w(a, mono_m(11.5)) + w(b, mono_m(11.5)) + 22.0;
+        let two = need > ui.available_width();
+        let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), if two { 34.0 } else { 17.0 }), Sense::hover());
         if !tip.is_empty() { resp.on_hover_text(*tip); }
         let p = ui.painter();
-        let y = r.center().y;
-        let kw = p.text(egui::pos2(r.left(), y), Align2::LEFT_CENTER, *k, prop(11.5), mu()).width();
-        p.text(egui::pos2(r.left() + kw + 5.0, y), Align2::LEFT_CENTER, a, mono_m(11.5), fg());
-        let vw = p.text(egui::pos2(r.right(), y), Align2::RIGHT_CENTER, b, mono_m(11.5), fg()).width();
-        p.text(egui::pos2(r.right() - vw - 5.0, y), Align2::RIGHT_CENTER, *k, prop(11.5), mu());
+        let (y0, y1) = if two { (r.top() + 8.5, r.top() + 25.5) } else { (r.center().y, r.center().y) };
+        let kw = p.text(egui::pos2(r.left(), y0), Align2::LEFT_CENTER, *k, prop(11.5), mu()).width();
+        p.text(egui::pos2(r.left() + kw + 5.0, y0), Align2::LEFT_CENTER, a, mono_m(11.5), fg());
+        let vw = p.text(egui::pos2(r.right(), y1), Align2::RIGHT_CENTER, b, mono_m(11.5), fg()).width();
+        p.text(egui::pos2(r.right() - vw - 5.0, y1), Align2::RIGHT_CENTER, *k, prop(11.5), mu());
     }
 }
 

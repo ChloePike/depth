@@ -334,6 +334,16 @@ async fn binance_at(k: &Keys, base: &str, method: reqwest::Method, path: &str, p
 fn n(v: &Value) -> f64 { crate::num(v) }
 
 pub async fn rules(ex: Exchange, symbol: &str) -> Result<Rules> {
+    // every order starts here: a market this venue lists under another name (crate::alias, e.g.
+    // XAU = Hyperliquid xyz:GOLD) or whose same-name market is another asset is refused, never
+    // sent to the wrong instrument
+    // ponytail: alias-aware order entry (HIP-3 asset ids, positions mapped back) not built yet
+    let base = symbol.strip_suffix("USDT").unwrap_or(symbol);
+    match crate::alias::venue_base(ex, crate::Market::Perp, base) {
+        Some(b) if b.eq_ignore_ascii_case(base) => {}
+        Some(b) => anyhow::bail!("{base} trades as {b} on {ex:?}; order entry for renamed markets is not supported yet"),
+        None => anyhow::bail!("{ex:?}'s {base} is a different market from the one charted; not tradable here"),
+    }
     match ex {
         Exchange::Bybit => {
             let v = ws::get_json(&format!("{}/v5/market/instruments-info?category=linear&symbol={symbol}", bybit_url())).await?;

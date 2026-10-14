@@ -638,14 +638,20 @@ fn broken_levels(bars: &[Bar], levels: &[SrLevel], within: usize) -> Vec<(SrLeve
     let n = bars.len();
     if n < 2 { return vec![]; }
     let from = n.saturating_sub(within + 1);
-    levels.iter().filter_map(|l| {
-        let ev: Vec<bool> = (from + 1..n).filter_map(|k| {
+    let last_c = bars[n - 1].c;
+    // (index of the latest cross, level, broke up, failed); most recent break first
+    let mut v: Vec<(usize, SrLevel, bool, bool)> = levels.iter().filter_map(|l| {
+        let ev: Vec<(usize, bool)> = (from + 1..n).filter_map(|k| {
             let (a, b) = (bars[k - 1].c, bars[k].c);
-            if a < l.px - l.half && b > l.px + l.half { Some(true) } else if a > l.px + l.half && b < l.px - l.half { Some(false) } else { None }
+            if a < l.px - l.half && b > l.px + l.half { Some((k, true)) } else if a > l.px + l.half && b < l.px - l.half { Some((k, false)) } else { None }
         }).collect();
-        let last = *ev.last()?;
-        Some(if ev.len() > 1 { (*l, !last, true) } else { (*l, last, false) })
-    }).take(2).collect()
+        let &(k, up) = ev.last()?;
+        // crossed back through: the earlier break failed; one break whose last close is already
+        // back on the side it came from (inside the level's band) has failed too
+        Some(if ev.len() > 1 { (k, *l, !up, true) } else { (k, *l, up, if up { last_c < l.px } else { last_c > l.px }) })
+    }).collect();
+    v.sort_by_key(|x| std::cmp::Reverse(x.0));
+    v.into_iter().map(|(_, l, up, failed)| (l, up, failed)).collect()
 }
 
 #[derive(Default)]
@@ -2253,7 +2259,9 @@ impl Chart {
     pub(crate) fn toolbar(&mut self, ui: &mut Ui, a: &Agg, market: Market, base: &str) {
         // design: a 40 px bar over a hairline; compact interval pills, outlined menus, tools on a strip
         let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
-        ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, line()));
+        // in the title bar the width is short: no hairline, every drawing tool behind one button
+        let compact = self.toolbar_in_header;
+        if !compact { ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, line())); }
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(0.0, 6.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
         let ui = &mut child;
         ui.spacing_mut().item_spacing.x = 2.0;
@@ -2290,7 +2298,9 @@ impl Chart {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             // the drawing tools on one subtle strip; the everyday ones as buttons, the rest behind "⋯"
-            let more = [(Tool::Channel, "draw.channel"), (Tool::Text, "draw.text"), (Tool::Measure, "draw.measure"), (Tool::Position, "draw.position")];
+            const QUICK: [(Tool, &str); 5] = [(Tool::Rect, "draw.rect"), (Tool::Fib, "draw.fib"), (Tool::Ray, "draw.ray"), (Tool::Trend, "draw.trend"), (Tool::HLine, "draw.hline")];
+            const MORE: [(Tool, &str); 4] = [(Tool::Channel, "draw.channel"), (Tool::Text, "draw.text"), (Tool::Measure, "draw.measure"), (Tool::Position, "draw.position")];
+            let (quick, more): (&[(Tool, &str)], Vec<(Tool, &str)>) = if compact { (&[], QUICK.iter().chain(&MORE).copied().collect()) } else { (&QUICK, MORE.to_vec()) };
             let in_more = more.iter().find(|(k, _)| self.tool == Some(*k)).map(|x| x.0);
             let n = self.drawings.get(base).map_or(0, |v| v.len());
             egui::Frame::new().fill(panel2()).corner_radius(5).inner_margin(2).show(ui, |ui| {
@@ -2305,12 +2315,12 @@ impl Chart {
                 let mb = tool_button(ui, in_more.map_or(Glyph::More, Glyph::Tool), in_more.is_some()).on_hover_text(super::l("More drawing tools"));
                 egui::Popup::menu(&mb).show(|ui| {
                     menu_rows(ui, 180.0);
-                    for (tool, key) in more {
+                    for &(tool, key) in &more {
                         let on = self.tool == Some(tool);
                         if menu_row(ui, on, t(key), Some(Glyph::Tool(tool))).clicked() { self.tool = if on { None } else { Some(tool) }; self.pending.clear(); ui.close(); }
                     }
                 });
-                for (tool, key) in [(Tool::Rect, "draw.rect"), (Tool::Fib, "draw.fib"), (Tool::Ray, "draw.ray"), (Tool::Trend, "draw.trend"), (Tool::HLine, "draw.hline")] {
+                for &(tool, key) in quick {
                     if tool_button(ui, Glyph::Tool(tool), self.tool == Some(tool)).on_hover_text(t(key)).clicked() {
                         self.tool = if self.tool == Some(tool) { None } else { Some(tool) };
                         self.pending.clear();
@@ -2867,6 +2877,13 @@ mod tests {
         let f = broken_levels(&[c(0, 101.0), c(1, 103.0), c(2, 101.0)], &lv, 10);
         assert!(f.len() == 1 && f[0].1 && f[0].2);
         assert!(broken_levels(&[c(0, 101.0), c(1, 102.1)], &lv, 10).is_empty());
+        // broke down, then a close back above the level (still inside its band): failed, not "broke down"
+        let d = broken_levels(&[c(0, 103.0), c(1, 101.0), c(2, 102.2)], &lv, 10);
+        assert!(d.len() == 1 && !d[0].1 && d[0].2);
+        // the most recent break comes first, whatever the level order
+        let two = [SrLevel { px: 100.0, half: 0.4, score: 1.0 }, SrLevel { px: 102.0, half: 0.4, score: 1.0 }];
+        let r = broken_levels(&[c(0, 99.0), c(1, 101.0), c(2, 103.0)], &two, 10);
+        assert!(r.len() == 2 && r[0].0.px == 102.0);
     }
 
     #[test]

@@ -156,17 +156,30 @@ fn coin_fetcher() -> &'static std::sync::mpsc::Sender<(String, egui::Context)> {
             let dir = depth::sys::cache_dir().map(|d| d.join("coins"));
             while let Ok((sym, ctx)) = rx.recv() {
                 let path = dir.as_ref().map(|d| d.join(format!("{sym}.png")));
-                let bytes = match path.as_ref().and_then(|p| std::fs::read(p).ok()) {
+                // no logo anywhere: a marker, re-checked after a week (new listings get logos late)
+                let none = dir.as_ref().map(|d| d.join(format!("{sym}.none")));
+                let fresh_none = none.as_ref().and_then(|p| std::fs::metadata(p).ok()?.modified().ok()?.elapsed().ok())
+                    .is_some_and(|age| age.as_secs() < 7 * 86_400);
+                let bytes = match path.as_ref().and_then(|p| std::fs::read(p).ok()).filter(|b| !b.is_empty()) {
                     Some(b) => b,
+                    None if fresh_none => { set_coin(&sym, Coin::Missing); continue }
                     None => {
-                        let url = format!("https://bin.bnbstatic.com/static/assets/logos/{sym}.png");
-                        let got = rt.block_on(async {
-                            let r = depth::ws::http().get(&url).send().await.ok()?;
-                            if !r.status().is_success() { return Some(vec![]); }
-                            r.bytes().await.ok().map(|b| b.to_vec())
-                        });
-                        // network errors are not cached (retried next launch); a 404 is
-                        let Some(b) = got else { set_coin(&sym, Coin::Missing); continue };
+                        // Binance first; OKX also has the stock / commodity perps (XAU, CL, SOXL..)
+                        // and answers XML, not a 404, for a symbol it lacks: only a decodable PNG counts
+                        let urls = [format!("https://bin.bnbstatic.com/static/assets/logos/{sym}.png"),
+                                    format!("https://static.okx.com/cdn/oksupport/asset/currency/icon/{}.png", sym.to_lowercase())];
+                        let mut net_err = false;
+                        let got = urls.iter().find_map(|url| rt.block_on(async {
+                            let Ok(r) = depth::ws::http().get(url).send().await else { net_err = true; return None };
+                            if !r.status().is_success() { return None; }
+                            r.bytes().await.ok().map(|b| b.to_vec()).filter(|b| decode_png(b).is_some())
+                        }));
+                        let Some(b) = got else {
+                            // network errors are not remembered (retried next launch); "no logo" is
+                            if !net_err { if let Some(p) = &none { if let Some(d) = p.parent() { let _ = std::fs::create_dir_all(d); } let _ = std::fs::write(p, b""); } }
+                            set_coin(&sym, Coin::Missing);
+                            continue
+                        };
                         if let Some(p) = &path { if let Some(d) = p.parent() { let _ = std::fs::create_dir_all(d); } let _ = std::fs::write(p, &b); }
                         b
                     }

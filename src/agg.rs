@@ -278,18 +278,16 @@ const WALL_OUT: f32 = 4.0;
 const WALL_PRESENT: f32 = 0.8;
 
 impl Heatmap {
-    /// Liquidity walls over the last `n` columns: (price, mean base qty) for up to two bids and two
-    /// asks, largest first. Sizes are summed over a bin and its neighbours, so an order that
-    /// hops between two bins as venue mids re-align still counts as one wall. `prev` holds the
-    /// prices shown last time (hysteresis).
-    pub fn walls(&self, mid: f64, n: usize, prev: &[f64]) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+    /// The last `n` columns as 3-bin windowed sizes: (lowest bin, bins, per column, mean, median of
+    /// the non-zero means).
+    #[allow(clippy::type_complexity)]
+    fn window(&self, n: usize) -> Option<(i64, usize, Vec<Vec<f32>>, Vec<f32>, f32)> {
         let cols: Vec<&Vec<(i64, f32)>> = self.cols.iter().rev().take(n).map(|(_, c)| c).collect();
-        let none = (vec![], vec![]);
-        if cols.len() < n.min(10) || self.bin <= 0.0 { return none; }
-        let Some(lo) = cols.iter().flat_map(|c| c.iter().map(|x| x.0)).min() else { return none };
-        let hi = cols.iter().flat_map(|c| c.iter().map(|x| x.0)).max().unwrap();
+        if cols.len() < n.min(10) || self.bin <= 0.0 { return None; }
+        let lo = cols.iter().flat_map(|c| c.iter().map(|x| x.0)).min()?;
+        let hi = cols.iter().flat_map(|c| c.iter().map(|x| x.0)).max()?;
         let bins = (hi - lo + 1) as usize;
-        if bins > 20_000 { return none; }
+        if bins > 20_000 { return None; }
         // per column, the 3-bin windowed size
         let win: Vec<Vec<f32>> = cols.iter().map(|c| {
             let mut v = vec![0f32; bins + 2];
@@ -298,9 +296,47 @@ impl Heatmap {
         }).collect();
         let avg: Vec<f32> = (0..bins + 2).map(|k| win.iter().map(|v| v[k]).sum::<f32>() / win.len() as f32).collect();
         let mut nz: Vec<f32> = avg.iter().copied().filter(|q| *q > 0.0).collect();
-        if nz.is_empty() { return none; }
+        if nz.is_empty() { return None; }
         nz.sort_by(f32::total_cmp);
         let med = nz[nz.len() / 2];
+        Some((lo, bins, win, avg, med))
+    }
+
+    /// Faster walls: the same size floor (from the last `ref_n` columns) met in EVERY one of the
+    /// last `n` columns, instead of on average over 60 with 80% presence. A flashed order is
+    /// still excluded (it must stand `n` seconds), but a new wall shows after `n` s, not ~50 s.
+    pub fn walls_fast(&self, mid: f64, n: usize, ref_n: usize, prev: &[f64]) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+        let none = (vec![], vec![]);
+        let (Some(fin), Some(fout)) = (self.wall_floor(ref_n, false), self.wall_floor(ref_n, true)) else { return none };
+        if self.cols.len() < n { return none; }
+        let Some((lo, bins, win, _, _)) = self.window(n) else { return none };
+        let m: Vec<f32> = (0..bins + 2).map(|k| win.iter().map(|v| v[k]).fold(f32::MAX, f32::min)).collect();
+        let mid_k = mid / self.bin - lo as f64 + 1.0;
+        let (mut bids, mut asks) = (vec![], vec![]);
+        for k in 1..bins + 1 {
+            let a = m[k];
+            if !(a >= m[k - 1] && a > m[k + 1]) || (k as f64 - mid_k).abs() <= 2.0 { continue; }
+            let px = (lo + k as i64 - 1) as f64 * self.bin;
+            let shown = prev.iter().any(|p| (p - px).abs() <= self.bin * 1.5);
+            if (a as f64) < if shown { fout } else { fin } { continue; }
+            if (k as f64) < mid_k { bids.push((px, a as f64)) } else { asks.push((px, a as f64)) }
+        }
+        for s in [&mut bids, &mut asks] { s.sort_by(|x, y| y.1.total_cmp(&x.1)); s.truncate(2); }
+        (bids, asks)
+    }
+
+    /// Base qty a single resting order needs to count as a wall (the same rule as `walls`, against
+    /// the median level of the last `n` columns); `shown` applies the lower stay-threshold.
+    pub fn wall_floor(&self, n: usize, shown: bool) -> Option<f64> {
+        self.window(n).map(|w| (w.4 * if shown { WALL_OUT } else { WALL_IN }) as f64)
+    }
+
+    /// Liquidity walls over the last `n` columns: (price, mean base qty) for up to two bids and two
+    /// asks, largest first. Sizes are summed over a bin and its neighbours, so an order that
+    /// hops between two bins as venue mids re-align still counts as one wall. `prev` holds the
+    /// prices shown last time (hysteresis).
+    pub fn walls(&self, mid: f64, n: usize, prev: &[f64]) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+        let Some((lo, bins, win, avg, med)) = self.window(n) else { return (vec![], vec![]) };
         let mid_k = mid / self.bin - lo as f64 + 1.0;
         let (mut bids, mut asks) = (vec![], vec![]);
         for k in 1..bins + 1 {
@@ -318,6 +354,10 @@ impl Heatmap {
         (bids, asks)
     }
 }
+
+/// One wall-sized resting order (L3); `px` aligned to the composite mid.
+#[derive(Clone, Debug)]
+pub struct OrderWall { pub ex: Exchange, pub bid: bool, pub px: f64, pub qty: f64, pub age_ms: i64, pub src: crate::l3::Src, pub id: u64 }
 
 #[derive(Clone, Debug, Default)]
 pub struct Opt {
@@ -838,6 +878,35 @@ impl Agg {
             }
         }
         (bids.into_values().rev().collect(), asks.into_values().collect())
+    }
+
+    /// Wall-sized single orders from the order-by-order books (L3) of `market`, aligned to the
+    /// composite mid like the heatmap: an order counts once it has rested `min_age_ms` (its own
+    /// age, not a window mean, so a wall shows in seconds) and is at least `floor` base units
+    /// (`stay` for ids in `shown`). Equal-split orders (`Src::Split`) are not single orders and
+    /// never count; the touch (`skip` either side of mid) churns and is left out. Largest first,
+    /// two per side.
+    #[allow(clippy::too_many_arguments)]
+    pub fn order_walls(&self, market: Market, floor: f64, stay: f64, min_age_ms: i64, skip: f64, shown: &[u64], now: i64) -> (Vec<OrderWall>, Vec<OrderWall>) {
+        let (mut bids, mut asks) = (vec![], vec![]);
+        let Some(mid) = self.mid(market) else { return (bids, asks) };
+        for ((ex, m), book) in self.l3.iter().filter(|((_, m), _)| *m == market) {
+            let Some(vm) = self.venues.get(&(*ex, *m)).filter(|v| self.live(v, market)).and_then(|v| v.book_mid()) else { continue };
+            let k = mid / vm;
+            for bid in [true, false] {
+                for (px, orders) in book.levels(bid, usize::MAX) {
+                    let px = px * k;
+                    if (px - mid).abs() <= skip { continue; }
+                    for o in orders.iter().filter(|o| o.src != crate::l3::Src::Split && now - o.since >= min_age_ms) {
+                        if o.qty < if shown.contains(&o.id) { stay } else { floor } { continue; }
+                        let w = OrderWall { ex: *ex, bid, px, qty: o.qty, age_ms: now - o.since, src: o.src, id: o.id };
+                        if bid { bids.push(w) } else { asks.push(w) }
+                    }
+                }
+            }
+        }
+        for s in [&mut bids, &mut asks] { s.sort_by(|x, y| y.qty.total_cmp(&x.qty)); s.truncate(2); }
+        (bids, asks)
     }
 
     /// Announce that history for this venue is being fetched: until `load_history` is called for

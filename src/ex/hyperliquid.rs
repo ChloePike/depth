@@ -11,12 +11,17 @@ use tokio::task::JoinHandle;
 const WS: &str = "wss://api-ui.hyperliquid.xyz/ws";
 const INFO: &str = "https://api.hyperliquid.xyz/info";
 
+/// Perp coin name: "BTC", or a HIP-3 dex market "xyz:GOLD" (dex lower case, as the venue lists it).
+fn coin(base: &str) -> String {
+    match base.split_once(':') { Some((d, c)) => format!("{}:{}", d.to_lowercase(), c.to_uppercase()), None => base.to_uppercase() }
+}
+
 pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
     let e = Emit { ex: Exchange::Hyperliquid, market: sub.market, tx };
     match sub.market {
         // perps are USDC-margined and keyed by base only
         Market::Perp => {
-            let coin = sub.base.to_uppercase();
+            let coin = coin(&sub.base);
             vec![tokio::spawn(stream(e, coin, &["trades", "l2", "bbo", "activeAssetCtx", "fastAssetCtxs"]))]
         }
         // no margin borrowing on Hyperliquid spot, so margin is plain spot data
@@ -133,7 +138,7 @@ impl CountDiff {
 /// few seconds (the UI gateway's faster deltas carry no counts). Started with the book view.
 pub fn spawn_l3(sub: &Sub, tx: Tx) -> JoinHandle<()> {
     let e = Emit { ex: Exchange::Hyperliquid, market: Market::Perp, tx };
-    let coin = sub.base.to_uppercase();
+    let coin = coin(&sub.base);
     let mut diff = CountDiff::default();
     let spec = Spec::new("hyperliquid l3", "wss://api.hyperliquid.xyz/ws")
         .sub(json!({"method": "subscribe", "subscription": {"type": "l2Book", "coin": coin}}).to_string())
@@ -153,7 +158,7 @@ pub fn spawn_l3(sub: &Sub, tx: Tx) -> JoinHandle<()> {
 /// with backoff (turn the setting off to go back to the public l2Book).
 pub fn spawn_l3_flowscan(sub: &Sub, tx: Tx) -> JoinHandle<()> {
     let e = Emit { ex: Exchange::Hyperliquid, market: Market::Perp, tx };
-    let coin = sub.base.to_uppercase();
+    let coin = coin(&sub.base);
     tokio::spawn(async move {
         let mut wait = 2u64;
         loop {
@@ -360,7 +365,7 @@ pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { his
 pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<History> {
     let iv = match tf { 1 => "1m", 5 => "5m", 15 => "15m", 60 => "1h", 240 => "4h", _ => anyhow::bail!("hyperliquid has no {tf}m candles") };
     let coin = match sub.market {
-        Market::Perp => sub.base.to_uppercase(),
+        Market::Perp => coin(&sub.base),
         Market::Spot | Market::Margin => match spot_coin(&sub.base.to_uppercase(), &sub.quote.to_uppercase()).await? {
             Some(c) => c,
             None => return Ok(History::default()),

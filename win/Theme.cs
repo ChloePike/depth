@@ -83,7 +83,12 @@ static class T1
     public static FrameworkElement CoinIcon(string b, double size = 18)
     {
         if (!coinImgs.TryGetValue(b, out var img))
+        {
             coinImgs[b] = img = new BitmapImage(new Uri($"https://bin.bnbstatic.com/static/assets/logos/{b}.png")) { DecodePixelWidth = 64 };
+            // OKX also has the stock / commodity perps (XAU, CL, SOXL..); tried once when Binance has none
+            var okx = new Uri($"https://static.okx.com/cdn/oksupport/asset/currency/icon/{b.ToLowerInvariant()}.png");
+            img.ImageFailed += (s, _) => { var bi = (BitmapImage)s; if (bi.UriSource != okx) bi.UriSource = okx; };
+        }
         var g = new Grid { Width = size, Height = size, VerticalAlignment = VerticalAlignment.Center };
         g.Children.Add(new Ellipse { Fill = B(Hl) });
         g.Children.Add(new TextBlock

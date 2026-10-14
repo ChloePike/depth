@@ -109,15 +109,21 @@ struct CoinIcon: View {
         if missing.contains(base) { return nil }
         let file = dir.appendingPathComponent("\(base).png")
         var data = try? Data(contentsOf: file)
-        if data == nil, let url = URL(string: "https://bin.bnbstatic.com/static/assets/logos/\(base).png"),
-           let (d, r) = try? await URLSession.shared.data(from: url) {
-            // a 404 is stored empty, like the Rust side does, so it is not refetched every launch
-            let ok = (r as? HTTPURLResponse)?.statusCode == 200
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            try? (ok ? d : Data()).write(to: file)
-            data = ok ? d : Data()
+        if data?.isEmpty ?? true {
+            // Binance first; OKX also has the stock / commodity perps (XAU, CL, SOXL..) and answers
+            // XML, not a 404, for a symbol it lacks: only a decodable image counts
+            data = nil
+            for u in ["https://bin.bnbstatic.com/static/assets/logos/\(base).png",
+                      "https://static.okx.com/cdn/oksupport/asset/currency/icon/\(base.lowercased()).png"] {
+                guard let url = URL(string: u), let (d, r) = try? await URLSession.shared.data(from: url),
+                      (r as? HTTPURLResponse)?.statusCode == 200, NSImage(data: d) != nil else { continue }
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                try? d.write(to: file)
+                data = d
+                break
+            }
         }
-        guard let d = data, !d.isEmpty, let i = NSImage(data: d) else { if data != nil { missing.insert(base) }; return nil }
+        guard let d = data, let i = NSImage(data: d) else { missing.insert(base); return nil }
         cache[base] = i
         return i
     }

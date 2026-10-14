@@ -172,13 +172,19 @@ pub fn hms(ms: i64) -> String {
 /// Written when it changes (checked once a second); env overrides (T1_BASE, ...) win on load.
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
-struct Settings { route: Option<depth::route::Policy>, prefs: Option<settings::Prefs>, lang: Option<String>, base: Option<String>, mode: Option<Market>, chart: Option<chart::Chart>, layout: Option<String>, cell: Option<usize>, charts: Option<Vec<(usize, chart::Chart)>>, trade_ex: Option<Exchange>, off: Option<Vec<Exchange>>, auto: Option<HashMap<Exchange, engine::AutoTopUp>>, order_panel: Option<bool> }
+struct Settings { route: Option<depth::route::Policy>, prefs: Option<settings::Prefs>, lang: Option<String>, base: Option<String>, mode: Option<Market>, chart: Option<chart::Chart>, layout: Option<String>, cell: Option<usize>, charts: Option<Vec<(usize, chart::Chart)>>, trade_ex: Option<Exchange>, off: Option<Vec<Exchange>>, auto: Option<HashMap<Exchange, engine::AutoTopUp>>, order_panel: Option<bool>, window: Option<[f32; 4]> }
 
 #[derive(serde::Serialize)]
-struct SettingsRef<'a> { route: &'a depth::route::Policy, prefs: &'a settings::Prefs, lang: &'static str, base: &'a str, mode: Market, chart: &'a chart::Chart, layout: &'a str, cell: usize, charts: &'a [(usize, chart::Chart)], trade_ex: Exchange, off: Vec<Exchange>, auto: std::collections::BTreeMap<String, engine::AutoTopUp>, order_panel: bool }
+struct SettingsRef<'a> { route: &'a depth::route::Policy, prefs: &'a settings::Prefs, lang: &'static str, base: &'a str, mode: Market, chart: &'a chart::Chart, layout: &'a str, cell: usize, charts: &'a [(usize, chart::Chart)], trade_ex: Exchange, off: Vec<Exchange>, auto: std::collections::BTreeMap<String, engine::AutoTopUp>, order_panel: bool, window: Option<[f32; 4]> }
 
 fn settings_path() -> Option<std::path::PathBuf> {
     Some(depth::sys::data_dir()?.join("settings.json"))
+}
+
+/// The window's last position and size [x, y, w, h] (points), for the plain app to open where it was.
+pub fn saved_window() -> Option<[f32; 4]> {
+    let s: Settings = serde_json::from_slice(&std::fs::read(settings_path()?).ok()?).ok()?;
+    s.window.filter(|w| w.iter().all(|v| v.is_finite()) && w[2] >= 600.0 && w[3] >= 400.0)
 }
 
 pub struct App {
@@ -187,6 +193,8 @@ pub struct App {
     settings: settings::SettingsView,
     /// last settings JSON written, and when it was last checked
     saved: (String, Instant),
+    /// own window's position and size [x, y, w, h] (not hosted; kept while maximized / full screen)
+    window: Option<[f32; 4]>,
     mode: Market,
     chart: chart::Chart,
     book: book::BookView,
@@ -284,7 +292,7 @@ impl App {
         if let Some(tf) = env("T1_TF").and_then(|s| s.parse().ok()) { chart.tf = tf; }
         let layout = env("T1_LAYOUT").or(st.layout).unwrap_or_else(|| "1".into());
         App {
-            eng, prefs, settings: Default::default(), saved: (saved, Instant::now()), mode, chart, book, opt: Default::default(), picker, trade,
+            eng, prefs, settings: Default::default(), saved: (saved, Instant::now()), window: st.window, mode, chart, book, opt: Default::default(), picker, trade,
             rate: (Instant::now(), 0, 0.0),
             shot: env("T1_SHOT").map(|p| (p, env("T1_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(30.0))),
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
@@ -436,10 +444,10 @@ impl App {
                 chevron(ui, egui::Rect::from_center_size(egui::pos2(r.right() - 9.0, r.center().y), egui::vec2(8.0, 8.0)), &ui.visuals().widgets.inactive, open);
                 let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                 egui::Popup::from_toggle_button_response(&resp).frame(top::popup_frame(ui, 4)).align(egui::RectAlign::TOP_END).show(|ui| {
-                    ui.set_min_width(150.0);
                     ui.spacing_mut().item_spacing.y = 0.0;
                     for (i, (code, name)) in LANGS.iter().enumerate() {
-                        let (r, row) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
+                        // fixed width: available_width here is the whole status bar
+                        let (r, row) = ui.allocate_exact_size(egui::vec2(160.0, 28.0), egui::Sense::click());
                         let on = i == cur;
                         if on || row.hovered() { ui.painter().rect_filled(r, kit::R, hl()); }
                         if on { ui.painter().text(egui::pos2(r.left() + 13.0, r.center().y), egui::Align2::CENTER_CENTER, "✓", prop(12.0), accent()); }
@@ -507,7 +515,7 @@ impl App {
         off.sort_by_key(|e| *e as u8);
         // sorted keys so an unchanged state serializes identically (no rewrite every second)
         let auto = self.eng.account.lock().unwrap().auto.iter().map(|(e, r)| (format!("{e:?}"), *r)).collect();
-        let s = SettingsRef { route: &self.route, prefs: &self.prefs, lang: lang_code(), base: &self.eng.base, mode: self.mode, chart: &self.chart, layout: &self.layout, cell: self.cell, charts: &self.others, trade_ex: self.trade.ex, off, auto, order_panel: self.order_panel };
+        let s = SettingsRef { route: &self.route, prefs: &self.prefs, lang: lang_code(), base: &self.eng.base, mode: self.mode, chart: &self.chart, layout: &self.layout, cell: self.cell, charts: &self.others, trade_ex: self.trade.ex, off, auto, order_panel: self.order_panel, window: self.window };
         let Ok(json) = serde_json::to_string_pretty(&s) else { return };
         if json == self.saved.0 { return; }
         let Some(p) = settings_path() else { return };
@@ -638,6 +646,10 @@ impl App {
         // T1_SPIN: repaint every frame (diagnostics: worst case of constant mouse movement)
         if std::env::var("T1_SPIN").is_ok() { ctx.request_repaint(); }
         self.screenshot(&ctx);
+        if !self.hosted {
+            let (outer, inner, max, full) = ui.ctx().input(|i| { let v = i.viewport(); (v.outer_rect, v.inner_rect, v.maximized, v.fullscreen) });
+            if let (Some(o), Some(r), false, false) = (outer, inner, max == Some(true), full == Some(true)) { self.window = Some([o.min.x, o.min.y, r.width(), r.height()]); }
+        }
         self.save_settings();
         if !self.hosted { self.resize_edges(ui); self.shortcuts(&ctx); }
         let (mut new_base, mut new_mode, mut restart) = (None, None, false);
