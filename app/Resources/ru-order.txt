@@ -216,3 +216,7 @@ Footprint (traded value per price) = Футпринт (оборот по цен�
 Cluster bars = Кластерные бары
 Side clusters = Боковые кластеры
 Use this price = Использовать эту цену
+Est. liquidations at = Оценка ликвидаций на
+Longs = Лонги
+Shorts = Шорты
+above: shorts · below: longs = выше: шорты · ниже: лонги

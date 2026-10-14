@@ -216,3 +216,7 @@ Footprint (traded value per price) = Footprint (valeur échangée par prix)
 Cluster bars = Barres cluster
 Side clusters = Clusters latéraux
 Use this price = Utiliser ce prix
+Est. liquidations at = Liquidations est. à
+Longs = Longs
+Shorts = Shorts
+above: shorts · below: longs = au-dessus : shorts · en dessous : longs

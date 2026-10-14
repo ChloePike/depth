@@ -188,13 +188,20 @@ pub(crate) fn segments<T: PartialEq + Copy>(ui: &mut Ui, sel: &mut T, items: &[(
     ui.painter().rect_filled(rect, 6, panel2());
     let w = rect.width() / items.len() as f32;
     let mut changed = false;
+    // the selected thumb slides to its segment (~150 ms) instead of jumping
+    if let Some(k) = items.iter().position(|(v, _)| *v == *sel) {
+        let x = ui.ctx().animate_value_with_time(ui.id().with(("seg_thumb", items.len(), items[0].1)), k as f32, 0.15);
+        let r = egui::Rect::from_min_size(egui::pos2(rect.left() + w * x, rect.top()), egui::vec2(w, rect.height())).shrink(2.0);
+        ui.painter().rect(r, 5, hl(), egui::Stroke::new(1.0, edge()), egui::StrokeKind::Inside);
+    }
     for (i, (v, name)) in items.iter().enumerate() {
         let r = egui::Rect::from_min_size(egui::pos2(rect.left() + w * i as f32, rect.top()), egui::vec2(w, rect.height())).shrink(2.0);
         let resp = ui.interact(r, ui.id().with(("seg", name, i)), egui::Sense::click());
         let on = *sel == *v;
-        if on { ui.painter().rect(r, 5, hl(), egui::Stroke::new(1.0, edge()), egui::StrokeKind::Inside); }
-        else if resp.hovered() { ui.painter().rect_filled(r, 5, hl().linear_multiply(0.5)); }
-        ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, *name, prop(12.5), if on { fg() } else { mu() });
+        let hv = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered() && !on, 0.1);
+        if hv > 0.0 { ui.painter().rect_filled(r, 5, hl().linear_multiply(0.5 * hv)); }
+        let tc = ui.ctx().animate_bool_with_time(resp.id.with("on"), on, 0.15);
+        ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, *name, prop(12.5), lerp(mu(), fg(), tc.max(hv)));
         if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !on { *sel = *v; changed = true; }
     }
     changed
@@ -227,7 +234,8 @@ fn slider(ui: &mut Ui, v: &mut f32) -> bool {
 
 pub(crate) fn big_button(ui: &mut Ui, text: &str, fill: Color32, enabled: bool) -> bool {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
-    let col = if !enabled { fill.linear_multiply(0.3) } else if resp.is_pointer_button_down_on() { fill.linear_multiply(0.8) } else if resp.hovered() { fill.gamma_multiply(1.15) } else { fill };
+    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hov"), enabled && resp.hovered(), 0.1);
+    let col = if !enabled { fill.linear_multiply(0.3) } else if resp.is_pointer_button_down_on() { fill.linear_multiply(0.8) } else { lerp(fill, fill.gamma_multiply(1.18), hv) };
     ui.painter().rect_filled(rect, 6, col);
     ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, prop(14.5), if enabled { Color32::WHITE } else { Color32::from_white_alpha(110) });
     enabled && resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
@@ -236,7 +244,8 @@ pub(crate) fn big_button(ui: &mut Ui, text: &str, fill: Color32, enabled: bool) 
 fn chip(ui: &mut Ui, text: &str, enabled: bool) -> egui::Response {
     let g = ui.painter().layout_no_wrap(text.to_string(), prop(11.5), if enabled { fg() } else { mu() });
     let (r, resp) = ui.allocate_exact_size(g.size() + egui::vec2(16.0, 8.0), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
-    ui.painter().rect(r, 4, if resp.hovered() && enabled { hl() } else { panel2() }, egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside);
+    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered() && enabled, 0.1);
+    ui.painter().rect(r, 4, lerp(panel2(), hl(), hv), egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside);
     ui.painter().galley(r.center() - g.size() / 2.0, g, if enabled { fg() } else { mu() });
     if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
 }

@@ -348,6 +348,8 @@ pub struct Chart {
     #[serde(skip)] drag: Option<(usize, u8)>,
     /// pan velocity after a drag is released (bars per second), decaying
     #[serde(skip)] fling: f32,
+    /// auto-fit price range as currently shown (base, interval, source, lo, hi), easing toward the target
+    #[serde(skip)] eased: Option<((String, i64, Option<Exchange>), f64, f64)>,
     /// drawing edits: the last committed list (base, drawings), undo and redo stacks of earlier ones
     #[serde(skip)] committed: Option<(String, Vec<Drawing>)>,
     #[serde(skip)] undo: Vec<Vec<Drawing>>,
@@ -387,7 +389,7 @@ impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, whale_usd: 100_000.0, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, whale_usd: 100_000.0, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
             panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false), (Pane::Delta, false)],
         }
     }
@@ -811,8 +813,20 @@ impl Chart {
         if i0 > i1 { return; }
         let vis = &bars[i0..=i1];
 
-        // price scale
-        let (alo, ahi) = padded_range(vis.iter().flat_map(|b| [b.l, b.h]), 0.06, false);
+        // price scale: auto-fit eases toward the visible range (a new high slides the scale instead
+        // of snapping it); another symbol / interval / source, or a jump of more than the range, snaps
+        let (tlo, thi) = padded_range(vis.iter().flat_map(|b| [b.l, b.h]), 0.06, false);
+        let ease_key = (base.to_string(), self.tf, self.src);
+        let (alo, ahi) = match &self.eased {
+            Some((k, lo0, hi0)) if *k == ease_key && (tlo - lo0).abs().max((thi - hi0).abs()) < (thi - tlo) => {
+                let f = 1.0 - (-dt as f64 * 14.0).exp();
+                let (l2, h2) = (lo0 + (tlo - lo0) * f, hi0 + (thi - hi0) * f);
+                // repaint only while still moving visibly (under a hundredth of a pixel: done)
+                if ((l2 - tlo).abs() + (h2 - thi).abs()) / (thi - tlo).max(1e-12) > 1e-4 { ui.ctx().request_repaint(); (l2, h2) } else { (tlo, thi) }
+            }
+            _ => (tlo, thi),
+        };
+        self.eased = Some((ease_key, alo, ahi));
         let (mut lo, mut hi) = self.y_range.unwrap_or((alo, ahi));
         if y_wheel != 0.0 {
             let (mid, half) = ((lo + hi) / 2.0, (hi - lo) / 2.0 * (-y_wheel as f64 * 0.003).exp());
@@ -834,7 +848,7 @@ impl Chart {
         }
         if !(hi > lo && lo.is_finite() && hi.is_finite()) { (lo, hi) = (alo, ahi); self.y_range = None; }
         // legend rows sit above the plot: OHLC, MAs, then the overlays' key values when any is on
-        let overlays = self.sr || self.vwap || self.cone || (self.mark && smarket == Market::Perp);
+        let overlays = self.sr || self.vwap || self.cone || self.bb || ((self.mark || self.liqmap) && smarket == Market::Perp);
         let main_plot = Rect::from_min_max(pos2(main.left(), main.top() + if overlays { 66.0 } else { 48.0 }), pos2(main.right(), main.bottom() - 6.0));
         let ps = PScale { lo, hi, log: self.scale == Scale::Log && lo > 0.0, r: main_plot };
         let y = |v: f64| ps.y(v);
@@ -878,6 +892,7 @@ impl Chart {
         }
         // estimated liquidation map: horizontal profile on the right edge of the price plot,
         // longs (below price) red, shorts (above) green, merged into ~2px rows
+        let mut liq_legend: Option<Color32> = None;
         if self.liqmap && smarket == Market::Perp && live {
             // estimated from the 1m series whatever the interval: finer OI steps, same levels
             if let Some(m) = self.liq.get(&raw, 1) {
@@ -891,14 +906,30 @@ impl Chart {
                 }
                 let qmax = rows.values().map(|(l, s)| l.max(*s)).fold(0.0, f32::max);
                 if qmax > 0.0 {
+                    // one heat color for both sides (dim amber -> bright yellow): shorts are liquidated
+                    // above the price, longs below; up / down colors here read as "who is long"
                     let w = 90.0;
                     let clip = painter.with_clip_rect(main_plot);
+                    let (cold, hot) = (Color32::from_rgb(0x8a, 0x4b, 0x0f), Color32::from_rgb(0xff, 0xd6, 0x0a));
+                    let ptr = resp.hover_pos().filter(|p| p.x > main.right() - w && p.x < main.right() && main_plot.contains(*p));
+                    let mut tip = None;
                     for (k, (l, s)) in rows {
-                        let (q, col) = if l >= s { (l, dn()) } else { (s, up()) };
+                        let q = l.max(s);
                         let (y0, y1) = (y((k + 1) as f64 * row), y(k as f64 * row));
                         let len = w * (q / qmax).sqrt();
-                        clip.rect_filled(Rect::from_min_max(pos2(main.right() - len, y0), pos2(main.right(), y1.max(y0 + 1.0))), 0, col.linear_multiply(0.12 + 0.38 * q / qmax));
+                        let r = Rect::from_min_max(pos2(main.right() - len, y0), pos2(main.right(), y1.max(y0 + 1.0)));
+                        let t = q / qmax;
+                        clip.rect_filled(r, 0, lerp(cold, hot, t).gamma_multiply(0.35 + 0.55 * t));
+                        if ptr.is_some_and(|p| p.y >= y0 && p.y <= y1.max(y0 + 1.0)) { tip = Some(((k as f64 + 0.5) * row, l, s)); }
                     }
+                    if let (Some((px, l, s)), Some(p)) = (tip, ptr) {
+                        let txt = format!("{}  {}\n{} ${}   {} ${}", super::l("Est. liquidations at"), fmt_px(px), super::l("Longs"), fmt_usd_short(l as f64 * px), super::l("Shorts"), fmt_usd_short(s as f64 * px));
+                        let g = painter.layout(txt, mono(11.0), fg(), 260.0);
+                        let b = Rect::from_min_size(pos2(main.right() - w - g.size().x - 22.0, p.y - g.size().y / 2.0 - 6.0), g.size() + vec2(12.0, 12.0));
+                        painter.rect(b, 5, popup_bg(), Stroke::new(1.0, line()), egui::StrokeKind::Inside);
+                        painter.galley(b.min + vec2(6.0, 6.0), g, fg());
+                    }
+                    liq_legend = Some(hot);
                 }
             }
         }
@@ -918,6 +949,7 @@ impl Chart {
         let mut taken: Vec<Rect> = vec![Rect::from_min_size(pos2(main.right() + 2.0, last_ly - 10.0), vec2(AXIS_W - 4.0, 34.0))];
         // third legend row: each overlay's name, colour and current value, so no line needs guessing
         let mut legend3: Vec<(String, String, Color32)> = vec![];
+        if let Some(c) = liq_legend { legend3.push((super::l("Liquidation map").into(), super::l("above: shorts · below: longs").into(), c)); }
         if let Some(r) = ba_rect { taken.push(r.expand(2.0)); }
         let place = |r: Rect, taken: &mut Vec<Rect>| -> Rect {
             let h = r.height() + 2.0;
@@ -1477,11 +1509,15 @@ impl Chart {
         if let Some((msg, until)) = self.toast.clone() {
             let left = until.saturating_duration_since(std::time::Instant::now());
             if !left.is_zero() {
-                let g = painter.layout_no_wrap(msg, prop(13.0), Color32::WHITE);
-                let r = Rect::from_center_size(pos2(main_plot.center().x, main_plot.top() + 20.0), g.size() + vec2(24.0, 12.0));
-                painter.rect_filled(r, 6, accent());
-                painter.galley(r.center() - g.size() / 2.0, g, Color32::WHITE);
-                ui.ctx().request_repaint_after(left);
+                // slides down and fades in over 250 ms, fades out over the last 400 ms
+                let age = 8.0 - left.as_secs_f32();
+                let t = (age / 0.25).min(1.0).min(left.as_secs_f32() / 0.4);
+                let ease = 1.0 - (1.0 - t).powi(3);
+                let g = painter.layout_no_wrap(msg, prop(13.0), Color32::WHITE.gamma_multiply(ease));
+                let r = Rect::from_center_size(pos2(main_plot.center().x, main_plot.top() + 6.0 + 14.0 * ease), g.size() + vec2(24.0, 12.0));
+                painter.rect_filled(r, 6, accent().gamma_multiply(ease));
+                painter.galley(r.center() - g.size() / 2.0, g, Color32::WHITE.gamma_multiply(ease));
+                if t < 1.0 { ui.ctx().request_repaint(); } else { ui.ctx().request_repaint_after(left.saturating_sub(std::time::Duration::from_millis(400))); }
             } else { self.toast = None; }
         }
     }
@@ -2327,9 +2363,10 @@ impl Chart {
 /// Small painted icon button for drawing tools; `None` is the clear (trash) button.
 fn tool_button(ui: &mut Ui, tool: Option<Tool>, on: bool) -> egui::Response {
     let (r, resp) = ui.allocate_exact_size(vec2(26.0, 22.0), Sense::click());
+    let hv = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered() || on, 0.1);
     let p = ui.painter();
-    if on { p.rect_filled(r, 3, hl()); } else if resp.hovered() { p.rect_filled(r, 3, hl().linear_multiply(0.6)); }
-    let col = if on { accent() } else if resp.hovered() { fg() } else { mu() };
+    if hv > 0.0 { p.rect_filled(r, 3, hl().linear_multiply(if on { 1.0 } else { 0.6 * hv })); }
+    let col = if on { accent() } else { lerp(mu(), fg(), hv) };
     let s = Stroke::new(1.4, col);
     let c = r.center();
     match tool {

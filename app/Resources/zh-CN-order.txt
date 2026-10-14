@@ -216,3 +216,7 @@ Footprint (traded value per price) = 足迹图（每个价位的成交额）
 Cluster bars = 簇柱
 Side clusters = 侧簇
 Use this price = 使用这个价格
+Est. liquidations at = 预估强平 @
+Longs = 多头
+Shorts = 空头
+above: shorts · below: longs = 上方 = 空头强平 · 下方 = 多头强平

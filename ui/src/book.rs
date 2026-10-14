@@ -19,13 +19,18 @@ pub struct BookView { trades: bool,
     min_usd: usize,
     /// levels last computed: (when, what they were computed for, bids, asks). The rows repaint every
     /// frame from this; the cross-venue aggregation runs at most every REFRESH.
-    cache: Option<(std::time::Instant, (Option<Exchange>, Market, usize, u64), Vec<Level>, Vec<Level>)> }
+    cache: Option<(std::time::Instant, (Option<Exchange>, Market, usize, u64), Vec<Level>, Vec<Level>)>,
+    /// rows whose size changed at the last refreshes: (ask side, price bin) -> (when, grew)
+    flash: std::collections::HashMap<(bool, i64), (std::time::Instant, bool)> }
+
+/// How long a changed size stays lit, fading out.
+const FLASH: std::time::Duration = std::time::Duration::from_millis(600);
 
 /// How often the book's levels are recomputed: fast enough to feel live, slow enough to read
 /// (and the aggregation across ten venues is not free).
 const REFRESH: std::time::Duration = std::time::Duration::from_millis(100);
 
-impl Default for BookView { fn default() -> Self { BookView { trades: false, page: 0, src: None, group: 1, clicked: None, quote: false, min_usd: 0, cache: None } } }
+impl Default for BookView { fn default() -> Self { BookView { trades: false, page: 0, src: None, group: 1, clicked: None, quote: false, min_usd: 0, cache: None, flash: Default::default() } } }
 
 /// Quote amounts: 12.3K / 4.56M style, whole units below a thousand.
 fn fmt_big_book(v: f64) -> String {
@@ -158,7 +163,23 @@ impl BookView {
                     None => (vec![], vec![]),
                 },
             };
-            self.cache = Some((std::time::Instant::now(), key, b, k));
+            // a level whose size moved lights up (green grew, red shrank) and fades out
+            let now = std::time::Instant::now();
+            if let Some((_, old_key, ob, ok)) = &self.cache {
+                if *old_key == key {
+                    for (ask, old, new) in [(false, ob, &b), (true, ok, &k)] {
+                        let prev: std::collections::HashMap<i64, f64> = old.iter().map(|l| ((l.px / bin).round() as i64, l.qty)).collect();
+                        for l in new.iter() {
+                            let id = (l.px / bin).round() as i64;
+                            if let Some(q) = prev.get(&id).filter(|q| (**q - l.qty).abs() > 1e-9 * l.qty.max(1e-12)) {
+                                self.flash.insert((ask, id), (now, l.qty > *q));
+                            }
+                        }
+                    }
+                }
+            }
+            self.flash.retain(|_, (t, _)| now.duration_since(*t) < FLASH);
+            self.cache = Some((now, key, b, k));
         }
         let (bids, asks) = self.cache.as_ref().map(|(_, _, b, k)| (b.clone(), k.clone())).unwrap_or_default();
         // repaint when the next refresh is due, even if nothing else asks for a frame
@@ -185,6 +206,7 @@ impl BookView {
         let (fs, ft) = (col_fmt(lmax, quote), col_fmt(max, quote));
         let dp = step_dp(bin);
         let bar_r = rect.right() - 32.0;
+        let flash = &self.flash;
         let row = |y: f32, l: &Level, c: f64, is_ask: bool| {
             let r = Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), rh));
             let col = if is_ask { dn() } else { up() };
@@ -194,6 +216,13 @@ impl BookView {
             let w1 = (size(l) / lmax.max(1e-12)) as f32 * (bar_r - rect.left()) * 0.5;
             painter.rect_filled(Rect::from_min_max(pos2(bar_r - w1, r.top() + 1.0), pos2(bar_r, r.bottom() - 1.0)), 0, col.linear_multiply(0.16));
             let cy = r.center().y;
+            if let Some((t, grew)) = flash.get(&(is_ask, (l.px / bin).round() as i64)) {
+                let f = 1.0 - (t.elapsed().as_secs_f32() / FLASH.as_secs_f32()).min(1.0);
+                if f > 0.0 {
+                    let cell = Rect::from_min_max(pos2(cols[1] - 70.0, r.top() + 1.0), pos2(cols[1] + 4.0, r.bottom() - 1.0));
+                    painter.rect_filled(cell, 2, if *grew { up() } else { dn() }.linear_multiply(0.35 * f));
+                }
+            }
             painter.text(pos2(cols[0], cy), Align2::LEFT_CENTER, fmt_dp(l.px, dp), mono(11.5), col);
             painter.text(pos2(cols[1], cy), Align2::RIGHT_CENTER, fs(size(l)), mono(11.5), fg());
             painter.text(pos2(cols[2], cy), Align2::RIGHT_CENTER, ft(c), mono(11.0), mu());

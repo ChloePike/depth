@@ -216,3 +216,7 @@ Footprint (traded value per price) = 풋프린트 (가격별 체결액)
 Cluster bars = 클러스터 바
 Side clusters = 사이드 클러스터
 Use this price = 이 가격 사용
+Est. liquidations at = 예상 청산 @
+Longs = 롱
+Shorts = 숏
+above: shorts · below: longs = 위 = 숏 청산 · 아래 = 롱 청산

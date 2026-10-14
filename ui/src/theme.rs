@@ -305,11 +305,24 @@ pub fn row_sep(ui: &mut egui::Ui) {
 pub fn tab(ui: &mut egui::Ui, text: &str, selected: bool, size: f32) -> egui::Response {
     let g = ui.painter().layout_no_wrap(text.to_string(), prop(size), fg());
     let (rect, resp) = ui.allocate_exact_size(g.size() + egui::vec2(12.0, 7.0), egui::Sense::click());
-    let col = if selected || resp.hovered() { fg() } else { mu() };
+    // text brightens on hover, the underline grows out from the middle when selected (~120 ms)
+    let h = ui.ctx().animate_bool_with_time(resp.id.with("hov"), selected || resp.hovered(), 0.12);
+    let col = lerp(mu(), fg(), h);
     let g = ui.painter().layout_no_wrap(text.to_string(), prop(size), col);
     ui.painter().galley(rect.center() - g.size() / 2.0, g, col);
-    if selected { ui.painter().hline(egui::Rangef::new(rect.left() + 5.0, rect.right() - 5.0), rect.bottom() - 1.0, egui::Stroke::new(2.0, accent())); }
+    let s = ui.ctx().animate_bool_with_time(resp.id.with("sel"), selected, 0.16);
+    if s > 0.0 {
+        let half = (rect.width() / 2.0 - 5.0) * s;
+        ui.painter().hline(egui::Rangef::new(rect.center().x - half, rect.center().x + half), rect.bottom() - 1.0, egui::Stroke::new(2.0, accent().gamma_multiply(s.max(0.3))));
+    }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Linear blend of two colors (t = 0 gives `a`), for hover / selection fades.
+pub fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgba_premultiplied(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()), m(a.a(), b.a()))
 }
 
 /// Numbers: Inter with tabular figures (columns of prices line up).

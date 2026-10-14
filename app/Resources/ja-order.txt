@@ -216,3 +216,7 @@ Footprint (traded value per price) = フットプリント（価格ごとの約�
 Cluster bars = クラスターバー
 Side clusters = サイドクラスター
 Use this price = この価格を使う
+Est. liquidations at = 推定清算 @
+Longs = ロング
+Shorts = ショート
+above: shorts · below: longs = 上 = ショート清算 · 下 = ロング清算

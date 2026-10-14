@@ -216,3 +216,7 @@ Footprint (traded value per price) = 足跡圖（每個價位的成交額）
 Cluster bars = 簇柱
 Side clusters = 側簇
 Use this price = 使用這個價格
+Est. liquidations at = 預估強平 @
+Longs = 多頭
+Shorts = 空頭
+above: shorts · below: longs = 上方 = 空頭強平 · 下方 = 多頭強平
