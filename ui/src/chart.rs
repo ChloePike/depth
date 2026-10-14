@@ -371,13 +371,16 @@ pub struct Chart {
     #[serde(skip)] pub amends: bool,
     /// position tool: share of equity risked between entry and stop (percent)
     risk_pct: f64,
+    /// set by the app: its chart layout; the toolbar's choice goes back through `layout_req`
+    #[serde(skip)] pub layout: String,
+    #[serde(skip)] pub layout_req: Option<String>,
 }
 
 impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
             panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false)],
         }
     }
@@ -2066,7 +2069,7 @@ impl Chart {
                 for (m, l) in &TFS[TF_QUICK..] { if ui.selectable_label(self.tf == *m, *l).clicked() { self.tf = *m; ui.close(); } }
             });
             ui.spacing_mut().item_spacing.x = 6.0;
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             ui.separator();
             let mut venues: Vec<Exchange> = a.series.keys().filter(|(e, m)| *m == market && e.is_some()).filter_map(|(e, _)| *e).collect();
             venues.sort_by_key(|e| format!("{e:?}"));
@@ -2075,62 +2078,144 @@ impl Chart {
                 ui.selectable_value(&mut self.src, None, t("src.agg"));
                 for e in venues { ui.selectable_value(&mut self.src, Some(e), format!("{e:?}")); }
             });
-            // indicators: sub-panes and overlays in one menu instead of a row of toggles
-            let n_on = self.panes.iter().filter(|(p, on)| *on && (!p.perp_only() || market == Market::Perp)).count()
-                + self.heat as usize + self.ma as usize + (self.liqmap && market == Market::Perp) as usize;
-            ui.menu_button(format!("{} {n_on} ▾", t("chart.indicators")), |ui| {
-                ui.set_min_width(150.0);
-                for (p, on) in self.panes.iter_mut() {
-                    if p.perp_only() && market != Market::Perp { continue; }
-                    ui.checkbox(on, t(p.key()));
+            self.indicators_menu(ui, market);
+            self.layout_menu(ui);
+            self.alerts_menu(ui, base);
+            if tab(ui, t("replay.title"), self.replay.is_some(), 11.5).on_hover_text(super::l("Bar replay: pick a bar, then play forward")).clicked() {
+                self.replay = if self.replay.is_some() { None } else { Some(Replay::new(None, 0.0)) };
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if (self.right.abs() > 0.5 || self.bar_w != 7.0 || self.y_range.is_some()) && tab(ui, t("chart.reset"), false, 11.5).on_hover_text(super::l("Back to the live edge and default zoom")).clicked() {
+                    self.right = 0.0; self.bar_w = 7.0; self.y_range = None;
                 }
-                ui.separator();
-                ui.checkbox(&mut self.ma, t("chart.ma"));
-                if self.ma {
-                    for m in self.mas.iter_mut() {
+                let n = self.drawings.get(base).map_or(0, |v| v.len());
+                if n > 0 {
+                    if tool_button(ui, None, false).on_hover_text(format!("{} ({n})", t("draw.clear"))).clicked() { self.drawings.remove(base); }
+                    if tab(ui, if self.hide { "◌" } else { "◉" }, self.hide, 12.0).on_hover_text(super::l("Hide drawings")).clicked() { self.hide = !self.hide; }
+                }
+                // the everyday tools as buttons, the rest behind "⋯" (as in the native toolbar)
+                let more = [(Tool::Channel, "draw.channel"), (Tool::Text, "draw.text"), (Tool::Measure, "draw.measure"), (Tool::Position, "draw.position")];
+                let in_more = more.iter().any(|(k, _)| self.tool == Some(*k));
+                ui.menu_button(RichText::new(if in_more { "⋯ ●" } else { "⋯" }).color(if in_more { accent() } else { mu() }), |ui| {
+                    for (tool, key) in more {
                         ui.horizontal(|ui| {
-                            ui.checkbox(&mut m.on, "");
-                            let mut c = rgb(m.col);
-                            if ui.color_edit_button_srgba(&mut c).changed() { m.col = super::theme::pack(c); }
-                            ui.add(egui::DragValue::new(&mut m.n).range(1..=1000).speed(0.3));
-                            if ui.selectable_label(m.ema, "EMA").clicked() { m.ema = !m.ema; }
+                            tool_button(ui, Some(tool), self.tool == Some(tool));
+                            if ui.selectable_label(self.tool == Some(tool), t(key)).clicked() { self.tool = if self.tool == Some(tool) { None } else { Some(tool) }; self.pending.clear(); ui.close(); }
                         });
                     }
-                }
-                ui.checkbox(&mut self.bb, t("chart.bb"));
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("BB").color(mu()));
-                    ui.add(egui::DragValue::new(&mut self.ind.bb_n).range(1..=500).speed(0.3));
-                    ui.add(egui::DragValue::new(&mut self.ind.bb_k).range(0.1..=10.0).speed(0.05).fixed_decimals(1));
-                    ui.label(RichText::new("RSI").color(mu()));
-                    ui.add(egui::DragValue::new(&mut self.ind.rsi).range(1..=500).speed(0.3));
-                });
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("MACD").color(mu()));
-                    for x in self.ind.macd.iter_mut() { ui.add(egui::DragValue::new(x).range(1..=500).speed(0.3)); }
-                });
-                ui.checkbox(&mut self.magnet, t("chart.magnet"));
-                ui.checkbox(&mut self.heat, t("chart.heatmap"));
-                if market == Market::Perp { ui.checkbox(&mut self.liqmap, t("chart.liqmap")).on_hover_text(t("chart.liqmap_tip")); }
-            });
-            ui.separator();
-            for (tool, key) in [(Tool::HLine, "draw.hline"), (Tool::Trend, "draw.trend"), (Tool::Ray, "draw.ray"), (Tool::Channel, "draw.channel"), (Tool::Fib, "draw.fib"), (Tool::Rect, "draw.rect"), (Tool::Text, "draw.text"), (Tool::Measure, "draw.measure"), (Tool::Position, "draw.position")] {
-                if tool_button(ui, Some(tool), self.tool == Some(tool)).on_hover_text(t(key)).clicked() {
-                    self.tool = if self.tool == Some(tool) { None } else { Some(tool) };
-                    self.pending.clear();
-                }
-            }
-            let n = self.drawings.get(base).map_or(0, |v| v.len());
-            if n > 0 && tool_button(ui, None, false).on_hover_text(format!("{} ({n})", t("draw.clear"))).clicked() { self.drawings.remove(base); }
-            if n > 0 && tab(ui, t("draw.hide"), self.hide, 11.5).clicked() { self.hide = !self.hide; }
-            ui.separator();
-            if tab(ui, t("replay.title"), self.replay.is_some(), 11.5).clicked() { self.replay = if self.replay.is_some() { None } else { Some(Replay::new(None, 0.0)) }; }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.right.abs() > 0.5 || self.bar_w != 7.0 {
-                    if tab(ui, t("chart.reset"), false, 11.5).clicked() { self.right = 0.0; self.bar_w = 7.0; }
+                }).response.on_hover_text(super::l("More drawing tools"));
+                for (tool, key) in [(Tool::Rect, "draw.rect"), (Tool::Fib, "draw.fib"), (Tool::Ray, "draw.ray"), (Tool::Trend, "draw.trend"), (Tool::HLine, "draw.hline")] {
+                    if tool_button(ui, Some(tool), self.tool == Some(tool)).on_hover_text(t(key)).clicked() {
+                        self.tool = if self.tool == Some(tool) { None } else { Some(tool) };
+                        self.pending.clear();
+                    }
                 }
             });
         });
+    }
+
+    /// Sub-panes, overlays (with their inputs) and levels in one menu, grouped like the native one.
+    fn indicators_menu(&mut self, ui: &mut Ui, market: Market) {
+        let perp = market == Market::Perp;
+        let n_on = self.panes.iter().filter(|(p, on)| *on && (!p.perp_only() || perp)).count()
+            + [self.heat, self.ma, self.bb, self.liqmap && perp, self.sr, self.breakouts, self.vwap, self.cone, self.walls, self.mark && perp].iter().filter(|x| **x).count();
+        ui.menu_button(format!("{} {n_on} ▾", t("chart.indicators")), |ui| {
+            ui.set_min_width(240.0);
+            let head = |ui: &mut Ui, s: &str| { ui.add_space(4.0); ui.label(RichText::new(s).small().color(dim())); };
+            head(ui, super::l("Panes"));
+            for (p, on) in self.panes.iter_mut() {
+                if p.perp_only() && !perp { continue; }
+                ui.checkbox(on, t(p.key()));
+            }
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("RSI").color(mu()));
+                ui.add(egui::DragValue::new(&mut self.ind.rsi).range(1..=500).speed(0.3));
+                ui.label(RichText::new("MACD").color(mu()));
+                for x in self.ind.macd.iter_mut() { ui.add(egui::DragValue::new(x).range(1..=500).speed(0.3)); }
+            });
+            ui.separator();
+            head(ui, super::l("Overlays"));
+            ui.checkbox(&mut self.ma, super::l("Moving averages"));
+            if self.ma {
+                for m in self.mas.iter_mut() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(18.0);
+                        ui.checkbox(&mut m.on, "");
+                        let mut c = rgb(m.col);
+                        if ui.color_edit_button_srgba(&mut c).changed() { m.col = super::theme::pack(c); }
+                        ui.add(egui::DragValue::new(&mut m.n).range(1..=1000).speed(0.3));
+                        if ui.selectable_label(!m.ema, "SMA").clicked() { m.ema = false; }
+                        if ui.selectable_label(m.ema, "EMA").clicked() { m.ema = true; }
+                    });
+                }
+            }
+            ui.checkbox(&mut self.bb, super::l("Bollinger bands"));
+            if self.bb {
+                ui.horizontal(|ui| {
+                    ui.add_space(18.0);
+                    ui.add(egui::DragValue::new(&mut self.ind.bb_n).range(1..=500).speed(0.3));
+                    ui.add(egui::DragValue::new(&mut self.ind.bb_k).range(0.1..=10.0).speed(0.05).fixed_decimals(1).suffix(" σ"));
+                });
+            }
+            ui.checkbox(&mut self.heat, super::l("Book heatmap"));
+            if perp { ui.checkbox(&mut self.liqmap, super::l("Liquidation map")).on_hover_text(t("chart.liqmap_tip")); }
+            ui.separator();
+            head(ui, super::l("Levels"));
+            ui.checkbox(&mut self.sr, super::l("Volume profile (POC · value area · HVN)"));
+            ui.checkbox(&mut self.breakouts, super::l("Breakouts (closes through VAH / VAL / HVN)"));
+            ui.checkbox(&mut self.vwap, super::l("Session VWAP ±1σ ±2σ"));
+            ui.checkbox(&mut self.cone, super::l("Expected move cone (volatility model)"));
+            ui.checkbox(&mut self.walls, super::l("Liquidity walls"));
+            if perp { ui.checkbox(&mut self.mark, super::l("Mark price")); }
+            ui.separator();
+            ui.checkbox(&mut self.magnet, super::l("Magnet crosshair"));
+        });
+    }
+
+    /// Chart layout (the app owns the cells: the choice goes out through `layout_req`).
+    fn layout_menu(&mut self, ui: &mut Ui) {
+        const LAYOUTS: [(&str, &str); 5] = [("1", "One chart"), ("2", "Two side by side"), ("2v", "Two stacked"), ("3", "Three"), ("4", "Four")];
+        let (r, resp) = ui.allocate_exact_size(vec2(26.0, 22.0), Sense::click());
+        if resp.hovered() { ui.painter().rect_filled(r, 3, hl()); }
+        layout_glyph(ui.painter(), r.shrink2(vec2(5.0, 4.0)), &self.layout, if resp.hovered() { fg() } else { mu() });
+        egui::Popup::menu(&resp.on_hover_text(super::l("Chart layout: the toolbar drives the highlighted chart"))).show(|ui| {
+            for (id, name) in LAYOUTS {
+                ui.horizontal(|ui| {
+                    let (g, _) = ui.allocate_exact_size(vec2(18.0, 13.0), Sense::hover());
+                    layout_glyph(ui.painter(), g, id, if self.layout == id { accent() } else { mu() });
+                    if ui.selectable_label(self.layout == id, super::l(name)).clicked() { self.layout_req = Some(id.to_string()); ui.close(); }
+                });
+            }
+        });
+    }
+
+    /// Armed alerts on every symbol (sound, remove) and the sound of new ones.
+    fn alerts_menu(&mut self, ui: &mut Ui, base: &str) {
+        let mut rows: Vec<(String, usize, f64, String)> = self.drawings.iter().flat_map(|(b, l)| l.iter().enumerate().filter_map(move |(i, d)| {
+            Some((b.clone(), i, d.level_at(depth::now_ms())?, d.alert.clone()?))
+        })).collect();
+        rows.sort_by(|x, y| (x.0 != base, &x.0).cmp(&(y.0 != base, &y.0)));
+        let label = if rows.is_empty() { "🔔".to_string() } else { format!("🔔 {}", rows.len()) };
+        ui.menu_button(RichText::new(label).color(if rows.is_empty() { mu() } else { accent() }), |ui| {
+            ui.set_min_width(240.0);
+            if rows.is_empty() { ui.label(RichText::new(super::l("Right-click the chart or a line to add an alert")).color(dim())); }
+            for (b, i, px, snd) in rows {
+                ui.menu_button(format!("{b}  {}  ·  {}", fmt_px(px), sound_name(&snd)), |ui| {
+                    if let Some(d) = self.drawings.get_mut(&b).and_then(|l| l.get_mut(i)) {
+                        if let Some(s) = d.alert.as_mut() {
+                            for (id, name) in sounds() { if ui.selectable_label(*s == id, name).clicked() { play_sound(&id); *s = id; } }
+                        }
+                        ui.separator();
+                        if ui.button(RichText::new(super::l("Remove alert")).color(dn())).clicked() { d.alert = None; ui.close(); }
+                    }
+                });
+            }
+            ui.separator();
+            ui.menu_button(super::l("Sound of new alerts"), |ui| {
+                for (id, name) in sounds() { if ui.selectable_label(self.alert_sound == id, name).clicked() { play_sound(&id); self.alert_sound = id; } }
+            });
+        }).response.on_hover_text(super::l("Price alerts"));
     }
 }
 
@@ -2190,6 +2275,20 @@ fn tool_button(ui: &mut Ui, tool: Option<Tool>, on: bool) -> egui::Response {
         }
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Small picture of a chart layout ("1", "2", "2v", "3", "4") inside `r`.
+fn layout_glyph(p: &egui::Painter, r: Rect, id: &str, col: Color32) {
+    let s = Stroke::new(1.3, col);
+    p.rect_stroke(r, 2, s, egui::StrokeKind::Inside);
+    let (cx, cy) = (r.center().x, r.center().y);
+    match id {
+        "2" => { p.vline(cx, r.y_range(), s); }
+        "2v" => { p.hline(r.x_range(), cy, s); }
+        "3" => { p.vline(cx, r.y_range(), s); p.hline(cx..=r.right(), cy, s); }
+        "4" => { p.vline(cx, r.y_range(), s); p.hline(r.x_range(), cy, s); }
+        _ => {}
+    }
 }
 
 /// Alert sounds: "none", macOS system sounds ("sys:Glass") and the bundled ones ("depth:chime").

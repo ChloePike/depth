@@ -553,6 +553,9 @@ impl App {
     /// The chart area: one chart, or the layout's cells (a press in a cell makes it the active one).
     fn charts(&mut self, ui: &mut Ui, a: &depth::agg::Agg) {
         let base = self.eng.base.clone();
+        self.chart.layout = self.layout.clone();
+        for o in self.others.iter_mut() { o.1.layout = self.layout.clone(); if let Some(l) = o.1.layout_req.take() { self.layout = l; } }
+        if let Some(l) = self.chart.layout_req.take() { self.layout = l; }
         let cells = layout_cells(&self.layout, ui.available_rect_before_wrap());
         if cells.len() == 1 { self.chart.multi = false; return self.chart.show(ui, a, self.mode, &base); }
         self.fill_cells(cells.len());
