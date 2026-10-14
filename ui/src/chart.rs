@@ -59,7 +59,7 @@ fn stitch(hist: &[Bar], live: Vec<Bar>, first_live_1m: i64, tf: i64) -> Vec<Bar>
 }
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-enum Pane { Vol, Cvd, Oi, Funding, Basis, Ls, Premium, Ofi, BookFlow, Rsi, Macd }
+enum Pane { Vol, Cvd, Oi, Funding, Basis, Ls, Premium, Ofi, BookFlow, Rsi, Macd, Delta }
 
 impl Pane {
     fn key(self) -> &'static str {
@@ -67,7 +67,7 @@ impl Pane {
             Pane::Vol => "chart.vol", Pane::Cvd => "chart.cvd", Pane::Oi => "chart.oi",
             Pane::Funding => "chart.funding", Pane::Basis => "chart.basis", Pane::Ls => "chart.ls",
             Pane::Premium => "chart.premium", Pane::Ofi => "chart.ofi", Pane::BookFlow => "chart.bookflow",
-            Pane::Rsi => "chart.rsi", Pane::Macd => "chart.macd",
+            Pane::Rsi => "chart.rsi", Pane::Macd => "chart.macd", Pane::Delta => "chart.delta",
         }
     }
     fn perp_only(self) -> bool { matches!(self, Pane::Oi | Pane::Funding | Pane::Basis | Pane::Ls) }
@@ -308,6 +308,11 @@ pub struct Chart {
     vwap: bool,
     /// Bollinger bands on the close
     bb: bool,
+    /// footprint: traded volume per price inside each bar (text cells when zoomed in, a mini profile otherwise)
+    fp: bool,
+    /// trades of at least `whale_usd` as bubbles on the candles
+    whales: bool,
+    whale_usd: f64,
     /// indicator inputs
     ind: Ind,
     /// drawings hidden (alerts still fire)
@@ -380,8 +385,8 @@ impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
-            panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false)],
+            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, fp: false, whales: false, whale_usd: 100_000.0, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false), (Pane::Delta, false)],
         }
     }
 }
@@ -696,7 +701,7 @@ impl Chart {
         // one-time move to the calmer defaults (fewer overlays on by default); each stays a toggle
         if self.style < 2 { self.ma = false; self.walls = false; self.cone = false; self.style = 2; }
         // panes added after a layout was saved
-        for p in [Pane::Premium, Pane::Ofi, Pane::BookFlow, Pane::Rsi, Pane::Macd] { if !self.panes.iter().any(|x| x.0 == p) { self.panes.push((p, false)); } }
+        for p in [Pane::Premium, Pane::Ofi, Pane::BookFlow, Pane::Rsi, Pane::Macd, Pane::Delta] { if !self.panes.iter().any(|x| x.0 == p) { self.panes.push((p, false)); } }
         let smarket = if market == Market::Margin { Market::Spot } else { market };
         // hosted: the native toolbar above the chart drives these through native_set
         if !native() { self.toolbar(ui, a, smarket, base); }
@@ -780,7 +785,7 @@ impl Chart {
         if let (true, Some(hp)) = (resp.hovered(), resp.hover_pos()) {
             let (d, pinch) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
             if hp.x > main.right() && hp.y < main.bottom() { y_wheel = d.y; } else {
-                let bw = (self.bar_w * (d.y * 0.003).exp() * pinch).clamp(1.5, 60.0);
+                let bw = (self.bar_w * (d.y * 0.003).exp() * pinch).clamp(1.5, if self.fp { 160.0 } else { 60.0 });
                 if bw != self.bar_w {
                     let edge = bars.len() as f32 + 3.0 - self.right;
                     let idx = edge - (main.right() - hp.x - self.bar_w / 2.0) / self.bar_w;
@@ -1082,10 +1087,58 @@ impl Chart {
             }
         }
 
+        // footprint (live trades only): wide bars show "sells × buys" per price row, narrower
+        // ones a profile beside the candle; in text mode the candle shrinks to a strip at the left
+        let foot = a.fp.get(&(self.src, smarket)).filter(|f| self.fp && f.bin > 0.0 && self.bar_w >= 12.0);
+        let fp_text = foot.is_some() && self.bar_w >= 46.0;
+        if let Some(f) = foot {
+            let ms = self.tf * 60_000;
+            // rows are a 1-2-5 multiple of the recorded bin, tall enough for their content
+            let px_h = main_plot.height() as f64 / (hi - lo);
+            let need = if fp_text { 13.0 } else { 3.0 } / (f.bin * px_h);
+            let mult = [1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0].into_iter().find(|m| *m >= need).unwrap_or(1000.0);
+            let row = f.bin * mult;
+            let clip = painter.with_clip_rect(main_plot);
+            for (k, b) in vis.iter().enumerate() {
+                let mut rows: std::collections::BTreeMap<i64, (f64, f64)> = Default::default();
+                for (key, (bu, se)) in f.range(b.t, b.t + ms) {
+                    let r = rows.entry((key as f64 * f.bin / row).floor() as i64).or_default();
+                    r.0 += bu; r.1 += se;
+                }
+                let Some(max) = rows.values().map(|(bu, se)| bu + se).max_by(f64::total_cmp).filter(|m| *m > 0.0) else { continue };
+                let poc = rows.iter().max_by(|x, z| (x.1.0 + x.1.1).total_cmp(&(z.1.0 + z.1.1))).map(|(r, _)| *r);
+                let x = fr.x((i0 + k) as f32);
+                for (r, (bu, se)) in &rows {
+                    let (y0, y1) = (y((*r + 1) as f64 * row), y(*r as f64 * row));
+                    let share = ((bu + se) / max) as f32;
+                    let col = if bu >= se { up() } else { dn() };
+                    if fp_text {
+                        let cell = Rect::from_min_max(pos2(x - self.bar_w * 0.40, y0 + 0.5), pos2(x + self.bar_w * 0.46, y1 - 0.5));
+                        clip.rect_filled(cell, 1, col.linear_multiply(0.06 + 0.30 * share));
+                        // diagonal imbalance (TradingView / ATAS): buys at a row against sells one row lower
+                        let below = rows.get(&(r - 1)).map_or(0.0, |x| x.1);
+                        let above = rows.get(&(r + 1)).map_or(0.0, |x| x.0);
+                        let (bc, sc) = (if *bu > 0.0 && *bu >= 3.0 * below.max(1e-12) && below > 0.0 { up() } else { fg() }, if *se > 0.0 && *se >= 3.0 * above.max(1e-12) && above > 0.0 { dn() } else { mu() });
+                        let fs = (cell.height() * 0.72).clamp(8.0, 11.0);
+                        clip.text(pos2(cell.center().x - 3.0, cell.center().y), Align2::RIGHT_CENTER, fmt_fp(*se), mono(fs), sc);
+                        clip.text(pos2(cell.center().x + 3.0, cell.center().y), Align2::LEFT_CENTER, fmt_fp(*bu), mono(fs), bc);
+                        if Some(*r) == poc { clip.rect_stroke(cell, 1, Stroke::new(1.0, fg().linear_multiply(0.7)), egui::StrokeKind::Inside); }
+                    } else {
+                        let len = self.bar_w * 0.48 * share;
+                        clip.rect_filled(Rect::from_min_max(pos2(x + 1.0, y0 + 0.3), pos2(x + 1.0 + len, (y1 - 0.3).max(y0 + 1.0))), 0, col.linear_multiply(if Some(*r) == poc { 0.85 } else { 0.45 }));
+                    }
+                }
+                if fp_text {
+                    let d = rows.values().map(|(bu, se)| bu - se).sum::<f64>();
+                    clip.text(pos2(x, main_plot.bottom() - 8.0), Align2::CENTER_CENTER, format!("Δ {}", fmt_fp_signed(d)), mono(10.0), if d >= 0.0 { up() } else { dn() });
+                }
+            }
+        }
+
         // candles
-        let bw = (self.bar_w * 0.7).max(1.0);
+        let bw = if fp_text { 3.0 } else { (self.bar_w * 0.7).max(1.0) };
         for (k, b) in vis.iter().enumerate() {
-            let x = fr.x((i0 + k) as f32);
+            let x = fr.x((i0 + k) as f32) - if fp_text { self.bar_w * 0.45 } else { 0.0 };
             let col = if b.c >= b.o { up() } else { dn() };
             painter.vline(x, y(b.h)..=y(b.l), Stroke::new(1.0, col));
             let (top, bot) = (y(b.o.max(b.c)), y(b.o.min(b.c)));
@@ -1141,6 +1194,26 @@ impl Chart {
                     let r = 3.0 + 11.0 * (q / lmax).sqrt() as f32;
                     painter.circle_filled(pos2(x, y(py) + dir * (r + 3.0)), r, col.linear_multiply(0.55));
                 }
+            }
+        }
+
+        // whale trades: one bubble per taker order (fills merged), area ~ USD size, at its own price
+        if self.whales {
+            let ms = self.tf * 60_000;
+            let big: Vec<(f32, f64, f64, bool)> = a.big.iter()
+                .filter(|t| t.market == smarket && self.src.is_none_or(|e| e == t.ex))
+                .filter_map(|t| {
+                    let k = a.usdt(t.ex, t.market);
+                    let usd = t.px * t.qty * k;
+                    let i = idx_of(&bars, t.ts, ms);
+                    (usd >= self.whale_usd && i >= i0 as f32 - 0.5 && i <= i1 as f32 + 0.5).then(|| (i, if self.src.is_some() { t.px } else { t.px * k }, usd, t.side == depth::Side::Buy))
+                }).collect();
+            let top = big.iter().map(|b| b.2).fold(0.0, f64::max);
+            let clip = painter.with_clip_rect(main_plot);
+            for (i, px, usd, buy) in big {
+                let r = 3.0 + 13.0 * (usd / top).sqrt() as f32;
+                let c = if buy { up() } else { dn() };
+                clip.circle(pos2(fr.x(i.round()), y(px)), r, c.linear_multiply(0.35), Stroke::new(1.0, c));
             }
         }
 
@@ -1530,8 +1603,9 @@ impl Chart {
             }
             // inferred from L2 book updates (live only): OFI is top-of-book pressure, book flow is the
             // net liquidity each side gained within 0.25% of mid (adds minus cancels)
-            Pane::Ofi | Pane::BookFlow => {
-                let net = |b: &Bar| match p { Pane::Ofi => b.flow.ofi, _ => { let (nb, na) = b.book_net(); nb - na } };
+            // per-bar taker delta (buys minus sells) has the same histogram shape
+            Pane::Ofi | Pane::BookFlow | Pane::Delta => {
+                let net = |b: &Bar| match p { Pane::Ofi => b.flow.ofi, Pane::Delta => b.buy - b.sell, _ => { let (nb, na) = b.book_net(); nb - na } };
                 let vals: Vec<f64> = vis.iter().map(net).collect();
                 let max = vals.iter().fold(0.0f64, |m, v| m.max(v.abs())).max(1e-12);
                 let (lo, hi) = (-max * 1.08, max * 1.08);
@@ -1998,7 +2072,7 @@ impl Chart {
                 .map(|(p, on)| serde_json::json!({"key": p.key(), "label": t(p.key()), "on": on})).collect::<Vec<_>>(),
             "ma": self.ma, "heat": self.heat, "liqmap": self.liqmap, "sr": self.sr, "walls": self.walls, "mark": self.mark, "breakouts": self.breakouts, "vwap": self.vwap, "bb": self.bb, "cone": self.cone, "perp": market == Market::Perp,
             "mas": self.mas.iter().map(|m| serde_json::json!({"n": m.n, "col": format!("#{:06x}", m.col), "ema": m.ema, "on": m.on})).collect::<Vec<_>>(), "magnet": self.magnet,
-            "ind": self.ind, "hide": self.hide, "alert_sound": self.alert_sound,
+            "ind": self.ind, "hide": self.hide, "fp": self.fp, "whales": self.whales, "alert_sound": self.alert_sound,
             "replay": match self.replay { None => "off", Some(Replay { at: None, .. }) => "pick", Some(_) => "on" },
             "sounds": sounds(),
             "alerts": alerts,
@@ -2024,6 +2098,8 @@ impl Chart {
         if let Some(b) = v["bb"].as_bool() { self.bb = b; }
         if let Some(b) = v["magnet"].as_bool() { self.magnet = b; }
         if let Some(b) = v["hide"].as_bool() { self.hide = b; }
+        if let Some(b) = v["fp"].as_bool() { self.fp = b; }
+        if let Some(b) = v["whales"].as_bool() { self.whales = b; }
         // {ind: {rsi?, macd?: [f, s, g], bb_n?, bb_k?}}
         let ind = &v["ind"];
         if let Some(n) = ind["rsi"].as_u64() { self.ind.rsi = (n as usize).clamp(1, 500); }
@@ -2158,6 +2234,11 @@ impl Chart {
                     ui.add(egui::DragValue::new(&mut self.ind.bb_k).range(0.1..=10.0).speed(0.05).fixed_decimals(1).suffix(" σ"));
                 });
             }
+            ui.checkbox(&mut self.fp, super::l("Footprint (sells × buys per price)")).on_hover_text(super::l("Live trades since Depth started; zoom in to read the numbers"));
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.whales, super::l("Whale trades"));
+                ui.add_enabled(self.whales, egui::DragValue::new(&mut self.whale_usd).range(10_000.0..=50_000_000.0).speed(5_000.0).prefix("≥ $").custom_formatter(|v, _| fmt_usd_short(v)));
+            });
             ui.checkbox(&mut self.heat, super::l("Book heatmap"));
             if perp { ui.checkbox(&mut self.liqmap, super::l("Liquidation map")).on_hover_text(t("chart.liqmap_tip")); }
             ui.separator();
@@ -2334,6 +2415,13 @@ fn sound_menu(ui: &mut Ui, cur: &mut String) {
         }
     });
 }
+
+/// Footprint cell volume: 0.42 / 3.1 / 27 / 1.2K.
+fn fmt_fp(v: f64) -> String {
+    let a = v.abs();
+    if a == 0.0 { "0".into() } else if a >= 1e6 { format!("{:.1}M", v / 1e6) } else if a >= 1e3 { format!("{:.1}K", v / 1e3) } else if a >= 100.0 { format!("{v:.0}") } else if a >= 10.0 { format!("{v:.1}") } else { format!("{v:.2}") }
+}
+fn fmt_fp_signed(v: f64) -> String { format!("{}{}", if v >= 0.0 { "+" } else { "" }, fmt_fp(v)) }
 
 /// Order size with the decimals a size of that magnitude needs.
 fn fmt_qty_chart(q: f64) -> String { let d = if q > 0.0 { (3.0 - q.log10().floor()).clamp(0.0, 6.0) as usize } else { 2 }; fmt_dp(q, d) }

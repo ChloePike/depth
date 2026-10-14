@@ -460,6 +460,47 @@ fn combine(venues: Vec<(f64, Vec<&Bar>)>) -> Vec<Bar> {
 }
 
 
+/// Traded volume per 1-minute bar and price bin, taker buys and sells apart (footprint charts).
+/// Live only: venues publish no per-trade history. `bin` is fixed at the first trade (about 1 bp of price).
+#[derive(Default)]
+pub struct Footprint {
+    pub bin: f64,
+    /// (bar open ms, price bin index -> (buy qty, sell qty)), oldest first
+    pub bars: VecDeque<(i64, std::collections::BTreeMap<i64, (f64, f64)>)>,
+}
+
+/// Footprint bars kept per series (12 h of 1-minute bars).
+const FP_CAP: usize = 720;
+
+impl Footprint {
+    fn add(&mut self, ts: i64, px: f64, qty: f64, side: Side) {
+        if !(px > 0.0 && qty > 0.0) { return; }
+        if self.bin <= 0.0 { self.bin = nice(px * 1e-4); }
+        let t = ts.div_euclid(BAR_MS) * BAR_MS;
+        let bar = match self.bars.back().map(|b| b.0) {
+            Some(last) if t < last => match self.bars.iter_mut().rev().find(|b| b.0 == t) { Some(b) => b, None => return },
+            Some(last) if t == last => self.bars.back_mut().unwrap(),
+            _ => {
+                self.bars.push_back((t, Default::default()));
+                if self.bars.len() > FP_CAP { self.bars.pop_front(); }
+                self.bars.back_mut().unwrap()
+            }
+        };
+        let c = bar.1.entry((px / self.bin).round() as i64).or_default();
+        if side == Side::Buy { c.0 += qty } else { c.1 += qty }
+    }
+
+    /// The bins of every 1-minute bar in [from, to), merged.
+    pub fn range(&self, from: i64, to: i64) -> std::collections::BTreeMap<i64, (f64, f64)> {
+        let mut out = std::collections::BTreeMap::new();
+        let start = self.bars.partition_point(|b| b.0 < from);
+        for (_, m) in self.bars.range(start..).take_while(|b| b.0 < to) {
+            for (k, (b, s)) in m { let c = out.entry(*k).or_insert((0.0, 0.0)); c.0 += b; c.1 += s; }
+        }
+        out
+    }
+}
+
 #[derive(Default)]
 pub struct Agg {
     pub venues: HashMap<(Exchange, Market), Venue>,
@@ -480,6 +521,8 @@ pub struct Agg {
     pub big: VecDeque<Tick>,
     /// native-period history for chart timeframes above 1m, keyed by minutes
     pub tf: HashMap<u32, TfSet>,
+    /// footprint per (venue or None = cross-venue in USDT, market)
+    pub fp: HashMap<(Option<Exchange>, Market), Footprint>,
 }
 
 /// History at one chart timeframe: per-venue bars and the cross-venue bars built from them.
@@ -528,7 +571,7 @@ impl Agg {
         }
         let (ex, mk, ts) = (m.ex, m.market, m.ts);
         let k_usdt = self.usdt(ex, mk);
-        let Agg { venues, series, cvd, seeded, trades, big, .. } = self;
+        let Agg { venues, series, cvd, seeded, trades, big, fp, .. } = self;
         let v = venues.entry((ex, mk)).or_default();
         if v.symbol.is_none() { v.symbol = Some(m.symbol.clone()); }
         v.ts = ts;
@@ -554,6 +597,8 @@ impl Agg {
                         _ => { big.push_back(t); if big.len() > TAPE_CAP { big.pop_front(); } }
                     }
                 }
+                fp.entry((Some(ex), mk)).or_default().add(ts, *px, *qty, *side);
+                fp.entry((None, mk)).or_default().add(ts, px * k_usdt, *qty, *side);
                 // the cross-venue bar is in USDT; the venue bar stays in native quote
                 v.last = Some(*px);
                 v.cvd += signed;
@@ -954,6 +999,22 @@ pub fn nice(x: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn footprint_bins_buys_and_sells_per_minute() {
+        let mut f = Footprint::default();
+        f.add(60_000, 100.0, 1.0, Side::Buy);
+        f.add(60_500, 100.004, 2.0, Side::Sell);
+        f.add(120_000, 100.02, 3.0, Side::Buy);
+        // late trade into the earlier bar
+        f.add(61_000, 100.0, 1.0, Side::Buy);
+        assert_eq!(f.bin, 0.01);
+        assert_eq!(f.bars.len(), 2);
+        assert_eq!(f.bars[0].1[&10000], (2.0, 2.0));
+        let all = f.range(0, 180_000);
+        assert_eq!((all[&10000], all[&10002]), ((2.0, 2.0), (3.0, 0.0)));
+        assert!(f.range(120_000, 180_000).get(&10000).is_none());
+    }
 
     #[test]
     fn book_flow_splits_adds_cancels_and_fills() {
