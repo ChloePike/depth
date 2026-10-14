@@ -49,7 +49,8 @@ jobs:
       - name: Test
         # unit tests only: they need no network (exchanges block some runner regions); once per OS
         if: endsWith(matrix.name, '-egui')
-        run: cargo test --release --workspace
+        # t1-ffi embeds egui in the native hosts (macOS / Windows only): nothing to build on Linux
+        run: cargo test --release --workspace ${{ runner.os == 'Linux' && '--exclude t1-ffi' || '' }}
 
       - name: Bundle (macOS, egui)
         if: matrix.name == 'macos-egui'
