@@ -212,3 +212,6 @@ This API key is read-only: trading is disabled. Allow trading for the key on the
 Footprint (sells × buys per price) = フットプリント（価格ごとの売り × 買い）
 Live trades since Depth started; zoom in to read the numbers = Depth 起動後のライブ約定のみ。拡大すると数値が見えます
 Whale trades = 大口約定
+Footprint (traded value per price) = フットプリント（価格ごとの約定額）
+Cluster bars = クラスターバー
+Side clusters = サイドクラスター

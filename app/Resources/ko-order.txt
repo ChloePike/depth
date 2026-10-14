@@ -212,3 +212,6 @@ This API key is read-only: trading is disabled. Allow trading for the key on the
 Footprint (sells × buys per price) = 풋프린트 (가격별 매도 × 매수)
 Live trades since Depth started; zoom in to read the numbers = Depth 시작 이후 실시간 체결만; 확대하면 숫자가 보입니다
 Whale trades = 고래 체결
+Footprint (traded value per price) = 풋프린트 (가격별 체결액)
+Cluster bars = 클러스터 바
+Side clusters = 사이드 클러스터

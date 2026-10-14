@@ -212,3 +212,6 @@ This API key is read-only: trading is disabled. Allow trading for the key on the
 Footprint (sells × buys per price) = 足迹图（每个价位的卖 × 买）
 Live trades since Depth started; zoom in to read the numbers = 只统计 Depth 启动后的实时成交；放大图表才能看到数字
 Whale trades = 大单成交
+Footprint (traded value per price) = 足迹图（每个价位的成交额）
+Cluster bars = 簇柱
+Side clusters = 侧簇

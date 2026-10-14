@@ -8,3 +8,4 @@
 # local assistant notes and build output
 /CLAUDE.md
 /dist/
+.playwright-mcp/

@@ -212,3 +212,6 @@ This API key is read-only: trading is disabled. Allow trading for the key on the
 Footprint (sells × buys per price) = Footprint (bán × mua theo giá)
 Live trades since Depth started; zoom in to read the numbers = Chỉ giao dịch từ khi Depth khởi động; phóng to để đọc số
 Whale trades = Giao dịch cá voi
+Footprint (traded value per price) = Footprint (giá trị khớp theo giá)
+Cluster bars = Thanh cụm
+Side clusters = Cụm bên cạnh

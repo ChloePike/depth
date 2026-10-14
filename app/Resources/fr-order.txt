@@ -212,3 +212,6 @@ This API key is read-only: trading is disabled. Allow trading for the key on the
 Footprint (sells × buys per price) = Footprint (ventes × achats par prix)
 Live trades since Depth started; zoom in to read the numbers = Transactions depuis le démarrage de Depth ; zoomez pour lire les chiffres
 Whale trades = Transactions baleines
+Footprint (traded value per price) = Footprint (valeur échangée par prix)
+Cluster bars = Barres cluster
+Side clusters = Clusters latéraux
