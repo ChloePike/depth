@@ -2,6 +2,7 @@
 //! view, order book / tape, venue table and status bar.
 mod book;
 mod chart;
+mod order;
 mod engine;
 mod options;
 mod picker;
@@ -59,6 +60,45 @@ pub fn lang_code() -> &'static str { LANGS[lang()].0 }
 
 fn strings(src: &'static str) -> HashMap<&'static str, &'static str> {
     src.lines().filter(|l| !l.trim_start().starts_with('#')).filter_map(|l| l.split_once('=')).map(|(k, v)| (k.trim(), v.trim())).filter(|(_, v)| !v.is_empty()).collect()
+}
+
+/// Native-panel strings ("English = translation", app/Resources/<lang>-*.txt), shared with the
+/// SwiftUI host so the egui ports of its panels read the same translations.
+macro_rules! native_strings {
+    ($($l:literal),*) => { [$( ($l, concat!(
+        include_str!(concat!("../../app/Resources/", $l, "-account.txt")), "\n",
+        include_str!(concat!("../../app/Resources/", $l, "-order.txt")), "\n",
+        include_str!(concat!("../../app/Resources/", $l, "-panels.txt")), "\n",
+        include_str!(concat!("../../app/Resources/", $l, "-top.txt")))) ),*] };
+}
+const NATIVE_FILES: [(&str, &str); 10] = native_strings!("zh-CN", "zh-TW", "ja", "ko", "es", "pt", "fr", "de", "ru", "vi");
+
+/// `en` (an English UI string of the native panels) in the current language.
+pub fn l(en: &'static str) -> &'static str {
+    static MAPS: OnceLock<HashMap<&'static str, HashMap<&'static str, &'static str>>> = OnceLock::new();
+    let m = MAPS.get_or_init(|| NATIVE_FILES.iter().map(|(code, src)| {
+        let mut out = HashMap::new();
+        for (k, v) in src.lines().filter(|l| !l.starts_with('#')).filter_map(|l| l.split_once('=')).map(|(k, v)| (k.trim(), v.trim())).filter(|(_, v)| !v.is_empty()) {
+            out.entry(k).or_insert(v);
+        }
+        (*code, out)
+    }).collect());
+    m.get(lang_code()).and_then(|t| t.get(en)).copied().unwrap_or(en)
+}
+
+/// `l(fmt)` with printf-style placeholders (%@ %d %s %.Nf %g) filled from `args` in order, as the
+/// Swift panels' `String(format:)` does.
+pub fn lf(fmt: &'static str, args: &[String]) -> String {
+    let src = l(fmt);
+    let (mut out, mut it, mut chars) = (String::new(), args.iter(), src.chars().peekable());
+    while let Some(c) = chars.next() {
+        if c != '%' { out.push(c); continue; }
+        if chars.peek() == Some(&'%') { chars.next(); out.push('%'); continue; }
+        // skip flags / width / precision up to the conversion letter
+        while let Some(&d) = chars.peek() { chars.next(); if d.is_ascii_alphabetic() || d == '@' { break; } }
+        if let Some(a) = it.next() { out.push_str(a); }
+    }
+    out
 }
 
 /// UI string for `key` in the current language, else English, else the key.
@@ -172,6 +212,9 @@ pub struct App {
     pub(crate) layout: String,
     cell: usize,
     others: Vec<(usize, chart::Chart)>,
+    /// egui ports of the native panels: their state document (when built, stale) and the order panel
+    st: (std::sync::Arc<serde_json::Value>, Instant, bool),
+    order: order::OrderPanel,
 }
 
 /// Cell rects of a chart layout: "2" side by side, "2v" stacked, "3" one left and two right,
@@ -234,6 +277,7 @@ impl App {
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
             route: st.route.clone().unwrap_or_default(), pending_base: None, pending_mode: None, pending_restart: false, book_w: 0.0,
             layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(),
+            st: (Default::default(), Instant::now(), true), order: Default::default(),
         }
     }
 
@@ -436,6 +480,15 @@ impl App {
         if ok { self.saved.0 = json; } else { eprintln!("settings: cannot write {}", p.display()); }
     }
 
+    /// The state document the SwiftUI host polls, for the egui ports of its panels: rebuilt at most
+    /// 4 times a second, or right after an op changed something.
+    fn state_doc(&mut self) -> std::sync::Arc<serde_json::Value> {
+        if self.st.2 || self.st.1.elapsed() > Duration::from_millis(250) {
+            self.st = (std::sync::Arc::new(serde_json::from_str(&self.state_json()).unwrap_or_default()), Instant::now(), false);
+        }
+        self.st.0.clone()
+    }
+
     /// Price alerts: live prices of every base with an armed alert (the one on screen from the
     /// chart's own source, others from `Engine::watch`), checked for crossings.
     pub(crate) fn alerts_tick(&mut self, a: &depth::agg::Agg) {
@@ -446,6 +499,15 @@ impl App {
         let mut px = self.eng.watched.lock().unwrap().clone();
         if let Some(p) = self.chart.price(a, self.mode) { px.insert(base, p); }
         self.chart.check_alerts(&px);
+        // the egui window has no notification API of its own: macOS notifications through osascript
+        // (the SwiftUI host drains `fired` itself and posts them natively)
+        if !self.hosted && cfg!(target_os = "macos") {
+            for (title, body) in self.chart.fired.drain(..) {
+                let q = |s: &str| s.replace('\\', "").replace('"', "'");
+                let script = format!("display notification \"{}\" with title \"Depth\" subtitle \"{}\"", q(&body), q(&title));
+                if let Ok(mut c) = std::process::Command::new("osascript").arg("-e").arg(script).spawn() { std::thread::spawn(move || { let _ = c.wait(); }); }
+            }
+        }
     }
 
     /// Orders and triggers dragged on a chart, and prices put into the order panel from it.
@@ -546,7 +608,7 @@ impl App {
         }
         {
             let agg = self.eng.agg.clone();
-            let a = agg.lock().unwrap();
+            let mut a = agg.lock().unwrap();
             let stats_arc = self.eng.stats.clone();
             let stats = stats_arc.lock().unwrap();
             // panels are rounded cards on the darker base, separated by gutters instead of lines
@@ -564,9 +626,22 @@ impl App {
             let acc = if has_keys { acc.resizable(true).default_size(210.0) } else { acc.resizable(false).exact_size(46.0) };
             acc.show(ui, |ui| self.trade.account(ui, &self.eng));
             if self.mode == Market::Perp {
-                let lat = self.eng.stats.lock().unwrap().latency(self.trade.ex);
-                egui::Panel::right("order").show_separator_line(false).frame(card(10)).resizable(false).exact_size(296.0)
-                    .show(ui, |ui| egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| self.trade.panel(ui, &a, &self.eng, &self.eng.base.clone(), lat)));
+                // ops from the order panel take the agg lock themselves (route planning reads books)
+                drop(a);
+                let st = self.state_doc();
+                let mut op = std::mem::take(&mut self.order);
+                egui::Panel::right("order").show_separator_line(false).frame(Frame::new().fill(bg()).inner_margin(Margin::symmetric(4, 4))).resizable(false).exact_size(300.0)
+                    .show(ui, |ui| egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                        op.show(ui, &st, &mut |v| { let r = self.call(&ctx, &v); self.st.2 = true; r });
+                        ui.add_space(8.0);
+                        let g = agg.lock().unwrap();
+                        let base = self.eng.base.clone();
+                        self.trade.insurance_section(ui, &g, &self.eng, &base);
+                    }));
+                if let Some(tab) = op.open_settings.take() { self.settings.open_tab(tab); }
+                if let Some(ex) = op.open_transfer.take().and_then(|e| Exchange::parse(&e)) { self.trade.open_transfer(ex, &self.eng, &ctx); }
+                self.order = op;
+                a = agg.lock().unwrap();
             }
             } else { drop(stats); }
             // the book's rows are drawn here at display rate; hosted, its header (and the Venues / Quant

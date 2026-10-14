@@ -460,6 +460,18 @@ impl TradeView {
         ui.label(RichText::new(t("ins.exec_note")).color(dim()).font(prop(10.0)));
     }
 
+    /// Position insurance (options hedge) for this symbol's position on the trade venue, collapsed
+    /// by default: opening it is what subscribes the option chains.
+    pub fn insurance_section(&mut self, ui: &mut Ui, a: &Agg, eng: &Engine, base: &str) {
+        let symbol = trade::symbol(base);
+        let pos = eng.account.lock().unwrap().positions.iter().find(|p| p.ex == self.ex && p.symbol == symbol).cloned();
+        egui::Frame::new().fill(panel2()).stroke(egui::Stroke::new(1.0, line())).corner_radius(10).inner_margin(12).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::CollapsingHeader::new(RichText::new(t("ins.title")).strong()).id_salt("insurance").default_open(false)
+                .show(ui, |ui| self.insurance(ui, a, eng, base, pos));
+        });
+    }
+
     pub fn set_tab(&mut self, n: u8) { self.tab = n; }
 
     /// Order / trade / position history (tabs 2..=4), from the engine's on-demand cache.
@@ -516,6 +528,8 @@ impl TradeView {
         }
     }
     pub fn reset_price(&mut self) { self.price.clear(); }
+    /// The transfer dialog for a venue (from the order panel).
+    pub fn open_transfer(&mut self, ex: Exchange, eng: &Engine, ctx: &egui::Context) { self.wallet.open_for(ex, eng, ctx); }
 
     /// Positions as a painted table: two-line cells, numbers right-aligned, row hover,
     /// market close and limit close (prefills the order panel) per row.

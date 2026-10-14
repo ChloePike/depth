@@ -30,6 +30,8 @@ pub fn label_bg() -> Color32 { pick(Color32::from_rgb(0x26, 0x26, 0x28), Color32
 /// off-state track of switches and sliders
 pub fn track() -> Color32 { pick(Color32::from_rgb(0x2a, 0x31, 0x3b), Color32::from_rgb(0xd1, 0xd1, 0xd6), light()) }
 fn bg_c() -> Color32 { pick(Color32::from_rgb(0x16, 0x16, 0x17), Color32::WHITE, light()) }
+/// Opaque fill of popups, menus and windows (the panel veils are translucent and would show what is under them).
+pub fn popup_bg() -> Color32 { pick(Color32::from_rgb(0x26, 0x26, 0x29), Color32::from_rgb(0xff, 0xff, 0xff), light()) }
 fn panel_c() -> Color32 { pick(Color32::from_rgb(0x1e, 0x1e, 0x20), Color32::from_rgb(0xf5, 0xf5, 0xf7), light()) }
 
 static NATIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -430,7 +432,7 @@ fn style(base: &egui::Style, light: bool) -> egui::Style {
     *v = if light { egui::Visuals::light() } else { egui::Visuals::dark() };
     v.override_text_color = Some(fg());
     v.panel_fill = panel();
-    v.window_fill = panel2();
+    v.window_fill = popup_bg();
     v.extreme_bg_color = bg();
     v.faint_bg_color = panel2();
     v.selection.bg_fill = accent().gamma_multiply(0.35);

@@ -43,7 +43,7 @@ impl Picker {
         let mut chosen = None;
         let area = egui::Area::new(egui::Id::new("picker")).order(egui::Order::Foreground).fixed_pos(btn.rect.left_bottom() + egui::vec2(0.0, 6.0));
         let inner = area.show(ui.ctx(), |ui| {
-            egui::Frame::new().fill(panel2()).stroke(egui::Stroke::new(1.0, line())).corner_radius(6).inner_margin(10).show(ui, |ui| {
+            egui::Frame::new().fill(popup_bg()).stroke(egui::Stroke::new(1.0, line())).corner_radius(6).inner_margin(10).shadow(ui.visuals().popup_shadow).show(ui, |ui| {
                 ui.set_width(460.0);
                 let q = ui.add(egui::TextEdit::singleline(&mut self.query).hint_text(t("pick.search")).desired_width(f32::INFINITY));
                 // focus once when opened; re-requesting every frame fights row clicks and forces

@@ -1,0 +1,6 @@
+[   13333ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://exchange-developer.crypto.com/fcm-b2c/v1/docs/api/fix-introduction/:0
+[   14056ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://exchange-developer.crypto.com/fcm-b2c-margined/v1/docs/api/fix-introduction/:0
+[   14262ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://exchange-developer.crypto.com/fcm-non-us-margined/v1/docs/api/rest-introduction/:0
+[   14500ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://exchange-developer.crypto.com/fcm-non-us-margined/v1/docs/api/fix-introduction/:0
+[   14504ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://exchange-developer.crypto.com/exchange-caas/v1/docs/api/rest-introduction/:0
+[   14514ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://exchange-developer.crypto.com/exchange-caas/v1/docs/api/websocket-introduction/:0

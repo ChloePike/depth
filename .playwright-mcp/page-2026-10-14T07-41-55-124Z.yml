@@ -1,0 +1,208 @@
+- generic [ref=f7e2]:
+  - region "Skip to main content":
+    - link "Skip to main content" [ref=f7e3] [cursor=pointer]:
+      - /url: "#__docusaurus_skipToContent_fallback"
+  - navigation "Main" [ref=f7e4]:
+    - generic [ref=f7e5]:
+      - generic [ref=f7e6]:
+        - link [ref=f7e7] [cursor=pointer]:
+          - /url: /exchange/v1/
+          - img "Crypto.com" [ref=f7e9]
+        - generic [ref=f7e10]:
+          - button "US" [ref=f7e11] [cursor=pointer]
+          - button "Rest of World" [ref=f7e12] [cursor=pointer]
+          - button "Retail" [ref=f7e14] [cursor=pointer]
+          - button "Broker" [ref=f7e15] [cursor=pointer]
+          - button "DCM" [ref=f7e16] [cursor=pointer]
+      - generic [ref=f7e17]:
+        - link "Open printable single-page reference" [ref=f7e18] [cursor=pointer]:
+          - /url: https://exchange-developer.crypto.com/exchange/v1/docs/api/websocket-single-page/
+        - button "Switch between dark and light mode (currently system mode)" [ref=f7e24] [cursor=pointer]
+        - button "Search (Meta+k)" [ref=f7e28] [cursor=pointer]:
+          - generic [ref=f7e29]: Search
+          - generic [ref=f7e33]:
+            - generic [ref=f7e34]: ⌘
+            - generic [ref=f7e35]: K
+  - generic [ref=f7e36]:
+    - link "Crypto Spot APIs" [ref=f7e37] [cursor=pointer]:
+      - /url: https://exchange-developer.crypto.com/exchange/v1/?docusaurus-theme=light
+    - link "Prediction APIs" [ref=f7e38] [cursor=pointer]:
+      - /url: https://exchange-developer.crypto.com/fcm-b2c/v1/?docusaurus-theme=light
+    - link "Perpetuals APIs" [ref=f7e39] [cursor=pointer]:
+      - /url: https://exchange-developer.crypto.com/fcm-b2c-margined/v1/?docusaurus-theme=light
+  - generic [ref=f7e42]:
+    - complementary [ref=f7e43]:
+      - navigation "Docs sidebar" [ref=f7e46]:
+        - generic [ref=f7e47]:
+          - link "REST" [ref=f7e48] [cursor=pointer]:
+            - /url: /exchange/v1/docs/api/rest-introduction
+          - link "WebSocket" [ref=f7e49] [cursor=pointer]:
+            - /url: /exchange/v1/docs/api/websocket-introduction
+          - link "FIX" [ref=f7e50] [cursor=pointer]:
+            - /url: /exchange/v1/docs/api/fix-introduction
+          - link "API Explorer" [ref=f7e51] [cursor=pointer]:
+            - /url: /exchange/v1/docs/api-explorer
+        - list [ref=f7e52]:
+          - listitem [ref=f7e53]:
+            - generic [ref=f7e54]:
+              - link "Introduction" [ref=f7e55] [cursor=pointer]:
+                - /url: /exchange/v1/docs/api/websocket-introduction
+              - button "Expand sidebar category 'Introduction'" [ref=f7e57] [cursor=pointer]
+          - listitem [ref=f7e58]:
+            - generic [ref=f7e59]:
+              - link "Websocket User API" [ref=f7e60] [cursor=pointer]:
+                - /url: /exchange/v1/docs/api/websocket/websocket-user-api
+              - button "Expand sidebar category 'Websocket User API'" [ref=f7e62] [cursor=pointer]
+          - listitem [ref=f7e63]:
+            - generic [ref=f7e64]:
+              - link "Websocket Market Data" [ref=f7e65] [cursor=pointer]:
+                - /url: /exchange/v1/docs/api/websocket/websocket-market-data
+              - button "Collapse sidebar category 'Websocket Market Data'" [expanded] [ref=f7e67] [cursor=pointer]
+            - list [ref=f7e68]:
+              - listitem [ref=f7e69]:
+                - link "public/heartbeat" [ref=f7e70] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-market-data-client-commands-heartbeat-request
+              - listitem [ref=f7e72]:
+                - link "public/respond-heartbeat" [ref=f7e73] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-market-data-client-commands-respond-heartbeat-request
+              - listitem [ref=f7e75]:
+                - link "subscribe" [ref=f7e76] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-market-data-client-commands-market-data-subscribe-request
+              - listitem [ref=f7e78]:
+                - link "unsubscribe" [ref=f7e79] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-market-data-client-commands-market-data-unsubscribe-request
+              - listitem [ref=f7e81]:
+                - 'link "book.{instrument_name}.{depth}" [ref=f7e82] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-book-instrument-name-depth
+              - listitem [ref=f7e84]:
+                - 'link "ticker.{instrument_name}" [ref=f7e85] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-ticker-instrument-name
+              - listitem [ref=f7e87]:
+                - 'link "trade.{instrument_name}" [ref=f7e88] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-trade-instrument-name
+              - listitem [ref=f7e90]:
+                - 'link "candlestick.{timeframe}.{instrument_name}" [ref=f7e91] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-candlestick-timeframe-instrument-name
+              - listitem [ref=f7e93]:
+                - 'link "index.{instrument_name}" [ref=f7e94] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-index-instrument-name
+              - listitem [ref=f7e96]:
+                - 'link "mark.{instrument_name}" [ref=f7e97] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-mark-instrument-name
+              - listitem [ref=f7e99]:
+                - 'link "settlement.{instrument_name}" [ref=f7e100] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-settlement-instrument-name
+              - listitem [ref=f7e102]:
+                - 'link "funding.{instrument_name}" [ref=f7e103] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-funding-instrument-name
+              - listitem [ref=f7e105]:
+                - 'link "estimatedfunding.{instrument_name}" [ref=f7e106] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-estimatedfunding-instrument-name
+          - listitem [ref=f7e108]:
+            - generic [ref=f7e109]:
+              - link "Trading" [ref=f7e110] [cursor=pointer]:
+                - /url: /exchange/v1/docs/api/websocket/trading
+              - button "Expand sidebar category 'Trading'" [ref=f7e112] [cursor=pointer]
+          - listitem [ref=f7e113]:
+            - generic [ref=f7e114]:
+              - link "Advanced Order Management" [ref=f7e115] [cursor=pointer]:
+                - /url: /exchange/v1/docs/api/websocket/advanced-order-management
+              - button "Expand sidebar category 'Advanced Order Management'" [ref=f7e117] [cursor=pointer]
+          - listitem [ref=f7e118]:
+            - generic [ref=f7e119]:
+              - link "OTC RFQ for Taker" [ref=f7e120] [cursor=pointer]:
+                - /url: /exchange/v1/docs/api/websocket/otc-rfq-for-taker
+              - button "Expand sidebar category 'OTC RFQ for Taker'" [ref=f7e122] [cursor=pointer]
+    - main [ref=f7e123]:
+      - generic [ref=f7e127]:
+        - article [ref=f7e128]:
+          - navigation "Breadcrumbs" [ref=f7e129]:
+            - list [ref=f7e130]:
+              - listitem [ref=f7e131]:
+                - link "Home page" [ref=f7e132] [cursor=pointer]:
+                  - /url: /exchange/v1/
+              - listitem [ref=f7e135]:
+                - link "API Doc" [ref=f7e136] [cursor=pointer]:
+                  - /url: /exchange/v1/api-doc
+              - listitem [ref=f7e137]:
+                - link "WebSocket" [ref=f7e138] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket-introduction
+              - listitem [ref=f7e139]:
+                - generic [ref=f7e140]: Websocket Market Data
+          - generic [ref=f7e141]:
+            - heading "Websocket Market Data" [level=1] [ref=f7e143]
+            - generic [ref=f7e146]:
+              - article [ref=f7e147]:
+                - link [ref=f7e148] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-market-data-client-commands-heartbeat-request
+                  - heading "📄️ public/heartbeat" [level=2] [ref=f7e149]
+                  - paragraph [ref=f7e150]: Heartbeat sent by server every 30s; client must respond with public/respond-heartbeat within 5 seconds.
+              - article [ref=f7e151]:
+                - link [ref=f7e152] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-market-data-client-commands-respond-heartbeat-request
+                  - heading "📄️ public/respond-heartbeat" [level=2] [ref=f7e153]
+                  - paragraph [ref=f7e154]: Respond to server heartbeat within 5 seconds
+              - article [ref=f7e155]:
+                - link [ref=f7e156] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-market-data-client-commands-market-data-subscribe-request
+                  - heading "📄️ subscribe" [level=2] [ref=f7e157]
+                  - paragraph [ref=f7e158]: Subscribe to one or more **market data** channels. Use on the Market Data server only.
+              - article [ref=f7e159]:
+                - link [ref=f7e160] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-market-data-client-commands-market-data-unsubscribe-request
+                  - heading "📄️ unsubscribe" [level=2] [ref=f7e161]
+                  - paragraph [ref=f7e162]: Unsubscribe from market data channels. Use on the Market Data server only.
+              - article [ref=f7e163]:
+                - link [ref=f7e164] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-book-instrument-name-depth
+                  - 'heading "📄️ book.{instrument_name}.{depth}" [level=2] [ref=f7e165]'
+                  - paragraph [ref=f7e166]: Order book (L2). Subscribe with channels e.g. ['book.BTCUSD-PERP.10'] or ['book.BTCUSD-PERP.50'].
+              - article [ref=f7e167]:
+                - link [ref=f7e168] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-ticker-instrument-name
+                  - 'heading "📄️ ticker.{instrument_name}" [level=2] [ref=f7e169]'
+                  - paragraph [ref=f7e170]: Ticker updates. Subscribe with channels e.g. ['ticker.BTCUSD-PERP'].
+              - article [ref=f7e171]:
+                - link [ref=f7e172] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-trade-instrument-name
+                  - 'heading "📄️ trade.{instrument_name}" [level=2] [ref=f7e173]'
+                  - paragraph [ref=f7e174]: Public trades. Subscribe with channels e.g. ['trade.BTCUSD-PERP']. Returns last 50 trades on subscribe.
+              - article [ref=f7e175]:
+                - link [ref=f7e176] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-candlestick-timeframe-instrument-name
+                  - 'heading "📄️ candlestick.{timeframe}.{instrument_name}" [level=2] [ref=f7e177]'
+                  - paragraph [ref=f7e178]: "Candlestick (k-line) updates. Subscribe e.g. ['candlestick.1D.BTCUSD-PERP']. Timeframe: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 12h, 1D, 7D, 14D, 1M."
+              - article [ref=f7e179]:
+                - link [ref=f7e180] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-index-instrument-name
+                  - 'heading "📄️ index.{instrument_name}" [level=2] [ref=f7e181]'
+                  - paragraph [ref=f7e182]: Index price. Subscribe e.g. ['index.BTCUSD-INDEX'].
+              - article [ref=f7e183]:
+                - link [ref=f7e184] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-mark-instrument-name
+                  - 'heading "📄️ mark.{instrument_name}" [level=2] [ref=f7e185]'
+                  - paragraph [ref=f7e186]: Mark price (updates ~50ms). Subscribe e.g. ['mark.BTCUSD-PERP'].
+              - article [ref=f7e187]:
+                - link [ref=f7e188] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-settlement-instrument-name
+                  - 'heading "📄️ settlement.{instrument_name}" [level=2] [ref=f7e189]'
+                  - paragraph [ref=f7e190]: Settlement prices. Subscribe e.g. ['settlement.BTCUSD-210528'] or wildcard.
+              - article [ref=f7e191]:
+                - link [ref=f7e192] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-funding-instrument-name
+                  - 'heading "📄️ funding.{instrument_name}" [level=2] [ref=f7e193]'
+                  - paragraph [ref=f7e194]: Hourly funding rate that will settle at end of current hour. Subscribe e.g. ['funding.BTCUSD-PERP'].
+              - article [ref=f7e195]:
+                - link [ref=f7e196] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-estimatedfunding-instrument-name
+                  - 'heading "📄️ estimatedfunding.{instrument_name}" [level=2] [ref=f7e197]'
+                  - paragraph [ref=f7e198]: Estimated funding rate for the next interval. Subscribe e.g. ['estimatedfunding.BTCUSD-PERP'].
+        - navigation "Docs pages" [ref=f7e201]:
+          - link "Previous ←user.otc.deals" [ref=f7e202] [cursor=pointer]:
+            - /url: /exchange/v1/docs/api/websocket/ws-channel-user-otc-deals
+            - generic [ref=f7e203]: Previous
+            - generic [ref=f7e204]: ←user.otc.deals
+          - link "Next public/heartbeat→" [ref=f7e205] [cursor=pointer]:
+            - /url: /exchange/v1/docs/api/websocket/ws-market-data-client-commands-heartbeat-request
+            - generic [ref=f7e206]: Next
+            - generic [ref=f7e207]: public/heartbeat→

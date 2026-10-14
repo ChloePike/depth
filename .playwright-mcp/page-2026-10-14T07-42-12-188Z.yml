@@ -1,0 +1,331 @@
+- generic [ref=f8e2]:
+  - region "Skip to main content":
+    - link "Skip to main content" [ref=f8e3] [cursor=pointer]:
+      - /url: "#__docusaurus_skipToContent_fallback"
+  - navigation "Main" [ref=f8e4]:
+    - generic [ref=f8e5]:
+      - generic [ref=f8e6]:
+        - link [ref=f8e7] [cursor=pointer]:
+          - /url: /exchange/v1/
+          - img "Crypto.com" [ref=f8e9]
+        - generic [ref=f8e10]:
+          - button "US" [ref=f8e11] [cursor=pointer]
+          - button "Rest of World" [ref=f8e12] [cursor=pointer]
+          - button "Retail" [ref=f8e14] [cursor=pointer]
+          - button "Broker" [ref=f8e15] [cursor=pointer]
+          - button "DCM" [ref=f8e16] [cursor=pointer]
+      - generic [ref=f8e17]:
+        - link "Open printable single-page reference" [ref=f8e18] [cursor=pointer]:
+          - /url: https://exchange-developer.crypto.com/exchange/v1/docs/api/websocket-single-page/
+        - button "Switch between dark and light mode (currently system mode)" [ref=f8e24] [cursor=pointer]
+        - button "Search (Meta+k)" [ref=f8e28] [cursor=pointer]:
+          - generic [ref=f8e29]: Search
+          - generic [ref=f8e33]:
+            - generic [ref=f8e34]: ⌘
+            - generic [ref=f8e35]: K
+  - generic [ref=f8e36]:
+    - link "Crypto Spot APIs" [ref=f8e37] [cursor=pointer]:
+      - /url: https://exchange-developer.crypto.com/exchange/v1/?docusaurus-theme=light
+    - link "Prediction APIs" [ref=f8e38] [cursor=pointer]:
+      - /url: https://exchange-developer.crypto.com/fcm-b2c/v1/?docusaurus-theme=light
+    - link "Perpetuals APIs" [ref=f8e39] [cursor=pointer]:
+      - /url: https://exchange-developer.crypto.com/fcm-b2c-margined/v1/?docusaurus-theme=light
+  - generic [ref=f8e42]:
+    - complementary [ref=f8e43]:
+      - navigation "Docs sidebar" [ref=f8e46]:
+        - generic [ref=f8e47]:
+          - link "REST" [ref=f8e48] [cursor=pointer]:
+            - /url: /exchange/v1/docs/api/rest-introduction
+          - link "WebSocket" [ref=f8e49] [cursor=pointer]:
+            - /url: /exchange/v1/docs/api/websocket-introduction
+          - link "FIX" [ref=f8e50] [cursor=pointer]:
+            - /url: /exchange/v1/docs/api/fix-introduction
+          - link "API Explorer" [ref=f8e51] [cursor=pointer]:
+            - /url: /exchange/v1/docs/api-explorer
+        - list [ref=f8e52]:
+          - listitem [ref=f8e53]:
+            - generic [ref=f8e54]:
+              - link "Introduction" [ref=f8e55] [cursor=pointer]:
+                - /url: /exchange/v1/docs/api/websocket-introduction
+              - button "Expand sidebar category 'Introduction'" [ref=f8e57] [cursor=pointer]
+          - listitem [ref=f8e58]:
+            - generic [ref=f8e59]:
+              - link "Websocket User API" [ref=f8e60] [cursor=pointer]:
+                - /url: /exchange/v1/docs/api/websocket/websocket-user-api
+              - button "Expand sidebar category 'Websocket User API'" [ref=f8e62] [cursor=pointer]
+          - listitem [ref=f8e63]:
+            - generic [ref=f8e64]:
+              - link "Websocket Market Data" [ref=f8e65] [cursor=pointer]:
+                - /url: /exchange/v1/docs/api/websocket/websocket-market-data
+              - button "Collapse sidebar category 'Websocket Market Data'" [expanded] [ref=f8e67] [cursor=pointer]
+            - list [ref=f8e68]:
+              - listitem [ref=f8e69]:
+                - link "public/heartbeat" [ref=f8e70] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-market-data-client-commands-heartbeat-request
+              - listitem [ref=f8e72]:
+                - link "public/respond-heartbeat" [ref=f8e73] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-market-data-client-commands-respond-heartbeat-request
+              - listitem [ref=f8e75]:
+                - link "subscribe" [ref=f8e76] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-market-data-client-commands-market-data-subscribe-request
+              - listitem [ref=f8e78]:
+                - link "unsubscribe" [ref=f8e79] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/ws-market-data-client-commands-market-data-unsubscribe-request
+              - listitem [ref=f8e81]:
+                - 'link "book.{instrument_name}.{depth}" [ref=f8e82] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-book-instrument-name-depth
+              - listitem [ref=f8e84]:
+                - 'link "ticker.{instrument_name}" [ref=f8e85] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-ticker-instrument-name
+              - listitem [ref=f8e87]:
+                - 'link "trade.{instrument_name}" [ref=f8e88] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-trade-instrument-name
+              - listitem [ref=f8e90]:
+                - 'link "candlestick.{timeframe}.{instrument_name}" [ref=f8e91] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-candlestick-timeframe-instrument-name
+              - listitem [ref=f8e93]:
+                - 'link "index.{instrument_name}" [ref=f8e94] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-index-instrument-name
+              - listitem [ref=f8e96]:
+                - 'link "mark.{instrument_name}" [ref=f8e97] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-mark-instrument-name
+              - listitem [ref=f8e99]:
+                - 'link "settlement.{instrument_name}" [ref=f8e100] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-settlement-instrument-name
+              - listitem [ref=f8e102]:
+                - 'link "funding.{instrument_name}" [ref=f8e103] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-funding-instrument-name
+              - listitem [ref=f8e105]:
+                - 'link "estimatedfunding.{instrument_name}" [ref=f8e106] [cursor=pointer]':
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-estimatedfunding-instrument-name
+          - listitem [ref=f8e108]:
+            - generic [ref=f8e109]:
+              - link "Trading" [ref=f8e110] [cursor=pointer]:
+                - /url: /exchange/v1/docs/api/websocket/trading
+              - button "Expand sidebar category 'Trading'" [ref=f8e112] [cursor=pointer]
+          - listitem [ref=f8e113]:
+            - generic [ref=f8e114]:
+              - link "Advanced Order Management" [ref=f8e115] [cursor=pointer]:
+                - /url: /exchange/v1/docs/api/websocket/advanced-order-management
+              - button "Expand sidebar category 'Advanced Order Management'" [ref=f8e117] [cursor=pointer]
+          - listitem [ref=f8e118]:
+            - generic [ref=f8e119]:
+              - link "OTC RFQ for Taker" [ref=f8e120] [cursor=pointer]:
+                - /url: /exchange/v1/docs/api/websocket/otc-rfq-for-taker
+              - button "Expand sidebar category 'OTC RFQ for Taker'" [ref=f8e122] [cursor=pointer]
+    - main [ref=f8e123]:
+      - generic [ref=f8e127]:
+        - article [ref=f8e128]:
+          - navigation "Breadcrumbs" [ref=f8e129]:
+            - list [ref=f8e130]:
+              - listitem [ref=f8e131]:
+                - link "Home page" [ref=f8e132] [cursor=pointer]:
+                  - /url: /exchange/v1/
+              - listitem [ref=f8e135]:
+                - link "API Doc" [ref=f8e136] [cursor=pointer]:
+                  - /url: /exchange/v1/api-doc
+              - listitem [ref=f8e137]:
+                - link "WebSocket" [ref=f8e138] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket-introduction
+              - listitem [ref=f8e139]:
+                - link "Websocket Market Data" [ref=f8e140] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/websocket/websocket-market-data
+              - listitem [ref=f8e141]:
+                - generic [ref=f8e142]: "book.{instrument_name}.{depth}"
+          - generic [ref=f8e145]:
+            - paragraph [ref=f8e146]:
+              - 'heading "book.{instrument_name}.{depth}" [level=1] [ref=f8e147]'
+              - generic [ref=f8e149]:
+                - generic [ref=f8e150]: "Applies to:"
+                - link "WebSocket":
+                  - /url: /exchange/v1/docs/api/websocket/ws-channel-book-instrument-name-depth
+                - link "FIX" [ref=f8e151] [cursor=pointer]:
+                  - /url: /exchange/v1/docs/api/fix/fix-market-data-incremental-refresh
+              - generic [ref=f8e152]:
+                - generic [ref=f8e153]: CHANNEL
+                - heading "wss://stream.crypto.com/exchange/v1/market" [level=2] [ref=f8e154]
+                - generic [ref=f8e155]: "book.{instrument_name}.{depth}"
+              - text: "Order book (L2). Subscribe with channels e.g. [\"book.BTCUSD-PERP.10\"] or [\"book.BTCUSD-PERP.50\"]. Optional params: book_subscription_type (SNAPSHOT | SNAPSHOT_AND_UPDATE), book_update_frequency (10 | 100 | 500 ms)."
+            - heading [level=2] [ref=f8e157]:
+              - text: Request
+              - link "Direct link to Request" [ref=f8e158] [cursor=pointer]:
+                - /url: "#request"
+                - text: "#"
+            - generic [ref=f8e159]:
+              - tablist [ref=f8e162]:
+                - tab "application/json" [selected] [ref=f8e163] [cursor=pointer]
+              - tabpanel [ref=f8e165]:
+                - group [ref=f8e166]:
+                  - generic [ref=f8e167]:
+                    - heading "Body" [level=3] [ref=f8e168]
+                    - strong [ref=f8e169]: required
+                  - list [ref=f8e170]:
+                    - generic [ref=f8e172]:
+                      - generic [ref=f8e173]:
+                        - strong [ref=f8e174]: id
+                        - generic [ref=f8e175]: integer
+                        - generic [ref=f8e177]: required
+                      - paragraph [ref=f8e179]: Request id
+                    - generic [ref=f8e181]:
+                      - generic [ref=f8e182]:
+                        - strong [ref=f8e183]: method
+                        - generic [ref=f8e184]: string
+                        - generic [ref=f8e186]: required
+                      - paragraph [ref=f8e188]:
+                        - strong [ref=f8e189]: "Possible values:"
+                        - text: "["
+                        - code [ref=f8e190]: subscribe
+                        - text: "]"
+                    - group [ref=f8e192]:
+                      - generic "params object required" [ref=f8e193]:
+                        - generic [ref=f8e194]:
+                          - strong [ref=f8e195]: params
+                          - generic [ref=f8e196]: object
+                          - generic [ref=f8e198]: required
+                      - generic [ref=f8e199]:
+                        - generic [ref=f8e201]:
+                          - generic [ref=f8e202]:
+                            - strong [ref=f8e203]: channels
+                            - generic [ref=f8e204]: string[]
+                            - generic [ref=f8e206]: required
+                          - paragraph [ref=f8e208]: e.g. ["book.BTCUSD-PERP.10"]
+                        - generic [ref=f8e210]:
+                          - generic [ref=f8e211]:
+                            - strong [ref=f8e212]: book_subscription_type
+                            - generic [ref=f8e213]: BookSubscriptionType (string)
+                          - paragraph [ref=f8e215]:
+                            - strong [ref=f8e216]: "Possible values:"
+                            - text: "["
+                            - code [ref=f8e217]: SNAPSHOT
+                            - text: ","
+                            - code [ref=f8e218]: SNAPSHOT_AND_UPDATE
+                            - text: "]"
+                          - paragraph [ref=f8e220]: Book subscription type for order book channel.
+                        - generic [ref=f8e222]:
+                          - generic [ref=f8e223]:
+                            - strong [ref=f8e224]: book_update_frequency
+                            - generic [ref=f8e225]: BookUpdateFrequency (string)
+                          - paragraph [ref=f8e227]:
+                            - strong [ref=f8e228]: "Possible values:"
+                            - text: "["
+                            - code [ref=f8e229]: "10"
+                            - text: ","
+                            - code [ref=f8e230]: "100"
+                            - text: ","
+                            - code [ref=f8e231]: "500"
+                            - text: "]"
+                          - paragraph [ref=f8e233]: Update frequency in ms; for book channel only.
+                    - generic [ref=f8e235]:
+                      - generic [ref=f8e236]:
+                        - strong [ref=f8e237]: nonce
+                        - generic [ref=f8e238]: integer
+                        - generic [ref=f8e240]: required
+                      - paragraph [ref=f8e242]: Current timestamp in milliseconds
+            - generic [ref=f8e245]:
+              - generic [ref=f8e246]:
+                - heading [level=2] [ref=f8e247]:
+                  - text: Responses
+                  - link "Direct link to Responses" [ref=f8e248] [cursor=pointer]:
+                    - /url: "#responses"
+                    - text: "#"
+                - tablist [ref=f8e250]:
+                  - tab "200" [selected] [ref=f8e251] [cursor=pointer]
+              - tabpanel [ref=f8e253]:
+                - generic [ref=f8e254]: WebSocket response
+                - generic [ref=f8e256]:
+                  - tablist [ref=f8e259]:
+                    - tab "application/json" [selected] [ref=f8e260] [cursor=pointer]
+                  - tabpanel [ref=f8e262]:
+                    - generic [ref=f8e263]:
+                      - generic [ref=f8e264]:
+                        - button [ref=f8e265]
+                        - tablist [ref=f8e266]:
+                          - tab "Schema" [selected] [ref=f8e267] [cursor=pointer]
+                          - tab "Example - Snapshot" [ref=f8e269] [cursor=pointer]
+                          - tab "Example - Incremental Update" [ref=f8e271] [cursor=pointer]
+                        - button [ref=f8e273]
+                      - tabpanel [ref=f8e275]:
+                        - group [ref=f8e276]:
+                          - strong [ref=f8e278]: Schema
+                          - list [ref=f8e279]:
+                            - generic [ref=f8e282]:
+                              - strong [ref=f8e283]: id
+                              - generic [ref=f8e284]: int64
+                            - generic [ref=f8e287]:
+                              - strong [ref=f8e288]: method
+                              - generic [ref=f8e289]: string
+                            - generic [ref=f8e292]:
+                              - strong [ref=f8e293]: code
+                              - generic [ref=f8e294]: int32
+                            - group [ref=f8e296]:
+                              - generic "result object" [ref=f8e297]:
+                                - generic [ref=f8e298]:
+                                  - strong [ref=f8e299]: result
+                                  - generic [ref=f8e300]: object
+                              - generic [ref=f8e301]:
+                                - generic [ref=f8e304]:
+                                  - strong [ref=f8e305]: instrument_name
+                                  - generic [ref=f8e306]: string
+                                - generic [ref=f8e309]:
+                                  - strong [ref=f8e310]: subscription
+                                  - generic [ref=f8e311]: string
+                                - generic [ref=f8e314]:
+                                  - strong [ref=f8e315]: channel
+                                  - generic [ref=f8e316]: string
+                                - generic [ref=f8e319]:
+                                  - strong [ref=f8e320]: depth
+                                  - generic [ref=f8e321]: int32
+                                - group [ref=f8e323]:
+                                  - generic "data object[]" [ref=f8e324]:
+                                    - generic [ref=f8e325]:
+                                      - strong [ref=f8e326]: data
+                                      - generic [ref=f8e327]: object[]
+                                  - generic [ref=f8e328]:
+                                    - listitem [ref=f8e329]:
+                                      - generic [ref=f8e330]: Array [
+                                    - generic [ref=f8e332]:
+                                      - generic [ref=f8e333]:
+                                        - strong [ref=f8e334]: asks
+                                        - generic [ref=f8e335]: array[]
+                                      - paragraph [ref=f8e337]: Ask levels (snapshot).
+                                    - generic [ref=f8e339]:
+                                      - generic [ref=f8e340]:
+                                        - strong [ref=f8e341]: bids
+                                        - generic [ref=f8e342]: array[]
+                                      - paragraph [ref=f8e344]: Bid levels (snapshot).
+                                    - generic [ref=f8e346]:
+                                      - generic [ref=f8e347]:
+                                        - strong [ref=f8e348]: t
+                                        - generic [ref=f8e349]: int64
+                                      - paragraph [ref=f8e351]: Timestamp (snapshot), ms, e.g. "1771761038000".
+                                    - generic [ref=f8e353]:
+                                      - generic [ref=f8e354]:
+                                        - strong [ref=f8e355]: tt
+                                        - generic [ref=f8e356]: int64
+                                      - paragraph [ref=f8e358]: Timestamp (snapshot), ms, e.g. "1771761038000".
+                                    - generic [ref=f8e360]:
+                                      - generic [ref=f8e361]:
+                                        - strong [ref=f8e362]: u
+                                        - generic [ref=f8e363]: int64
+                                      - paragraph [ref=f8e365]: Sequence (snapshot).
+                                    - generic [ref=f8e367]:
+                                      - generic [ref=f8e368]:
+                                        - strong [ref=f8e369]: update
+                                        - generic [ref=f8e370]: object
+                                      - paragraph [ref=f8e372]: Delta; has asks/bids.
+                                    - generic [ref=f8e374]:
+                                      - generic [ref=f8e375]:
+                                        - strong [ref=f8e376]: pu
+                                        - generic [ref=f8e377]: int64
+                                      - paragraph [ref=f8e379]: Previous sequence (delta).
+                                    - listitem [ref=f8e380]:
+                                      - generic [ref=f8e381]: "]"
+        - navigation "Docs pages" [ref=f8e386]:
+          - link "Previous ←unsubscribe" [ref=f8e387] [cursor=pointer]:
+            - /url: /exchange/v1/docs/api/websocket/ws-market-data-client-commands-market-data-unsubscribe-request
+            - generic [ref=f8e388]: Previous
+            - generic [ref=f8e389]: ←unsubscribe
+          - 'link "Next ticker.{instrument_name}→" [ref=f8e390] [cursor=pointer]':
+            - /url: /exchange/v1/docs/api/websocket/ws-channel-ticker-instrument-name
+            - generic [ref=f8e391]: Next
+            - generic [ref=f8e392]: "ticker.{instrument_name}→"

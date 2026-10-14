@@ -201,7 +201,7 @@ impl App {
         match r { Ok(v) => { let mut v = v; v["ok"] = true.into(); v.to_string() } Err(e) => json!({"ok": false, "error": e}).to_string() }
     }
 
-    fn call(&mut self, ctx: &egui::Context, v: &Value) -> Result<Value, String> {
+    pub(crate) fn call(&mut self, ctx: &egui::Context, v: &Value) -> Result<Value, String> {
         let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
         let f = |k: &str| v[k].as_f64();
         let exv = || parse_ex(&v["ex"]).ok_or("unknown venue");

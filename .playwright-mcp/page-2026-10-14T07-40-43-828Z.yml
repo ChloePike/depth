@@ -1,0 +1,1626 @@
+- generic [active] [ref=f1e1]:
+  - generic [ref=f1e2]:
+    - generic [ref=f1e4]:
+      - link "Bitstamp by Robinhood" [ref=f1e5] [cursor=pointer]:
+        - /url: /
+      - generic [ref=f1e9]:
+        - link "Institutions" [ref=f1e10] [cursor=pointer]:
+          - /url: /institutional-trading/
+        - link "Derivatives" [ref=f1e11] [cursor=pointer]:
+          - /url: /perpetual-futures/
+        - link "Pro" [ref=f1e12] [cursor=pointer]:
+          - /url: /pro/
+        - link "Mobile App" [ref=f1e13] [cursor=pointer]:
+          - /url: /mobile/
+        - link "Earn Stake" [ref=f1e14] [cursor=pointer]:
+          - /url: /crypto-staking/
+        - link "Earn Lend" [ref=f1e15] [cursor=pointer]:
+          - /url: /crypto-lending/
+        - link "Markets" [ref=f1e16] [cursor=pointer]:
+          - /url: /markets/
+        - link "Tradeview" [ref=f1e17] [cursor=pointer]:
+          - /url: /market/tradeview/
+        - link "Blog" [ref=f1e18] [cursor=pointer]:
+          - /url: https://blog.bitstamp.net
+        - link "Learn" [ref=f1e24] [cursor=pointer]:
+          - /url: /learn/
+      - generic [ref=f1e27]:
+        - link "Log in" [ref=f1e29] [cursor=pointer]:
+          - /url: /onboarding/login/
+        - link "Get started" [ref=f1e31] [cursor=pointer]:
+          - /url: /account/register/
+    - generic [ref=f1e33]:
+      - link "HTTP API" [ref=f1e34] [cursor=pointer]:
+        - /url: /api/
+      - link "Websocket API v2" [ref=f1e35] [cursor=pointer]:
+        - /url: /websocket/v2/
+      - link "FIX v2" [ref=f1e36] [cursor=pointer]:
+        - /url: /fix/v2/
+      - link "Open Banking API (PSD2)" [ref=f1e37] [cursor=pointer]:
+        - /url: /api-psd2/
+  - generic [ref=f1e40]:
+    - heading "Websocket API v2" [level=1] [ref=f1e42]
+    - heading "What Is WebSocket?" [level=2] [ref=f1e43]
+    - paragraph [ref=f1e44]: WebSocket is a protocol providing full-duplex communications channels over a single TCP connection. The WebSocket protocol was standardized by the IETF as RFC 6455 in 2011, and the WebSocket API in Web IDL is being standardized by the W3C.
+    - heading "Connection" [level=2] [ref=f1e45]
+    - paragraph [ref=f1e46]:
+      - text: "Bitstamp by Robinhood uses its implementation of websocket server for real time data streaming. Server is accessible on the following address:"
+      - link "wss://ws.bitstamp.net" [ref=f1e47] [cursor=pointer]:
+        - /url: wss://ws.bitstamp.net
+      - text: .
+    - paragraph [ref=f1e48]:
+      - text: "Documentation about websocket protocol can be found on the following link:"
+      - link "https://websockets.readthedocs.io/en/stable/" [ref=f1e49] [cursor=pointer]:
+        - /url: https://websockets.readthedocs.io/en/stable/
+      - text: .
+    - paragraph [ref=f1e50]: Once you open a connection via websocket handshake (using HTTP upgrade header), you can subscribe to desired channels.
+    - paragraph [ref=f1e51]: After this is accomplished, you will start to receive a stream of live events for every channel you are subscribed to.
+    - heading "Subscriptions" [level=2] [ref=f1e52]
+    - paragraph [ref=f1e53]:
+      - strong [ref=f1e54]: Public channels
+    - paragraph [ref=f1e55]: "To subscribe to a channel, JSON message must be sent to the server. It should have a following structure:"
+    - generic [ref=f1e56]:
+      - generic [ref=f1e57]: JSON
+      - code [ref=f1e61]: "{ \"event\": \"bts:subscribe\", \"data\": { \"channel\": \"[channel_name]\" } }"
+    - paragraph [ref=f1e62]:
+      - strong [ref=f1e63]: Private channels
+    - paragraph [ref=f1e64]: "To subscribe to a channel, JSON message must be sent to the server. It should have a following structure:"
+    - generic [ref=f1e65]:
+      - generic [ref=f1e66]: JSON
+      - code [ref=f1e70]: "{ \"event\": \"bts:subscribe\", \"data\": { \"channel\": \"[channel_name]-[user-id]\", \"auth\": \"[token]\" } }"
+    - paragraph [ref=f1e71]:
+      - text: Token value and user id are generated via HTTP API. See Websockets token section of HTTP API documentation
+      - link "here" [ref=f1e72] [cursor=pointer]:
+        - /url: /api/
+      - text: . The token is valid for
+      - strong [ref=f1e73]: 60 seconds
+      - text: from the time it is generated (
+      - code [ref=f1e74]: "valid_sec: 60"
+      - text: in the response). You must subscribe to all desired channels before the token expires; it cannot be reused for later subscriptions.
+    - paragraph [ref=f1e75]:
+      - strong [ref=f1e76]: "Note on sub-accounts:"
+      - generic [ref=f1e77]:
+        - text: Private channels are subscribed using the main account
+        - strong [ref=f1e78]: userId
+        - text: regardless of which sub-account you want to monitor. Once subscribed, each message includes a
+        - strong [ref=f1e79]: trade_account_id
+        - text: field (0 = main account; non-zero = sub-account ID) that you can use to filter events for a specific sub-account.
+    - heading "Unsubscriptions" [level=2] [ref=f1e80]
+    - paragraph [ref=f1e81]: You can also unsubscribe from the channel if you no longer need its stream. Again, you need to send a message to the server.
+    - paragraph [ref=f1e82]: "Its structure is nearly identical to the subscription JSON:"
+    - generic [ref=f1e83]:
+      - generic [ref=f1e84]: JSON
+      - code [ref=f1e88]: "{ \"event\": \"bts:unsubscribe\", \"data\": { \"channel\": \"[channel_name]\" } }"
+    - paragraph [ref=f1e89]:
+      - strong [ref=f1e90]: "Note:"
+      - text: Messages described and defined in this article are the only ones that will be processed by the server. Any other form of message or correct form of message with unexpected content will result in an error response.
+    - paragraph [ref=f1e91]:
+      - strong [ref=f1e92]: "Connection limits:"
+      - generic [ref=f1e93]:
+        - text: A single WebSocket connection supports up to
+        - strong [ref=f1e94]: 1024 channel subscriptions
+        - text: . Attempting a 1025th subscription causes the connection to be silently closed — open additional connections before reaching the limit. Client-sent messages (subscribe / unsubscribe frames) must be small; keep them under 512 bytes.
+    - heading "Channels" [level=2] [ref=f1e95]
+    - paragraph [ref=f1e96]:
+      - strong [ref=f1e97]: "Markets:"
+      - text: aaveeur, aaveusd, adaeur, adausd, adausd-perp, aeroeur, aerousd, algoeur, algousd, apeeur, apeusd, apteur, aptusd, arbeur, arbusd, astereur, asterusd, asterusd-perp, atomeur, atomusd, avaxeur, avaxusd, avaxusd-perp, avnteur, avntusd, axseur, axsusd, bateur, batusd, bcheur, bchusd, billeur, billusd, bioeur, biousd, bnbeur, bnbusd, bonkeur, bonkusd, brentusd-perp, btceur, btceurc, btceurcv, btcgbp, btcrlusd, btcusd, btcusd-perp, btcusdc, btcusdt, cashcateur, cashcatusd, cceur, ccusd, chipeur, chipusd, chzeur, chzusd, compeur, compusd, crveur, crvusd, dogeeur, dogeusd, dogeusd-perp, doteur, dotusd, egldeur, egldusd, eigeneur, eigenusd, enaeur, enausd, etceur, etcusd, eth2eth, ethbtc, etheur, etheurc, etheurcv, ethgbp, ethrlusd, ethusd, ethusd-perp, ethusdc, ethusdt, eurceur, eurcusdc, eurcveur, eurcvusdc, eurcvusdt, eurusd, eurusd-perp, ewyusd-perp, fartcoineur, fartcoinusd, feteur, fetusd, fighteur, fightusd, flokieur, flokiusd, flreur, flrusd, gbpusd, goldusd-perp, grteur, grtusd, hbareur, hbarusd, hypeeur, hypeusd, hypeusd-perp, icpeur, icpusd, imxeur, imxusd, injeur, injusd, jtoeur, jtousd, jupeur, jupusd, ldoeur, ldousd, linkeur, linkgbp, linkusd, linkusd-perp, liteur, litusd, ltcbtc, ltceur, ltcusd, manaeur, manausd, megaeur, megausd, meweur, mewusd, mnteur, mntusd, mogeur, mogusd, moneur, monusd, moodengeur, moodengusd, morphoeur, morphousd, neareur, nearusd, ondoeur, ondousd, opeur, opusd, orcaeur, orcausd, paxgeur, paxgusd, paxgusd-perp, pengueur, penguusd, pepeeur, pepeusd, pnuteur, pnutusd, poleur, polusd, popcateur, popcatusd, pytheur, pythusd, pyusdusd, qnteur, qntusd, qqqusd-perp, rayeur, rayusd, reeur, reusd, rlusdeur, rlusdusd, rlusdusdt, sandeur, sandusd, seieur, seiusd, seur, sgdusd, shibeur, shibusd, silverusd-perp, skreur, skrusd, snxeur, snxusd, soleur, solusd, solusd-perp, solusdc, strkeur, strkusd, suieur, suiusd, suiusd-perp, susd, syrupeur, syrupusd, taoeur, taousd, taousd-perp, toneur, tonusd, traceur, tracusd, trumpeur, trumpusd, trxeur, trxusd, unieur, uniusd, usdceur, usdcusd, usdcusdt, usdgusd, usdteur, usdtusd, virtualeur, virtualusd, vvveur, vvvusd, wecaneur, wecanusd, weur, wifeur, wifusd, wldeur, wldusd, wlfieur, wlfiusd, wtiusd-perp, wusd, xcneur, xcnusd, xdceur, xdcusd, xlmeur, xlmusd, xpleur, xplusd, xrpbtc, xrpeur, xrpgbp, xrprlusd, xrpusd, xrpusd-perp, xrpusdc, xrpusdt, xsgdusd, xsgdusdt, xtzeur, xtzusd, zecusd, zkeur, zkusd, zoraeur, zorausd, zroeur, zrousd, zrxeur, zrxusd
+    - paragraph [ref=f1e98]:
+      - text: Below tables include definitions of all existing channels you can subscribe to. Replacing
+      - strong [ref=f1e99]: "[channel_name]"
+      - text: placeholder in one of JSON messages defined in previous paragraphs will subscribe or unsubscribe you to a channel. You also need to replace the
+      - strong [ref=f1e100]: "[market]"
+      - text: placeholder with one of the markets defined above.
+    - paragraph [ref=f1e101]:
+      - strong [ref=f1e102]: Public channels
+    - table [ref=f1e104]:
+      - rowgroup [ref=f1e105]:
+        - row [ref=f1e106]:
+          - cell [ref=f1e107]:
+            - strong [ref=f1e108]: Name
+          - cell [ref=f1e109]:
+            - strong [ref=f1e110]: Event
+          - cell [ref=f1e111]:
+            - strong [ref=f1e112]: Channel
+      - rowgroup [ref=f1e113]:
+        - row [ref=f1e114]:
+          - cell "Live ticker" [ref=f1e115]
+          - cell "trade" [ref=f1e116]
+          - cell [ref=f1e117]:
+            - strong [ref=f1e118]: live_trades_[market]
+        - row [ref=f1e119]:
+          - cell "Live orders" [ref=f1e120]
+          - cell "order_created, order_changed or order_deleted" [ref=f1e121]
+          - cell [ref=f1e122]:
+            - strong [ref=f1e123]: live_orders_[market]
+        - row [ref=f1e124]:
+          - cell "Live order book" [ref=f1e125]
+          - cell "data" [ref=f1e126]
+          - cell [ref=f1e127]:
+            - strong [ref=f1e128]: order_book_[market]
+        - row [ref=f1e129]:
+          - cell "Live detail order book" [ref=f1e130]
+          - cell "data" [ref=f1e131]
+          - cell [ref=f1e132]:
+            - strong [ref=f1e133]: detail_order_book_[market]
+        - row [ref=f1e134]:
+          - cell "Live full order book" [ref=f1e135]
+          - cell "data" [ref=f1e136]
+          - cell [ref=f1e137]:
+            - strong [ref=f1e138]: diff_order_book_[market]
+        - row [ref=f1e139]:
+          - cell "Live funding rate" [ref=f1e140]
+          - cell "funding_rate_saved" [ref=f1e141]
+          - cell [ref=f1e142]:
+            - strong [ref=f1e143]: funding_rate_[market]
+        - row [ref=f1e144]:
+          - cell "Announcements" [ref=f1e145]
+          - cell "published, in_progress, completed, cancelled or updated" [ref=f1e146]
+          - cell [ref=f1e147]:
+            - strong [ref=f1e148]: announcements
+    - paragraph [ref=f1e149]:
+      - strong [ref=f1e150]: Private channels
+    - table [ref=f1e152]:
+      - rowgroup [ref=f1e153]:
+        - row [ref=f1e154]:
+          - cell [ref=f1e155]:
+            - strong [ref=f1e156]: Name
+          - cell [ref=f1e157]:
+            - strong [ref=f1e158]: Event
+          - cell [ref=f1e159]:
+            - strong [ref=f1e160]: Channel
+      - rowgroup [ref=f1e161]:
+        - row [ref=f1e162]:
+          - cell "Private My Orders" [ref=f1e163]
+          - cell "order_created, order_changed, order_deleted, order_replaced, stop_active or stop_inactive" [ref=f1e164]
+          - cell [ref=f1e165]:
+            - strong [ref=f1e166]: private-my_orders_[market]-[userId]
+        - row [ref=f1e167]:
+          - cell "Private My Trades" [ref=f1e168]
+          - cell "trade" [ref=f1e169]
+          - cell [ref=f1e170]:
+            - strong [ref=f1e171]: private-my_trades_[market]-[userId]
+        - row [ref=f1e172]:
+          - cell "Private My Settlements" [ref=f1e173]
+          - cell "settlement, insurance_fund_claim or insurance_fund_premium" [ref=f1e174]
+          - cell [ref=f1e175]:
+            - strong [ref=f1e176]: private-my_settlements-[userId]
+        - row [ref=f1e177]:
+          - cell "Private Live Trades" [ref=f1e178]
+          - cell "self_trade" [ref=f1e179]
+          - cell [ref=f1e180]:
+            - strong [ref=f1e181]: private-live_trades_[market]-[userId]
+        - row [ref=f1e182]:
+          - cell "Private Live Order Trades" [ref=f1e183]
+          - cell "trade" [ref=f1e184]
+          - cell [ref=f1e185]:
+            - strong [ref=f1e186]: private-live_order_trades_[market]-[userId]
+        - row [ref=f1e187]:
+          - cell "Private Liquidations" [ref=f1e188]
+          - cell "im_breach_warning, im_breach, mm_breach_warning, liquidation_start, liquidation_concluded" [ref=f1e189]
+          - cell [ref=f1e190]:
+            - strong [ref=f1e191]: private-my_liquidations-[userId]
+        - row [ref=f1e192]:
+          - cell "Private My Token Settlements" [ref=f1e193]
+          - cell "token_ready" [ref=f1e194]
+          - cell [ref=f1e195]:
+            - strong [ref=f1e196]: private-my_token_settlements-[userId]
+    - heading "Order book channel comparison" [level=2] [ref=f1e197]
+    - paragraph [ref=f1e198]: "Four channels provide order book data with different trade-offs. Choose the one that best fits your use case:"
+    - table [ref=f1e200]:
+      - rowgroup [ref=f1e201]:
+        - row [ref=f1e202]:
+          - cell [ref=f1e203]:
+            - strong [ref=f1e204]: Channel
+          - cell [ref=f1e205]:
+            - strong [ref=f1e206]: Payload
+          - cell [ref=f1e207]:
+            - strong [ref=f1e208]: Update trigger
+          - cell [ref=f1e209]:
+            - strong [ref=f1e210]: Depth
+          - cell [ref=f1e211]:
+            - strong [ref=f1e212]: Best for
+      - rowgroup [ref=f1e213]:
+        - row [ref=f1e214]:
+          - cell [ref=f1e215]:
+            - strong [ref=f1e216]: order_book_[market]
+          - cell "[price, amount]" [ref=f1e217]
+          - cell "Every order book change" [ref=f1e218]
+          - cell "Top 100 levels" [ref=f1e219]
+          - cell "Simple order book display; stateless (each message is a full snapshot)" [ref=f1e220]
+        - row [ref=f1e221]:
+          - cell [ref=f1e222]:
+            - strong [ref=f1e223]: detail_order_book_[market]
+          - cell "[price, amount, order_id]" [ref=f1e224]
+          - cell "Every order book change" [ref=f1e225]
+          - cell "Top 100 levels" [ref=f1e226]
+          - cell "Order-level tracking; stateless snapshot with per-order granularity" [ref=f1e227]
+        - row [ref=f1e228]:
+          - cell [ref=f1e229]:
+            - strong [ref=f1e230]: diff_order_book_[market]
+          - cell "[price, amount] — only changed levels" [ref=f1e231]
+          - cell "Every order book change" [ref=f1e232]
+          - cell "Full depth" [ref=f1e233]
+          - cell "Full-depth order book reconstruction; lowest bandwidth but requires local state" [ref=f1e234]
+        - row [ref=f1e235]:
+          - cell [ref=f1e236]:
+            - strong [ref=f1e237]: live_orders_[market]
+          - cell "Full order object" [ref=f1e238]
+          - cell "Per order lifecycle event (created / changed / deleted)" [ref=f1e239]
+          - cell "All orders" [ref=f1e240]
+          - cell "Order flow analysis, gap resilience via event_id / pre_event_id" [ref=f1e241]
+    - heading "Channel JSON structure" [level=2] [ref=f1e242]
+    - paragraph [ref=f1e243]:
+      - strong [ref=f1e244]: Live ticker
+      - text: "- JavaScript example:"
+      - link "live_trades_v2.html" [ref=f1e245] [cursor=pointer]:
+        - /url: https://assets.bitstamp.net/static/webapp/examples/live_trades_v2.a08411fff597c715aa788e30f9390a7820795d83.html
+    - table [ref=f1e246]:
+      - rowgroup [ref=f1e247]:
+        - row [ref=f1e248]:
+          - cell [ref=f1e249]:
+            - strong [ref=f1e250]: Property
+          - cell [ref=f1e251]:
+            - strong [ref=f1e252]: Description
+      - rowgroup [ref=f1e253]:
+        - row [ref=f1e254]:
+          - cell [ref=f1e255]:
+            - strong [ref=f1e256]: id
+          - cell "Trade unique ID." [ref=f1e257]
+        - row [ref=f1e258]:
+          - cell [ref=f1e259]:
+            - strong [ref=f1e260]: id_str
+          - cell "Trade unique ID represented in string format." [ref=f1e261]
+        - row [ref=f1e262]:
+          - cell [ref=f1e263]:
+            - strong [ref=f1e264]: amount
+          - cell "Trade amount." [ref=f1e265]
+        - row [ref=f1e266]:
+          - cell [ref=f1e267]:
+            - strong [ref=f1e268]: amount_str
+          - cell "Trade amount represented in string format." [ref=f1e269]
+        - row [ref=f1e270]:
+          - cell [ref=f1e271]:
+            - strong [ref=f1e272]: price
+          - cell "Trade price." [ref=f1e273]
+        - row [ref=f1e274]:
+          - cell [ref=f1e275]:
+            - strong [ref=f1e276]: price_str
+          - cell "Trade price represented in string format." [ref=f1e277]
+        - row [ref=f1e278]:
+          - cell [ref=f1e279]:
+            - strong [ref=f1e280]: type
+          - cell "Trade type (0 - buy; 1 - sell)." [ref=f1e281]
+        - row [ref=f1e282]:
+          - cell [ref=f1e283]:
+            - strong [ref=f1e284]: timestamp
+          - cell "Trade timestamp." [ref=f1e285]
+        - row [ref=f1e286]:
+          - cell [ref=f1e287]:
+            - strong [ref=f1e288]: microtimestamp
+          - cell "Trade microtimestamp." [ref=f1e289]
+        - row [ref=f1e290]:
+          - cell [ref=f1e291]:
+            - strong [ref=f1e292]: buy_order_id
+          - cell "Trade buy order ID." [ref=f1e293]
+        - row [ref=f1e294]:
+          - cell [ref=f1e295]:
+            - strong [ref=f1e296]: sell_order_id
+          - cell "Trade sell order ID." [ref=f1e297]
+    - generic [ref=f1e298]:
+      - generic [ref=f1e299]: JSON example — live_trades_btcusd
+      - code [ref=f1e303]: "{ \"event\": \"trade\", \"channel\": \"live_trades_btcusd\", \"data\": { \"id\": 296050733, \"id_str\": \"296050733\", \"amount\": 0.01, \"amount_str\": \"0.01000000\", \"price\": 61234.56, \"price_str\": \"61234.56\", \"type\": 0, \"timestamp\": \"1712100000\", \"microtimestamp\": \"1712100000000000\", \"buy_order_id\": 1500000001, \"sell_order_id\": 1500000002 } }"
+    - paragraph [ref=f1e304]:
+      - strong [ref=f1e305]: Live order book
+      - text: "- JavaScript example:"
+      - link "order_book_v2.html" [ref=f1e306] [cursor=pointer]:
+        - /url: https://assets.bitstamp.net/static/webapp/examples/order_book_v2.b60b4f961ac3b7f67942c4e19fef970c9bf456b7.html
+    - table [ref=f1e307]:
+      - rowgroup [ref=f1e308]:
+        - row [ref=f1e309]:
+          - cell [ref=f1e310]:
+            - strong [ref=f1e311]: Property
+          - cell [ref=f1e312]:
+            - strong [ref=f1e313]: Description
+      - rowgroup [ref=f1e314]:
+        - row [ref=f1e315]:
+          - cell [ref=f1e316]:
+            - strong [ref=f1e317]: bids
+          - cell "List of top 100 bids." [ref=f1e318]
+        - row [ref=f1e319]:
+          - cell [ref=f1e320]:
+            - strong [ref=f1e321]: asks
+          - cell "List of top 100 asks." [ref=f1e322]
+        - row [ref=f1e323]:
+          - cell [ref=f1e324]:
+            - strong [ref=f1e325]: timestamp
+          - cell "Order book timestamp." [ref=f1e326]
+        - row [ref=f1e327]:
+          - cell [ref=f1e328]:
+            - strong [ref=f1e329]: microtimestamp
+          - cell "Order book microtimestamp." [ref=f1e330]
+    - generic [ref=f1e331]:
+      - generic [ref=f1e332]: JSON example — order_book_btcusd
+      - code [ref=f1e336]: "{ \"event\": \"data\", \"channel\": \"order_book_btcusd\", \"data\": { \"bids\": [ [\"61200.00\", \"1.25000000\"], [\"61195.50\", \"0.50000000\"] ], \"asks\": [ [\"61205.00\", \"0.80000000\"], [\"61210.00\", \"2.00000000\"] ], \"timestamp\": \"1712100000\", \"microtimestamp\": \"1712100000000000\" } }"
+    - paragraph [ref=f1e337]:
+      - strong [ref=f1e338]: Live detail order book
+    - table [ref=f1e339]:
+      - rowgroup [ref=f1e340]:
+        - row [ref=f1e341]:
+          - cell [ref=f1e342]:
+            - strong [ref=f1e343]: Property
+          - cell [ref=f1e344]:
+            - strong [ref=f1e345]: Description
+      - rowgroup [ref=f1e346]:
+        - row [ref=f1e347]:
+          - cell [ref=f1e348]:
+            - strong [ref=f1e349]: bids
+          - cell "List of top 100 bids [price, amount, order id]." [ref=f1e350]
+        - row [ref=f1e351]:
+          - cell [ref=f1e352]:
+            - strong [ref=f1e353]: asks
+          - cell "List of top 100 asks [price, amount, order id]." [ref=f1e354]
+        - row [ref=f1e355]:
+          - cell [ref=f1e356]:
+            - strong [ref=f1e357]: timestamp
+          - cell "Order book timestamp." [ref=f1e358]
+        - row [ref=f1e359]:
+          - cell [ref=f1e360]:
+            - strong [ref=f1e361]: microtimestamp
+          - cell "Order book microtimestamp." [ref=f1e362]
+    - generic [ref=f1e363]:
+      - generic [ref=f1e364]: JSON example — detail_order_book_btcusd
+      - code [ref=f1e368]: "{ \"event\": \"data\", \"channel\": \"detail_order_book_btcusd\", \"data\": { \"bids\": [ [\"61200.00\", \"1.25000000\", \"1500000001\"], [\"61195.50\", \"0.50000000\", \"1500000003\"] ], \"asks\": [ [\"61205.00\", \"0.80000000\", \"1500000002\"], [\"61210.00\", \"2.00000000\", \"1500000004\"] ], \"timestamp\": \"1712100000\", \"microtimestamp\": \"1712100000000000\" } }"
+    - paragraph [ref=f1e369]:
+      - strong [ref=f1e370]: Live full order book
+      - text: "- JavaScript example:"
+      - link "diff_order_book_v2.html" [ref=f1e371] [cursor=pointer]:
+        - /url: https://assets.bitstamp.net/static/webapp/examples/diff_order_book_v2.1c9f7bedec23759336c617de3854c51a8a20da52.html
+    - paragraph [ref=f1e372]:
+      - strong [ref=f1e373]: "Note on crossed order book:"
+      - text: Due to the nature of the broadcast model, a snapshot may occasionally show the best bid ≥ best ask. This reflects an in-flight state that will self-correct within the next message. Do not treat this as an arbitrage opportunity.
+    - table [ref=f1e374]:
+      - rowgroup [ref=f1e375]:
+        - row [ref=f1e376]:
+          - cell [ref=f1e377]:
+            - strong [ref=f1e378]: Property
+          - cell [ref=f1e379]:
+            - strong [ref=f1e380]: Description
+      - rowgroup [ref=f1e381]:
+        - row [ref=f1e382]:
+          - cell [ref=f1e383]:
+            - strong [ref=f1e384]: bids
+          - cell [ref=f1e385]:
+            - text: List of changed bid price levels since last broadcast. Each entry is a
+            - code [ref=f1e386]: "[price, amount]"
+            - text: tuple. An
+            - code [ref=f1e387]: amount
+            - text: of
+            - code [ref=f1e388]: "\"0\""
+            - text: means the level has been fully consumed and should be removed from your local book.
+        - row [ref=f1e389]:
+          - cell [ref=f1e390]:
+            - strong [ref=f1e391]: asks
+          - cell "List of changed ask price levels since last broadcast. Same tuple format as bids." [ref=f1e392]
+        - row [ref=f1e393]:
+          - cell [ref=f1e394]:
+            - strong [ref=f1e395]: timestamp
+          - cell "Order book timestamp." [ref=f1e396]
+        - row [ref=f1e397]:
+          - cell [ref=f1e398]:
+            - strong [ref=f1e399]: microtimestamp
+          - cell "Order book microtimestamp. Use this value to sequence diff messages against the REST snapshot." [ref=f1e400]
+    - paragraph [ref=f1e401]:
+      - strong [ref=f1e402]: Reconciliation algorithm for diff_order_book
+    - list [ref=f1e403]:
+      - listitem [ref=f1e404]:
+        - text: Subscribe to
+        - code [ref=f1e405]: diff_order_book_[market]
+        - text: and start buffering messages
+        - emphasis [ref=f1e406]: before
+        - text: requesting the snapshot.
+      - listitem [ref=f1e407]:
+        - text: Fetch a full order book snapshot via
+        - code [ref=f1e408]: GET /api/v2/order_book/[market]/?group=1
+        - text: .
+      - listitem [ref=f1e409]:
+        - text: Discard all buffered diff messages whose
+        - code [ref=f1e410]: microtimestamp
+        - text: is older than or equal to the snapshot's
+        - code [ref=f1e411]: microtimestamp
+        - text: .
+      - listitem [ref=f1e412]: Apply the remaining buffered messages in order, then continue applying live messages.
+      - listitem [ref=f1e413]:
+        - text: For each entry
+        - code [ref=f1e414]: "[price, amount]"
+        - text: "in a diff: if"
+        - code [ref=f1e415]: amount == "0"
+        - text: remove that price level; otherwise set (or update) that level to the new amount.
+    - paragraph [ref=f1e416]:
+      - text: If you require gap resilience (reconnect scenarios), consider using
+      - strong [ref=f1e417]: live_orders_[market]
+      - text: instead — its
+      - code [ref=f1e418]: event_id
+      - text: /
+      - code [ref=f1e419]: pre_event_id
+      - text: top-level fields allow you to detect and recover missed events. See the
+      - emphasis [ref=f1e420]: Gap detection and message recovery
+      - text: section below.
+    - generic [ref=f1e421]:
+      - generic [ref=f1e422]: JSON example — diff_order_book_btcusd
+      - code [ref=f1e426]: "{ \"event\": \"data\", \"channel\": \"diff_order_book_btcusd\", \"data\": { \"bids\": [ [\"61200.00\", \"0.75000000\"], [\"61150.00\", \"0\"] ], \"asks\": [ [\"61210.00\", \"1.50000000\"] ], \"timestamp\": \"1712100001\", \"microtimestamp\": \"1712100001000000\" } }"
+    - paragraph [ref=f1e427]:
+      - strong [ref=f1e428]: Live orders
+      - text: "- JavaScript example:"
+      - link "live_orders_v2.html" [ref=f1e429] [cursor=pointer]:
+        - /url: https://assets.bitstamp.net/static/webapp/examples/live_orders_v2.52810d85222729901be8b696424143c673b9fd08.html
+    - table [ref=f1e430]:
+      - rowgroup [ref=f1e431]:
+        - row [ref=f1e432]:
+          - cell [ref=f1e433]:
+            - strong [ref=f1e434]: Property
+          - cell [ref=f1e435]:
+            - strong [ref=f1e436]: Description
+      - rowgroup [ref=f1e437]:
+        - row [ref=f1e438]:
+          - cell [ref=f1e439]:
+            - strong [ref=f1e440]: id
+          - cell "Order ID." [ref=f1e441]
+        - row [ref=f1e442]:
+          - cell [ref=f1e443]:
+            - strong [ref=f1e444]: amount
+          - cell "Order amount." [ref=f1e445]
+        - row [ref=f1e446]:
+          - cell [ref=f1e447]:
+            - strong [ref=f1e448]: amount_at_create
+          - cell "Order amount at create represented in string format." [ref=f1e449]
+        - row [ref=f1e450]:
+          - cell [ref=f1e451]:
+            - strong [ref=f1e452]: amount_str
+          - cell "Order amount represented in string format." [ref=f1e453]
+        - row [ref=f1e454]:
+          - cell [ref=f1e455]:
+            - strong [ref=f1e456]: amount_traded
+          - cell "Amount traded represented in string format." [ref=f1e457]
+        - row [ref=f1e458]:
+          - cell [ref=f1e459]:
+            - strong [ref=f1e460]: price
+          - cell "Order price." [ref=f1e461]
+        - row [ref=f1e462]:
+          - cell [ref=f1e463]:
+            - strong [ref=f1e464]: price_str
+          - cell "Order price represented in string format." [ref=f1e465]
+        - row [ref=f1e466]:
+          - cell [ref=f1e467]:
+            - strong [ref=f1e468]: order_type
+          - cell "Order type (0 - buy; 1 - sell)." [ref=f1e469]
+        - row [ref=f1e470]:
+          - cell [ref=f1e471]:
+            - strong [ref=f1e472]: order_subtype
+          - cell "Order subtype (0 - limit; 1 - instant; 2 - market; 3 - daily; 4 - IOC; 5 - MOC; 6 - FOK; 7 - CASH SELL; 8 - GTD; 20 - stop loss; 21 - take profit; 22 - stop loss limit; 23 - take profit limit; 24 - trailing stop loss; 25 - trailing take profit; 26 - trailing stop loss limit; 27 - trailing take profit limit)." [ref=f1e473]
+        - row [ref=f1e474]:
+          - cell [ref=f1e475]:
+            - strong [ref=f1e476]: datetime
+          - cell "Order datetime." [ref=f1e477]
+        - row [ref=f1e478]:
+          - cell [ref=f1e479]:
+            - strong [ref=f1e480]: microtimestamp
+          - cell "Order action timestamp represented in microseconds." [ref=f1e481]
+        - row [ref=f1e482]:
+          - cell [ref=f1e483]:
+            - strong [ref=f1e484]: is_liquidation
+          - cell "Indicates whether the order was triggered as part of a liquidation event (True / False)." [ref=f1e485]
+        - row [ref=f1e486]:
+          - cell [ref=f1e487]:
+            - strong [ref=f1e488]: event_id
+          - cell [ref=f1e489]:
+            - text: Top-level field (not inside
+            - code [ref=f1e490]: data
+            - text: ). MarketEventID of this event as a lowercase 8-4-4-4-12 hex string (e.g. "019f4ac8-5e3a-11ef-af00-3e9012000020"). Use this value as
+            - code [ref=f1e491]: since_id
+            - text: for the
+            - code [ref=f1e492]: order_data
+            - text: REST endpoint to recover missed events.
+        - row [ref=f1e493]:
+          - cell [ref=f1e494]:
+            - strong [ref=f1e495]: pre_event_id
+          - cell [ref=f1e496]:
+            - text: Top-level field (not inside
+            - code [ref=f1e497]: data
+            - text: ). MarketEventID of the immediately preceding event.
+            - code [ref=f1e498]: "null"
+            - text: after a server restart — treat as a full recovery trigger. Compare with the last received
+            - code [ref=f1e499]: event_id
+            - text: to detect gaps.
+        - row [ref=f1e500]:
+          - cell [ref=f1e501]:
+            - strong [ref=f1e502]: order_source
+          - cell [ref=f1e503]:
+            - text: Top-level field (not inside
+            - code [ref=f1e504]: data
+            - text: "). Event source derived from the MarketEventID:"
+            - code [ref=f1e505]: orderbook
+            - text: for regular order book events,
+            - code [ref=f1e506]: stop_order
+            - text: for stop order events. Use as the
+            - code [ref=f1e507]: order_source
+            - text: parameter when calling the recovery endpoint.
+    - generic [ref=f1e508]:
+      - generic [ref=f1e509]: JSON example — live_orders_btcusd (order_created)
+      - code [ref=f1e513]: "{ \"event\": \"order_created\", \"channel\": \"live_orders_btcusd\", \"event_id\": \"019f4ac8-5e3a-11ef-af00-3e9012000020\", \"pre_event_id\": \"019f4ac8-5e39-11ef-af00-3e9012000019\", \"order_source\": \"orderbook\", \"data\": { \"id\": 1500000001, \"id_str\": \"1500000001\", \"amount\": 0.5, \"amount_at_create\": \"0.50000000\", \"amount_str\": \"0.50000000\", \"amount_traded\": \"0.00000000\", \"price\": 61200.00, \"price_str\": \"61200.00\", \"order_type\": 0, \"order_subtype\": 0, \"datetime\": \"1712131200\", \"microtimestamp\": \"1712131200000000\", \"is_liquidation\": false } } // pre_event_id is null after a server restart — trigger full recovery: { \"event\": \"order_created\", \"channel\": \"live_orders_btcusd\", \"event_id\": \"019f4ac8-5e3a-11ef-af00-3e9012000020\", \"pre_event_id\": null, \"order_source\": \"orderbook\", \"data\": { \"...\": \"...\" } }"
+    - paragraph [ref=f1e514]:
+      - strong [ref=f1e515]: Live funding rate
+    - table [ref=f1e516]:
+      - rowgroup [ref=f1e517]:
+        - row [ref=f1e518]:
+          - cell [ref=f1e519]:
+            - strong [ref=f1e520]: Property
+          - cell [ref=f1e521]:
+            - strong [ref=f1e522]: Description
+      - rowgroup [ref=f1e523]:
+        - row [ref=f1e524]:
+          - cell [ref=f1e525]:
+            - strong [ref=f1e526]: funding_rate
+          - cell "Funding rate." [ref=f1e527]
+        - row [ref=f1e528]:
+          - cell [ref=f1e529]:
+            - strong [ref=f1e530]: mark_price
+          - cell "Mark price." [ref=f1e531]
+        - row [ref=f1e532]:
+          - cell [ref=f1e533]:
+            - strong [ref=f1e534]: index_price
+          - cell "Index price." [ref=f1e535]
+        - row [ref=f1e536]:
+          - cell [ref=f1e537]:
+            - strong [ref=f1e538]: market
+          - cell "Market of funding rate." [ref=f1e539]
+        - row [ref=f1e540]:
+          - cell [ref=f1e541]:
+            - strong [ref=f1e542]: timestamp
+          - cell "Event timestamp." [ref=f1e543]
+        - row [ref=f1e544]:
+          - cell [ref=f1e545]:
+            - strong [ref=f1e546]: next_funding_time
+          - cell "Next funding time." [ref=f1e547]
+    - paragraph [ref=f1e548]:
+      - strong [ref=f1e549]: Private My Orders
+    - paragraph [ref=f1e550]:
+      - generic [ref=f1e551]:
+        - text: "Tracks the full lifecycle of your orders: creation, partial fills (amount decrements), cancellation, final deletion, and order replacement. Does"
+        - strong [ref=f1e552]: not
+        - text: carry trade/fill detail — use
+        - strong [ref=f1e553]: Private My Trades
+        - text: for that. Stop orders emit additional
+        - code [ref=f1e554]: stop_active
+        - text: /
+        - code [ref=f1e555]: stop_inactive
+        - text: events when their trigger condition is met or cancelled.
+        - code [ref=f1e556]: order_replaced
+        - text: is emitted when an existing order is amended; it carries the new order ID and includes
+        - code [ref=f1e557]: orig_order_id
+        - text: referencing the previous order. On the public
+        - code [ref=f1e558]: live_orders
+        - text: channel, replacements appear as
+        - code [ref=f1e559]: order_created
+        - text: .
+    - table [ref=f1e560]:
+      - rowgroup [ref=f1e561]:
+        - row [ref=f1e562]:
+          - cell [ref=f1e563]:
+            - strong [ref=f1e564]: Property
+          - cell [ref=f1e565]:
+            - strong [ref=f1e566]: Description
+      - rowgroup [ref=f1e567]:
+        - row [ref=f1e568]:
+          - cell [ref=f1e569]:
+            - strong [ref=f1e570]: id
+          - cell "Order ID." [ref=f1e571]
+        - row [ref=f1e572]:
+          - cell [ref=f1e573]:
+            - strong [ref=f1e574]: id_str
+          - cell "Order ID represented in string format." [ref=f1e575]
+        - row [ref=f1e576]:
+          - cell [ref=f1e577]:
+            - strong [ref=f1e578]: client_order_id
+          - cell "Client order ID (if used when placing order)." [ref=f1e579]
+        - row [ref=f1e580]:
+          - cell [ref=f1e581]:
+            - strong [ref=f1e582]: amount
+          - cell "Order amount left to be executed." [ref=f1e583]
+        - row [ref=f1e584]:
+          - cell [ref=f1e585]:
+            - strong [ref=f1e586]: amount_str
+          - cell "Order amount left to be executed represented in string format." [ref=f1e587]
+        - row [ref=f1e588]:
+          - cell [ref=f1e589]:
+            - strong [ref=f1e590]: amount_traded
+          - cell "Executed order amount represented in string format." [ref=f1e591]
+        - row [ref=f1e592]:
+          - cell [ref=f1e593]:
+            - strong [ref=f1e594]: amount_at_create
+          - cell "Original order amount represented in string format." [ref=f1e595]
+        - row [ref=f1e596]:
+          - cell [ref=f1e597]:
+            - strong [ref=f1e598]: price
+          - cell "Order price." [ref=f1e599]
+        - row [ref=f1e600]:
+          - cell [ref=f1e601]:
+            - strong [ref=f1e602]: price_str
+          - cell "Order price represented in string format." [ref=f1e603]
+        - row [ref=f1e604]:
+          - cell [ref=f1e605]:
+            - strong [ref=f1e606]: order_type
+          - cell "Order type (0 - buy, 1 - sell)." [ref=f1e607]
+        - row [ref=f1e608]:
+          - cell [ref=f1e609]:
+            - strong [ref=f1e610]: order_subtype
+          - cell "Order subtype (0 - limit; 1 - instant; 2 - market; 3 - daily; 4 - IOC; 5 - MOC; 6 - FOK; 7 - CASH SELL; 8 - GTD; 20 - stop loss; 21 - take profit; 22 - stop loss limit; 23 - take profit limit; 24 - trailing stop loss; 25 - trailing take profit; 26 - trailing stop loss limit; 27 - trailing take profit limit)." [ref=f1e611]
+        - row [ref=f1e612]:
+          - cell [ref=f1e613]:
+            - strong [ref=f1e614]: datetime
+          - cell "Order datetime." [ref=f1e615]
+        - row [ref=f1e616]:
+          - cell [ref=f1e617]:
+            - strong [ref=f1e618]: microtimestamp
+          - cell "Order action timestamp represented in microseconds." [ref=f1e619]
+        - row [ref=f1e620]:
+          - cell [ref=f1e621]:
+            - strong [ref=f1e622]: trade_account_id
+          - cell "ID of related trade account (0 for main account, Unique ID for sub accounts)." [ref=f1e623]
+        - row [ref=f1e624]:
+          - cell [ref=f1e625]:
+            - strong [ref=f1e626]: is_liquidation
+          - cell "Indicates whether the order was triggered as part of a liquidation event (True / False)" [ref=f1e627]
+        - row [ref=f1e628]:
+          - cell [ref=f1e629]:
+            - strong [ref=f1e630]: reduce_only
+          - cell "Determines whether the order reduce only, if yes the value is true, otherwise it is omitted." [ref=f1e631]
+        - row [ref=f1e632]:
+          - cell [ref=f1e633]:
+            - strong [ref=f1e634]: stop_price
+          - cell "Order stop price in string format." [ref=f1e635]
+        - row [ref=f1e636]:
+          - cell [ref=f1e637]:
+            - strong [ref=f1e638]: activation_price
+          - cell "Order activation price in string format." [ref=f1e639]
+        - row [ref=f1e640]:
+          - cell [ref=f1e641]:
+            - strong [ref=f1e642]: trailing_delta
+          - cell "Order trailing delta." [ref=f1e643]
+        - row [ref=f1e644]:
+          - cell [ref=f1e645]:
+            - strong [ref=f1e646]: orig_order_id
+          - cell [ref=f1e647]:
+            - text: For
+            - code [ref=f1e648]: order_replaced
+            - text: "events: the ID of the order that was replaced. Present in"
+            - code [ref=f1e649]: data
+            - text: .
+        - row [ref=f1e650]:
+          - cell [ref=f1e651]:
+            - strong [ref=f1e652]: event_id
+          - cell [ref=f1e653]:
+            - text: Top-level field (not inside
+            - code [ref=f1e654]: data
+            - text: ). MarketEventID of this event as a lowercase 8-4-4-4-12 hex string. Use as
+            - code [ref=f1e655]: since_id
+            - text: for the
+            - code [ref=f1e656]: account_order_data
+            - text: REST endpoint to recover missed events.
+        - row [ref=f1e657]:
+          - cell [ref=f1e658]:
+            - strong [ref=f1e659]: pre_event_id
+          - cell [ref=f1e660]:
+            - text: Top-level field (not inside
+            - code [ref=f1e661]: data
+            - text: ). MarketEventID of the immediately preceding event.
+            - code [ref=f1e662]: "null"
+            - text: after a server restart — treat as a full recovery trigger. Compare with the last received
+            - code [ref=f1e663]: event_id
+            - text: to detect gaps.
+        - row [ref=f1e664]:
+          - cell [ref=f1e665]:
+            - strong [ref=f1e666]: order_source
+          - cell [ref=f1e667]:
+            - text: Top-level field (not inside
+            - code [ref=f1e668]: data
+            - text: ).
+            - code [ref=f1e669]: orderbook
+            - text: ","
+            - code [ref=f1e670]: stop_order
+            - text: or
+            - code [ref=f1e671]: tokenized_securities
+            - text: . Use as the
+            - code [ref=f1e672]: order_source
+            - text: parameter when calling the recovery endpoint.
+    - generic [ref=f1e673]:
+      - generic [ref=f1e674]: JSON example — private-my_orders_btcusd-[userId]
+      - code [ref=f1e678]: "{ \"event\": \"order_created\", \"channel\": \"private-my_orders_btcusd-123456\", \"trade_account_id\": 0, \"event_id\": \"019f4ac8-5e3a-11ef-af00-3e9012000020\", \"pre_event_id\": \"019f4ac8-5e39-11ef-af00-3e9012000019\", \"order_source\": \"orderbook\", \"data\": { \"id\": 1500000001, \"id_str\": \"1500000001\", \"client_order_id\": \"my-order-001\", \"amount\": 0.5, \"amount_str\": \"0.50000000\", \"amount_traded\": \"0.00000000\", \"amount_at_create\": \"0.50000000\", \"price\": 61200.00, \"price_str\": \"61200.00\", \"order_type\": 0, \"order_subtype\": 0, \"datetime\": \"1712131200\", \"microtimestamp\": \"1712131200000000\", \"trade_account_id\": 0, \"is_liquidation\": false } } // order_replaced event includes orig_order_id inside data: { \"event\": \"order_replaced\", \"channel\": \"private-my_orders_btcusd-123456\", \"trade_account_id\": 0, \"event_id\": \"019f4ac8-5e3b-11ef-af00-3e9012000021\", \"pre_event_id\": \"019f4ac8-5e3a-11ef-af00-3e9012000020\", \"order_source\": \"orderbook\", \"data\": { \"id\": 1500000002, \"id_str\": \"1500000002\", \"orig_order_id\": 1500000001, \"amount\": 0.3, \"amount_str\": \"0.30000000\", \"amount_traded\": \"0.00000000\", \"amount_at_create\": \"0.30000000\", \"price\": 61500.00, \"price_str\": \"61500.00\", \"order_type\": 0, \"order_subtype\": 0, \"datetime\": \"1712131201\", \"microtimestamp\": \"1712131201000000\", \"trade_account_id\": 0, \"is_liquidation\": false } }"
+    - paragraph [ref=f1e679]:
+      - strong [ref=f1e680]: Private My Trades
+    - paragraph [ref=f1e681]:
+      - generic [ref=f1e682]:
+        - text: Fires once for every fill (execution) against your orders. Each message represents a single matched trade, including partial fills. Use this channel for P&L tracking and trade reconciliation. Does
+        - strong [ref=f1e683]: not
+        - text: include maker/taker designation — see
+        - strong [ref=f1e684]: trade_type
+        - text: for the execution context (e.g. ORDERBOOK, POSITION_LIQUIDATION).
+    - table [ref=f1e685]:
+      - rowgroup [ref=f1e686]:
+        - row [ref=f1e687]:
+          - cell [ref=f1e688]:
+            - strong [ref=f1e689]: Property
+          - cell [ref=f1e690]:
+            - strong [ref=f1e691]: Description
+      - rowgroup [ref=f1e692]:
+        - row [ref=f1e693]:
+          - cell [ref=f1e694]:
+            - strong [ref=f1e695]: id
+          - cell "Trade ID." [ref=f1e696]
+        - row [ref=f1e697]:
+          - cell [ref=f1e698]:
+            - strong [ref=f1e699]: id_str
+          - cell "Trade unique ID represented in string format." [ref=f1e700]
+        - row [ref=f1e701]:
+          - cell [ref=f1e702]:
+            - strong [ref=f1e703]: trade_uti
+          - cell "Unique Transaction Identifier (UTI) for regulatory reporting reconciliation. Same value as on FIX and REST trade history." [ref=f1e704]
+        - row [ref=f1e705]:
+          - cell [ref=f1e706]:
+            - strong [ref=f1e707]: order_id
+          - cell "Order ID associated with the trade." [ref=f1e708]
+        - row [ref=f1e709]:
+          - cell [ref=f1e710]:
+            - strong [ref=f1e711]: client_order_id
+          - cell "Client order ID associated with the trade." [ref=f1e712]
+        - row [ref=f1e713]:
+          - cell [ref=f1e714]:
+            - strong [ref=f1e715]: amount
+          - cell "Trade amount." [ref=f1e716]
+        - row [ref=f1e717]:
+          - cell [ref=f1e718]:
+            - strong [ref=f1e719]: price
+          - cell "Trade price." [ref=f1e720]
+        - row [ref=f1e721]:
+          - cell [ref=f1e722]:
+            - strong [ref=f1e723]: fee
+          - cell "Trade fee." [ref=f1e724]
+        - row [ref=f1e725]:
+          - cell [ref=f1e726]:
+            - strong [ref=f1e727]: side
+          - cell "Trade side (buy or sell)." [ref=f1e728]
+        - row [ref=f1e729]:
+          - cell [ref=f1e730]:
+            - strong [ref=f1e731]: microtimestamp
+          - cell "Trade timestamp represented in microseconds." [ref=f1e732]
+        - row [ref=f1e733]:
+          - cell [ref=f1e734]:
+            - strong [ref=f1e735]: trade_account_id
+          - cell "ID of related trade account (0 for main account, Unique ID for sub accounts)." [ref=f1e736]
+        - row [ref=f1e737]:
+          - cell [ref=f1e738]:
+            - strong [ref=f1e739]: position_id
+          - cell "Position ID." [ref=f1e740]
+        - row [ref=f1e741]:
+          - cell [ref=f1e742]:
+            - strong [ref=f1e743]: is_liquidation
+          - cell "Determines whether the trade is a result of liquidation, if yes the value is 1, otherwise it is omitted." [ref=f1e744]
+        - row [ref=f1e745]:
+          - cell [ref=f1e746]:
+            - strong [ref=f1e747]: trade_type
+          - cell "Trade type (POSITION_LIQUIDATION, COLLATERAL_LIQUIDATION, ORDERBOOK, POSITION_MARKET_WIDE_CLOSURE, POSITION_ASSIGNMENT, POSITION_ADL)." [ref=f1e748]
+    - generic [ref=f1e749]:
+      - generic [ref=f1e750]: JSON example — private-my_trades_btcusd-[userId]
+      - code [ref=f1e754]: "{ \"event\": \"trade\", \"channel\": \"private-my_trades_btcusd-123456\", \"data\": { \"id\": 296050733, \"id_str\": \"296050733\", \"trade_uti\": \"BSTP-20240403-296050733\", \"order_id\": 1500000001, \"client_order_id\": \"my-order-001\", \"amount\": 0.1, \"price\": 61200.00, \"fee\": \"0.00\", \"side\": \"buy\", \"microtimestamp\": \"1712131200500000\", \"trade_account_id\": 0, \"position_id\": null, \"is_liquidation\": null, \"trade_type\": \"ORDERBOOK\" } }"
+    - paragraph [ref=f1e755]:
+      - strong [ref=f1e756]: Private My Settlements
+    - table [ref=f1e757]:
+      - rowgroup [ref=f1e758]:
+        - row [ref=f1e759]:
+          - cell [ref=f1e760]:
+            - strong [ref=f1e761]: Property
+          - cell [ref=f1e762]:
+            - strong [ref=f1e763]: Description
+      - rowgroup [ref=f1e764]:
+        - row [ref=f1e765]:
+          - cell [ref=f1e766]:
+            - strong [ref=f1e767]: id
+          - cell "Position ID." [ref=f1e768]
+        - row [ref=f1e769]:
+          - cell [ref=f1e770]:
+            - strong [ref=f1e771]: tnx_id
+          - cell "Transaction id." [ref=f1e772]
+        - row [ref=f1e773]:
+          - cell [ref=f1e774]:
+            - strong [ref=f1e775]: ts
+          - cell "Settlement time (in seconds)." [ref=f1e776]
+        - row [ref=f1e777]:
+          - cell [ref=f1e778]:
+            - strong [ref=f1e779]: price
+          - cell "Settlement price." [ref=f1e780]
+        - row [ref=f1e781]:
+          - cell [ref=f1e782]:
+            - strong [ref=f1e783]: ccy
+          - cell "Currency." [ref=f1e784]
+        - row [ref=f1e785]:
+          - cell [ref=f1e786]:
+            - strong [ref=f1e787]: as
+          - cell "Amount settled." [ref=f1e788]
+        - row [ref=f1e789]:
+          - cell [ref=f1e790]:
+            - strong [ref=f1e791]: ap
+          - cell "Amount from price." [ref=f1e792]
+        - row [ref=f1e793]:
+          - cell [ref=f1e794]:
+            - strong [ref=f1e795]: atf
+          - cell "Amount from trading fees." [ref=f1e796]
+        - row [ref=f1e797]:
+          - cell [ref=f1e798]:
+            - strong [ref=f1e799]: alf
+          - cell "Amount from liquidation fees." [ref=f1e800]
+        - row [ref=f1e801]:
+          - cell [ref=f1e802]:
+            - strong [ref=f1e803]: afu
+          - cell "Amount from funding." [ref=f1e804]
+        - row [ref=f1e805]:
+          - cell [ref=f1e806]:
+            - strong [ref=f1e807]: asl
+          - cell "Amount from socialised loss." [ref=f1e808]
+        - row [ref=f1e809]:
+          - cell [ref=f1e810]:
+            - strong [ref=f1e811]: sp
+          - cell "Strike price." [ref=f1e812]
+        - row [ref=f1e813]:
+          - cell [ref=f1e814]:
+            - strong [ref=f1e815]: typ
+          - cell "Settlement type, C for closed, otherwise it is omitted." [ref=f1e816]
+    - paragraph [ref=f1e817]:
+      - strong [ref=f1e818]: Private My Settlements - insurance fund events
+    - paragraph [ref=f1e819]: The private-my_settlements-[userId] channel also broadcasts insurance_fund_claim and insurance_fund_premium events. A claim is a transfer from the insurance fund covering a negative equity during settlement, a premium is a transfer to the insurance fund. Both events are emitted within the settlement cycle, before the settlement events of the same cycle.
+    - table [ref=f1e820]:
+      - rowgroup [ref=f1e821]:
+        - row [ref=f1e822]:
+          - cell [ref=f1e823]:
+            - strong [ref=f1e824]: Property
+          - cell [ref=f1e825]:
+            - strong [ref=f1e826]: Description
+      - rowgroup [ref=f1e827]:
+        - row [ref=f1e828]:
+          - cell [ref=f1e829]:
+            - strong [ref=f1e830]: id
+          - cell "Position ID. Only present for isolated margin positions, omitted for cross margin claims which cover the whole account." [ref=f1e831]
+        - row [ref=f1e832]:
+          - cell [ref=f1e833]:
+            - strong [ref=f1e834]: tnx_id
+          - cell "Transaction id." [ref=f1e835]
+        - row [ref=f1e836]:
+          - cell [ref=f1e837]:
+            - strong [ref=f1e838]: ts
+          - cell "Settlement time (in seconds)." [ref=f1e839]
+        - row [ref=f1e840]:
+          - cell [ref=f1e841]:
+            - strong [ref=f1e842]: ccy
+          - cell "Currency." [ref=f1e843]
+        - row [ref=f1e844]:
+          - cell [ref=f1e845]:
+            - strong [ref=f1e846]: amount
+          - cell "Transferred amount. Positive for claims (insurance fund to account), negative for premiums (account to insurance fund)." [ref=f1e847]
+    - paragraph [ref=f1e848]:
+      - strong [ref=f1e849]: Private Live Trades
+    - paragraph [ref=f1e850]:
+      - strong [ref=f1e851]: "Note:"
+      - text: Private-live_trades channels only broadcast self_trade events. Self-trade events occur when orders from the same client are matched against each other and offset against each other instead of executing as a trade due to self-trading prevention.
+    - table [ref=f1e852]:
+      - rowgroup [ref=f1e853]:
+        - row [ref=f1e854]:
+          - cell [ref=f1e855]:
+            - strong [ref=f1e856]: Property
+          - cell [ref=f1e857]:
+            - strong [ref=f1e858]: Description
+      - rowgroup [ref=f1e859]:
+        - row [ref=f1e860]:
+          - cell [ref=f1e861]:
+            - strong [ref=f1e862]: buy_order_id
+          - cell "Buy order id." [ref=f1e863]
+        - row [ref=f1e864]:
+          - cell [ref=f1e865]:
+            - strong [ref=f1e866]: sell_order_id
+          - cell "Sell order id." [ref=f1e867]
+        - row [ref=f1e868]:
+          - cell [ref=f1e869]:
+            - strong [ref=f1e870]: amount
+          - cell "Trade amount." [ref=f1e871]
+        - row [ref=f1e872]:
+          - cell [ref=f1e873]:
+            - strong [ref=f1e874]: amount_str
+          - cell "Trade amount represented in string format." [ref=f1e875]
+        - row [ref=f1e876]:
+          - cell [ref=f1e877]:
+            - strong [ref=f1e878]: price
+          - cell "Trade price." [ref=f1e879]
+        - row [ref=f1e880]:
+          - cell [ref=f1e881]:
+            - strong [ref=f1e882]: price_str
+          - cell "Trade price represented in string format." [ref=f1e883]
+        - row [ref=f1e884]:
+          - cell [ref=f1e885]:
+            - strong [ref=f1e886]: type
+          - cell "Order type (0 - buy; 1 - sell)." [ref=f1e887]
+        - row [ref=f1e888]:
+          - cell [ref=f1e889]:
+            - strong [ref=f1e890]: timestamp
+          - cell "Timestamp represented in seconds." [ref=f1e891]
+        - row [ref=f1e892]:
+          - cell [ref=f1e893]:
+            - strong [ref=f1e894]: microtimestamp
+          - cell "Timestamp represented in microtimestamp." [ref=f1e895]
+        - row [ref=f1e896]:
+          - cell [ref=f1e897]:
+            - strong [ref=f1e898]: sellers_trade_account_id
+          - cell "ID of related trade account to sell order (0 for main account, Unique ID for sub accounts)." [ref=f1e899]
+        - row [ref=f1e900]:
+          - cell [ref=f1e901]:
+            - strong [ref=f1e902]: buyers_trade_account_id
+          - cell "ID of related trade account to buy order (0 for main account, Unique ID for sub accounts)." [ref=f1e903]
+    - generic [ref=f1e904]:
+      - generic [ref=f1e905]: JSON example — private-live_trades_btcusd-[userId]
+      - code [ref=f1e909]: "{ \"event\": \"self_trade\", \"channel\": \"private-live_trades_btcusd-123456\", \"data\": { \"buy_order_id\": 1500000010, \"sell_order_id\": 1500000011, \"amount\": 0.05, \"amount_str\": \"0.05000000\", \"price\": 61200.00, \"price_str\": \"61200.00\", \"type\": 0, \"timestamp\": \"1712131205\", \"microtimestamp\": \"1712131205000000\", \"sellers_trade_account_id\": 0, \"buyers_trade_account_id\": 0 } }"
+    - paragraph [ref=f1e910]:
+      - strong [ref=f1e911]: Private Liquidations
+    - table [ref=f1e912]:
+      - rowgroup [ref=f1e913]:
+        - row [ref=f1e914]:
+          - cell [ref=f1e915]:
+            - strong [ref=f1e916]: Property
+          - cell [ref=f1e917]:
+            - strong [ref=f1e918]: Description
+      - rowgroup [ref=f1e919]:
+        - row [ref=f1e920]:
+          - cell [ref=f1e921]:
+            - strong [ref=f1e922]: position_id
+          - cell "Position ID." [ref=f1e923]
+        - row [ref=f1e924]:
+          - cell [ref=f1e925]:
+            - strong [ref=f1e926]: trade_account_id
+          - cell "ID of related trade account (0 for main account, Unique ID for sub accounts)." [ref=f1e927]
+        - row [ref=f1e928]:
+          - cell [ref=f1e929]:
+            - strong [ref=f1e930]: microtimestamp
+          - cell "Timestamp of alert, represented in microseconds." [ref=f1e931]
+        - row [ref=f1e932]:
+          - cell [ref=f1e933]:
+            - strong [ref=f1e934]: alert_type
+          - cell "Type of alert (im_breach_warning, im_breach, mm_breach_warning, liquidation_start, liquidation_concluded)." [ref=f1e935]
+        - row [ref=f1e936]:
+          - cell [ref=f1e937]:
+            - strong [ref=f1e938]: margin_mode
+          - cell "Margin mode (ISOLATED/CROSS)." [ref=f1e939]
+        - row [ref=f1e940]:
+          - cell [ref=f1e941]:
+            - strong [ref=f1e942]: initial_margin_ratio
+          - cell "Initial margin ratio at the time of alert." [ref=f1e943]
+        - row [ref=f1e944]:
+          - cell [ref=f1e945]:
+            - strong [ref=f1e946]: maintenance_margin_ratio
+          - cell "Maintenance margin ratio at the time of alert." [ref=f1e947]
+    - paragraph [ref=f1e948]:
+      - strong [ref=f1e949]: Private Live Order Trades
+    - paragraph [ref=f1e950]:
+      - generic [ref=f1e951]:
+        - text: Fires for every fill (execution) that involves your orders, including both sides of a trade. Unlike
+        - strong [ref=f1e952]: Private My Trades
+        - text: ", this channel carries richer order-level context and is the preferred channel for real-time execution monitoring when you need to correlate fills back to specific orders immediately."
+    - table [ref=f1e953]:
+      - rowgroup [ref=f1e954]:
+        - row [ref=f1e955]:
+          - cell [ref=f1e956]:
+            - strong [ref=f1e957]: Property
+          - cell [ref=f1e958]:
+            - strong [ref=f1e959]: Description
+      - rowgroup [ref=f1e960]:
+        - row [ref=f1e961]:
+          - cell [ref=f1e962]:
+            - strong [ref=f1e963]: id
+          - cell "Trade ID." [ref=f1e964]
+        - row [ref=f1e965]:
+          - cell [ref=f1e966]:
+            - strong [ref=f1e967]: id_str
+          - cell "Trade ID represented in string format." [ref=f1e968]
+        - row [ref=f1e969]:
+          - cell [ref=f1e970]:
+            - strong [ref=f1e971]: order_id
+          - cell "Order ID that was filled." [ref=f1e972]
+        - row [ref=f1e973]:
+          - cell [ref=f1e974]:
+            - strong [ref=f1e975]: client_order_id
+          - cell "Client order ID associated with the order (if provided when placing)." [ref=f1e976]
+        - row [ref=f1e977]:
+          - cell [ref=f1e978]:
+            - strong [ref=f1e979]: amount
+          - cell "Trade amount." [ref=f1e980]
+        - row [ref=f1e981]:
+          - cell [ref=f1e982]:
+            - strong [ref=f1e983]: amount_str
+          - cell "Trade amount represented in string format." [ref=f1e984]
+        - row [ref=f1e985]:
+          - cell [ref=f1e986]:
+            - strong [ref=f1e987]: price
+          - cell "Trade price." [ref=f1e988]
+        - row [ref=f1e989]:
+          - cell [ref=f1e990]:
+            - strong [ref=f1e991]: price_str
+          - cell "Trade price represented in string format." [ref=f1e992]
+        - row [ref=f1e993]:
+          - cell [ref=f1e994]:
+            - strong [ref=f1e995]: fee
+          - cell "Fee charged for this trade." [ref=f1e996]
+        - row [ref=f1e997]:
+          - cell [ref=f1e998]:
+            - strong [ref=f1e999]: side
+          - cell "Order side (buy or sell)." [ref=f1e1000]
+        - row [ref=f1e1001]:
+          - cell [ref=f1e1002]:
+            - strong [ref=f1e1003]: microtimestamp
+          - cell "Trade timestamp represented in microseconds." [ref=f1e1004]
+        - row [ref=f1e1005]:
+          - cell [ref=f1e1006]:
+            - strong [ref=f1e1007]: trade_account_id
+          - cell "ID of related trade account (0 for main account, Unique ID for sub accounts)." [ref=f1e1008]
+        - row [ref=f1e1009]:
+          - cell [ref=f1e1010]:
+            - strong [ref=f1e1011]: order_remaining_amount
+          - cell "Remaining unfilled quantity on the order after this trade, in string format." [ref=f1e1012]
+    - generic [ref=f1e1013]:
+      - generic [ref=f1e1014]: JSON example — private-live_order_trades_btcusd-[userId]
+      - code [ref=f1e1018]: "{ \"event\": \"trade\", \"channel\": \"private-live_order_trades_btcusd-123456\", \"data\": { \"id\": 296050733, \"id_str\": \"296050733\", \"order_id\": 1500000001, \"client_order_id\": \"my-order-001\", \"amount\": 0.1, \"amount_str\": \"0.10000000\", \"price\": 61200.00, \"price_str\": \"61200.00\", \"fee\": \"0.00\", \"side\": \"buy\", \"microtimestamp\": \"1712131200500000\", \"trade_account_id\": 0, \"order_remaining_amount\": \"0.40000000\" } }"
+    - paragraph [ref=f1e1019]:
+      - strong [ref=f1e1020]: Announcements
+    - paragraph [ref=f1e1021]: "Broadcasts tokenized-security instrument lifecycle events: trading halts, corporate actions and multiplier updates."
+    - table [ref=f1e1022]:
+      - rowgroup [ref=f1e1023]:
+        - row [ref=f1e1024]:
+          - cell [ref=f1e1025]:
+            - strong [ref=f1e1026]: Property
+          - cell [ref=f1e1027]:
+            - strong [ref=f1e1028]: Description
+      - rowgroup [ref=f1e1029]:
+        - row [ref=f1e1030]:
+          - cell [ref=f1e1031]:
+            - strong [ref=f1e1032]: announcement_id
+          - cell "Announcement ID." [ref=f1e1033]
+        - row [ref=f1e1034]:
+          - cell [ref=f1e1035]:
+            - strong [ref=f1e1036]: announcement_type
+          - cell [ref=f1e1037]:
+            - text: Announcement type (
+            - code [ref=f1e1038]: corporate_action
+            - text: ","
+            - code [ref=f1e1039]: trading_halt
+            - text: or
+            - code [ref=f1e1040]: multiplier_update
+            - text: ).
+        - row [ref=f1e1041]:
+          - cell [ref=f1e1042]:
+            - strong [ref=f1e1043]: status
+          - cell [ref=f1e1044]:
+            - text: Announcement status (
+            - code [ref=f1e1045]: published
+            - text: ","
+            - code [ref=f1e1046]: in_progress
+            - text: ","
+            - code [ref=f1e1047]: completed
+            - text: or
+            - code [ref=f1e1048]: cancelled
+            - text: ).
+        - row [ref=f1e1049]:
+          - cell [ref=f1e1050]:
+            - strong [ref=f1e1051]: published_at
+          - cell "Timestamp the announcement was published." [ref=f1e1052]
+        - row [ref=f1e1053]:
+          - cell [ref=f1e1054]:
+            - strong [ref=f1e1055]: updated_at
+          - cell "Timestamp of the last update to this announcement." [ref=f1e1056]
+        - row [ref=f1e1057]:
+          - cell [ref=f1e1058]:
+            - strong [ref=f1e1059]: product_type
+          - cell [ref=f1e1060]:
+            - text: Product type (e.g.
+            - code [ref=f1e1061]: TOKENIZED_SECURITY
+            - text: ).
+        - row [ref=f1e1062]:
+          - cell [ref=f1e1063]:
+            - strong [ref=f1e1064]: product
+          - cell "List of affected market symbols." [ref=f1e1065]
+        - row [ref=f1e1066]:
+          - cell [ref=f1e1067]:
+            - strong [ref=f1e1068]: trading_halt_details
+          - cell [ref=f1e1069]:
+            - text: Present when
+            - code [ref=f1e1070]: announcement_type
+            - text: is
+            - code [ref=f1e1071]: trading_halt
+            - text: ": reason, start time and end time."
+        - row [ref=f1e1072]:
+          - cell [ref=f1e1073]:
+            - strong [ref=f1e1074]: corporate_action_details
+          - cell [ref=f1e1075]:
+            - text: Present when
+            - code [ref=f1e1076]: announcement_type
+            - text: is
+            - code [ref=f1e1077]: corporate_action
+            - text: ": action type, effective time and related details."
+        - row [ref=f1e1078]:
+          - cell [ref=f1e1079]:
+            - strong [ref=f1e1080]: multiplier_update_details
+          - cell [ref=f1e1081]:
+            - text: Present when
+            - code [ref=f1e1082]: announcement_type
+            - text: is
+            - code [ref=f1e1083]: multiplier_update
+            - text: ": previous multiplier, new multiplier and effective time."
+        - row [ref=f1e1084]:
+          - cell [ref=f1e1085]:
+            - strong [ref=f1e1086]: changed_fields
+          - cell [ref=f1e1087]:
+            - text: Present only on
+            - code [ref=f1e1088]: updated
+            - text: "events: list of field paths that changed since the previous emission."
+    - generic [ref=f1e1089]:
+      - generic [ref=f1e1090]: JSON example — announcements
+      - code [ref=f1e1094]: "{ \"event\": \"in_progress\", \"channel\": \"announcements\", \"data\": { \"announcement_id\": 12345, \"announcement_type\": \"trading_halt\", \"status\": \"in_progress\", \"published_at\": \"2026-08-25T10:00:00Z\", \"updated_at\": \"2026-08-25T10:00:00Z\", \"product_type\": \"TOKENIZED_SECURITY\", \"product\": [\"TSLA/USD\"], \"trading_halt_details\": { \"reason\": \"circuit_breaker\", \"start_time\": \"2026-08-25T10:00:00Z\", \"end_time\": null } } }"
+    - paragraph [ref=f1e1095]:
+      - strong [ref=f1e1096]: Private My Token Settlements
+    - paragraph [ref=f1e1097]: Fires once a filled tokenized-security BUY order's tokens have been credited to your account and are withdrawable.
+    - table [ref=f1e1098]:
+      - rowgroup [ref=f1e1099]:
+        - row [ref=f1e1100]:
+          - cell [ref=f1e1101]:
+            - strong [ref=f1e1102]: Property
+          - cell [ref=f1e1103]:
+            - strong [ref=f1e1104]: Description
+      - rowgroup [ref=f1e1105]:
+        - row [ref=f1e1106]:
+          - cell [ref=f1e1107]:
+            - strong [ref=f1e1108]: action
+          - cell [ref=f1e1109]:
+            - text: Settlement action (
+            - code [ref=f1e1110]: credit
+            - text: ).
+        - row [ref=f1e1111]:
+          - cell [ref=f1e1112]:
+            - strong [ref=f1e1113]: order_id
+          - cell "Order ID." [ref=f1e1114]
+        - row [ref=f1e1115]:
+          - cell [ref=f1e1116]:
+            - strong [ref=f1e1117]: order_id_str
+          - cell "Order ID represented in string format." [ref=f1e1118]
+        - row [ref=f1e1119]:
+          - cell [ref=f1e1120]:
+            - strong [ref=f1e1121]: instrument
+          - cell [ref=f1e1122]:
+            - text: Market symbol, e.g.
+            - code [ref=f1e1123]: TSLA/USD
+            - text: .
+        - row [ref=f1e1124]:
+          - cell [ref=f1e1125]:
+            - strong [ref=f1e1126]: token_security_currency
+          - cell "Currency of the credited tokens." [ref=f1e1127]
+        - row [ref=f1e1128]:
+          - cell [ref=f1e1129]:
+            - strong [ref=f1e1130]: tokens_quantity
+          - cell "Quantity of tokens credited." [ref=f1e1131]
+        - row [ref=f1e1132]:
+          - cell [ref=f1e1133]:
+            - strong [ref=f1e1134]: datetime
+          - cell "Settlement datetime." [ref=f1e1135]
+    - generic [ref=f1e1136]:
+      - generic [ref=f1e1137]: JSON example — private-my_token_settlements-[userId]
+      - code [ref=f1e1141]: "{ \"event\": \"token_ready\", \"channel\": \"private-my_token_settlements-123456\", \"data\": { \"action\": \"credit\", \"order_id\": 2046687597465600, \"order_id_str\": \"2046687597465600\", \"instrument\": \"TSLA/USD\", \"token_security_currency\": \"TSLA\", \"tokens_quantity\": \"1.00000000\", \"datetime\": \"2026-08-25T10:35:09+00:00\" } }"
+    - heading "Other technical information" [level=2] [ref=f1e1142]
+    - paragraph [ref=f1e1143]:
+      - strong [ref=f1e1144]: 1. Heartbeat
+    - paragraph [ref=f1e1145]: "If you wish to determine that websocket server is responsive, you should do so by websocket heartbeat. This is a form of control message or \"PING / PONG\" communication. You can do so by sending the following JSON message to the server:"
+    - generic [ref=f1e1146]:
+      - generic [ref=f1e1147]: JSON
+      - code [ref=f1e1151]: "{ \"event\": \"bts:heartbeat\" }"
+    - paragraph [ref=f1e1152]: "The server responds with:"
+    - generic [ref=f1e1153]:
+      - generic [ref=f1e1154]: JSON
+      - code [ref=f1e1158]: "{ \"event\": \"bts:heartbeat\", \"channel\": \"\", \"data\": { \"status\": \"success\" } }"
+    - paragraph [ref=f1e1159]:
+      - strong [ref=f1e1160]: Subscription and unsubscription confirmations
+    - paragraph [ref=f1e1161]: "After a successful subscription or unsubscription, the server sends a confirmation message:"
+    - generic [ref=f1e1162]:
+      - generic [ref=f1e1163]: JSON — subscription confirmed
+      - code [ref=f1e1167]: "{ \"event\": \"bts:subscription_succeeded\", \"channel\": \"live_trades_btcusd\", \"data\": {} }"
+    - generic [ref=f1e1168]:
+      - generic [ref=f1e1169]: JSON — unsubscription confirmed
+      - code [ref=f1e1173]: "{ \"event\": \"bts:unsubscription_succeeded\", \"channel\": \"live_trades_btcusd\", \"data\": {} }"
+    - paragraph [ref=f1e1174]:
+      - strong [ref=f1e1175]: Error responses
+    - paragraph [ref=f1e1176]:
+      - text: When a request cannot be processed, the server replies with a
+      - code [ref=f1e1177]: bts:error
+      - text: event. The
+      - code [ref=f1e1178]: data
+      - text: object contains a
+      - code [ref=f1e1179]: message
+      - text: string and an optional numeric
+      - code [ref=f1e1180]: code
+      - text: ":"
+    - table [ref=f1e1182]:
+      - rowgroup [ref=f1e1183]:
+        - row [ref=f1e1184]:
+          - cell [ref=f1e1185]:
+            - strong [ref=f1e1186]: code
+          - cell [ref=f1e1187]:
+            - strong [ref=f1e1188]: message
+          - cell [ref=f1e1189]:
+            - strong [ref=f1e1190]: Cause
+      - rowgroup [ref=f1e1191]:
+        - row [ref=f1e1192]:
+          - cell [ref=f1e1193]:
+            - emphasis [ref=f1e1194]: "null"
+          - cell "Incorrect JSON format." [ref=f1e1195]
+          - cell "The message body could not be parsed as JSON." [ref=f1e1196]
+        - row [ref=f1e1197]:
+          - cell [ref=f1e1198]:
+            - emphasis [ref=f1e1199]: "null"
+          - cell "Bad subscription string." [ref=f1e1200]
+          - cell [ref=f1e1201]:
+            - text: The
+            - code [ref=f1e1202]: channel
+            - text: field is missing or not a string.
+        - row [ref=f1e1203]:
+          - cell "4009" [ref=f1e1204]
+          - cell "Connection is unauthorized." [ref=f1e1205]
+          - cell [ref=f1e1206]:
+            - text: The
+            - code [ref=f1e1207]: auth
+            - text: token is invalid, expired (tokens are valid for 60 seconds), or does not match the channel's userId.
+    - generic [ref=f1e1208]:
+      - generic [ref=f1e1209]: JSON — error example
+      - code [ref=f1e1213]: "{ \"event\": \"bts:error\", \"channel\": \"\", \"data\": { \"code\": 4009, \"message\": \"Connection is unauthorized.\" } }"
+    - paragraph [ref=f1e1214]:
+      - strong [ref=f1e1215]: 2. Forced reconnection
+    - paragraph [ref=f1e1216]: "In case of websocket server you are currently connected to is to go under maintenance, you will receive a warning message asking you to reconnect. Such a message will look like this:"
+    - generic [ref=f1e1217]:
+      - generic [ref=f1e1218]: JSON
+      - code [ref=f1e1222]: "{ \"event\": \"bts:request_reconnect\", \"channel\": \"\", \"data\": null }"
+    - paragraph [ref=f1e1223]:
+      - text: After you receive this request, you will have a few seconds to reconnect before the connection is closed. Reconnect and re-subscribe to resume receiving events; use the gap detection fields (
+      - code [ref=f1e1224]: event_id
+      - text: /
+      - code [ref=f1e1225]: pre_event_id
+      - text: ) to recover any events missed during the transition.
+    - paragraph [ref=f1e1226]:
+      - strong [ref=f1e1227]: 3. Maximum connection age
+    - paragraph [ref=f1e1228]: Maximum connection age is 90 days from the time the connection is established. When that period of time elapses, you will be automatically disconnected and will need to re-connect.
+    - paragraph [ref=f1e1229]:
+      - strong [ref=f1e1230]: 4. Gap detection and message recovery
+    - paragraph [ref=f1e1231]:
+      - text: The
+      - code [ref=f1e1232]: live_orders_[market]
+      - text: and
+      - code [ref=f1e1233]: private-my_orders_[market]-[userId]
+      - text: channels include three
+      - strong [ref=f1e1234]: top-level
+      - text: fields (alongside
+      - code [ref=f1e1235]: event
+      - text: ","
+      - code [ref=f1e1236]: channel
+      - text: ", and"
+      - code [ref=f1e1237]: data
+      - text: ") that allow you to detect and recover from missed messages:"
+    - list [ref=f1e1238]:
+      - listitem [ref=f1e1239]:
+        - strong [ref=f1e1240]: event_id
+        - text: — unique identifier for this event as a lowercase 8-4-4-4-12 hex string (e.g.
+        - code [ref=f1e1241]: "\"019f4ac8-5e3a-11ef-af00-3e9012000020\""
+        - text: ).
+      - listitem [ref=f1e1242]:
+        - strong [ref=f1e1243]: pre_event_id
+        - text: — the
+        - code [ref=f1e1244]: event_id
+        - text: of the immediately preceding event, or
+        - code [ref=f1e1245]: "null"
+        - text: after a server-side restart.
+      - listitem [ref=f1e1246]:
+        - strong [ref=f1e1247]: order_source
+        - text: —
+        - code [ref=f1e1248]: orderbook
+        - text: ","
+        - code [ref=f1e1249]: stop_order
+        - text: or
+        - code [ref=f1e1250]: tokenized_securities
+        - text: ; use this as the
+        - code [ref=f1e1251]: order_source
+        - text: parameter when calling the private recovery endpoint.
+    - paragraph [ref=f1e1252]:
+      - strong [ref=f1e1253]: "Continuity check:"
+      - text: After each message, compare its
+      - code [ref=f1e1254]: pre_event_id
+      - text: with the
+      - code [ref=f1e1255]: event_id
+      - text: of the last message you successfully processed. If they do not match, one or more events were missed — trigger gap recovery before processing further messages.
+    - paragraph [ref=f1e1256]:
+      - strong [ref=f1e1257]: "Restart signal:"
+      - text: A
+      - code [ref=f1e1258]: "null"
+      - code [ref=f1e1259]: pre_event_id
+      - text: "indicates a server restart. Treat this as an unconditional full-recovery trigger: fetch all events since your last known"
+      - code [ref=f1e1260]: event_id
+      - text: before resuming live processing.
+    - paragraph [ref=f1e1261]:
+      - strong [ref=f1e1262]: Recovery via REST
+    - paragraph [ref=f1e1263]:
+      - text: Both endpoints return up to
+      - strong [ref=f1e1264]: 1 000 events
+      - text: per call, ordered oldest to newest. An empty array means you have caught up and can resume live WebSocket processing. Events are retained for
+      - strong [ref=f1e1265]: 30 days
+      - text: ; if
+      - code [ref=f1e1266]: since_id
+      - text: is omitted the endpoint defaults to the
+      - strong [ref=f1e1267]: last 24 hours
+      - text: .
+    - paragraph [ref=f1e1268]:
+      - strong [ref=f1e1269]: Public order events
+      - text: —
+      - code [ref=f1e1270]: POST /api/v2/order_data/
+    - table [ref=f1e1272]:
+      - rowgroup [ref=f1e1273]:
+        - row [ref=f1e1274]:
+          - cell [ref=f1e1275]:
+            - strong [ref=f1e1276]: Parameter
+          - cell [ref=f1e1277]:
+            - strong [ref=f1e1278]: Required
+          - cell [ref=f1e1279]:
+            - strong [ref=f1e1280]: Description
+      - rowgroup [ref=f1e1281]:
+        - row [ref=f1e1282]:
+          - cell [ref=f1e1283]:
+            - strong [ref=f1e1284]: market
+          - cell "Yes" [ref=f1e1285]
+          - cell [ref=f1e1286]:
+            - text: Market symbol, e.g.
+            - code [ref=f1e1287]: BTC/USD
+            - text: .
+        - row [ref=f1e1288]:
+          - cell [ref=f1e1289]:
+            - strong [ref=f1e1290]: since_id
+          - cell "No" [ref=f1e1291]
+          - cell [ref=f1e1292]:
+            - text: Return events starting from this
+            - code [ref=f1e1293]: event_id
+            - text: (inclusive). Defaults to 24 h before
+            - code [ref=f1e1294]: until_id
+            - text: .
+        - row [ref=f1e1295]:
+          - cell [ref=f1e1296]:
+            - strong [ref=f1e1297]: until_id
+          - cell "No" [ref=f1e1298]
+          - cell [ref=f1e1299]:
+            - text: Return events up to this
+            - code [ref=f1e1300]: event_id
+            - text: (exclusive). Defaults to now.
+    - paragraph [ref=f1e1301]:
+      - strong [ref=f1e1302]: Private order events
+      - text: —
+      - code [ref=f1e1303]: POST /api/v2/account_order_data/
+    - table [ref=f1e1305]:
+      - rowgroup [ref=f1e1306]:
+        - row [ref=f1e1307]:
+          - cell [ref=f1e1308]:
+            - strong [ref=f1e1309]: Parameter
+          - cell [ref=f1e1310]:
+            - strong [ref=f1e1311]: Required
+          - cell [ref=f1e1312]:
+            - strong [ref=f1e1313]: Description
+      - rowgroup [ref=f1e1314]:
+        - row [ref=f1e1315]:
+          - cell [ref=f1e1316]:
+            - strong [ref=f1e1317]: order_source
+          - cell "Yes" [ref=f1e1318]
+          - cell [ref=f1e1319]:
+            - code [ref=f1e1320]: orderbook
+            - text: ","
+            - code [ref=f1e1321]: stop_order
+            - text: or
+            - code [ref=f1e1322]: tokenized_securities
+            - text: . Must match the source embedded in the
+            - code [ref=f1e1323]: event_id
+            - text: you are recovering.
+        - row [ref=f1e1324]:
+          - cell [ref=f1e1325]:
+            - strong [ref=f1e1326]: market
+          - cell "Yes" [ref=f1e1327]
+          - cell [ref=f1e1328]:
+            - text: Market symbol, e.g.
+            - code [ref=f1e1329]: BTC/USD
+            - text: .
+        - row [ref=f1e1330]:
+          - cell [ref=f1e1331]:
+            - strong [ref=f1e1332]: since_id
+          - cell "No" [ref=f1e1333]
+          - cell [ref=f1e1334]:
+            - text: Return events starting from this
+            - code [ref=f1e1335]: event_id
+            - text: (inclusive). Defaults to 24 h before
+            - code [ref=f1e1336]: until_id
+            - text: .
+        - row [ref=f1e1337]:
+          - cell [ref=f1e1338]:
+            - strong [ref=f1e1339]: until_id
+          - cell "No" [ref=f1e1340]
+          - cell [ref=f1e1341]:
+            - text: Return events up to this
+            - code [ref=f1e1342]: event_id
+            - text: (exclusive). Defaults to now.
+    - paragraph [ref=f1e1343]:
+      - strong [ref=f1e1344]: "Note:"
+      - text: Live WebSocket messages carry
+      - code [ref=f1e1345]: event_id
+      - text: and
+      - code [ref=f1e1346]: pre_event_id
+      - text: at the
+      - strong [ref=f1e1347]: top level
+      - text: of the message object (not inside
+      - code [ref=f1e1348]: data
+      - text: ). REST recovery responses also return
+      - code [ref=f1e1349]: event_id
+      - text: at the top level of each event in the array. Pass the
+      - code [ref=f1e1350]: event_id
+      - text: value from either source as
+      - code [ref=f1e1351]: since_id
+      - text: to page through missed events.
+    - paragraph [ref=f1e1352]:
+      - text: To page through more than 1 000 events, repeat the request with the
+      - code [ref=f1e1353]: event_id
+      - text: (from the REST response top level) of the last returned event as the new
+      - code [ref=f1e1354]: since_id
+      - text: until the response is empty.
+  - contentinfo [ref=f1e1355]:
+    - generic [ref=f1e1356]:
+      - generic [ref=f1e1357]:
+        - generic [ref=f1e1358]:
+          - heading "About" [level=3] [ref=f1e1359]
+          - link "Who We Are" [ref=f1e1360] [cursor=pointer]:
+            - /url: /about-us/
+          - link "The Bitstamp + Robinhood Way" [ref=f1e1361] [cursor=pointer]:
+            - /url: /bitstamp-way/
+          - link "Careers" [ref=f1e1362] [cursor=pointer]:
+            - /url: https://bitstamp.workable.com/
+          - link "Legal & Privacy" [ref=f1e1363] [cursor=pointer]:
+            - /url: /legal/
+          - link "Legal & Privacy - USA" [ref=f1e1364] [cursor=pointer]:
+            - /url: /legal/usa-inc/
+          - link "Fee Schedule" [ref=f1e1365] [cursor=pointer]:
+            - /url: /fee-schedule/
+          - link "FAQ" [ref=f1e1366] [cursor=pointer]:
+            - /url: /faq/
+        - generic [ref=f1e1367]:
+          - heading "Products" [level=3] [ref=f1e1368]
+          - link "Mobile App" [ref=f1e1369] [cursor=pointer]:
+            - /url: /mobile/
+          - link "Tradeview" [ref=f1e1370] [cursor=pointer]:
+            - /url: /market/tradeview/
+          - link "Pro" [ref=f1e1371] [cursor=pointer]:
+            - /url: /pro/
+          - link "Earn Stake" [ref=f1e1372] [cursor=pointer]:
+            - /url: /crypto-staking/
+          - link "Earn Lend" [ref=f1e1373] [cursor=pointer]:
+            - /url: /crypto-lending/
+        - generic [ref=f1e1374]:
+          - heading "Institutional" [level=3] [ref=f1e1375]
+          - link "Institutional offering" [ref=f1e1376] [cursor=pointer]:
+            - /url: /institutional-trading/
+          - link "Bitstamp as a Service" [ref=f1e1377] [cursor=pointer]:
+            - /url: /bitstamp-as-a-service/
+          - link "Derivatives" [ref=f1e1378] [cursor=pointer]:
+            - /url: /perpetual-futures/
+          - link "Tokenized assets" [ref=f1e1379] [cursor=pointer]:
+            - /url: /robinhood-stock-tokens-via-bitstamp/
+          - link "Partners" [ref=f1e1380] [cursor=pointer]:
+            - /url: /partners/
+        - generic [ref=f1e1381]:
+          - heading "Resources" [level=3] [ref=f1e1382]
+          - link "API Documentation" [ref=f1e1383] [cursor=pointer]:
+            - /url: /api/
+          - link "PGP Key" [ref=f1e1384] [cursor=pointer]:
+            - /url: /pgp-key/
+          - link "Lightning Network" [ref=f1e1385] [cursor=pointer]:
+            - /url: /lightning-network-node/
+          - link "Crypto Pulse" [ref=f1e1386] [cursor=pointer]:
+            - /url: /crypto-pulse/
+          - link "Market Details" [ref=f1e1387] [cursor=pointer]:
+            - /url: /market-details/
+        - generic [ref=f1e1388]:
+          - heading "Address" [level=3] [ref=f1e1389]
+          - generic [ref=f1e1390]:
+            - generic [ref=f1e1391]: Bitstamp Ltd.
+            - generic [ref=f1e1392]: 5 New Street Square
+            - generic [ref=f1e1393]: London, EC4A 3TW
+            - generic [ref=f1e1394]: United Kingdom
+        - generic [ref=f1e1395]:
+          - heading "Contact" [level=3] [ref=f1e1396]
+          - link "Customer support" [ref=f1e1397] [cursor=pointer]:
+            - /url: /customer-support/
+          - link "info@bitstamp.net" [ref=f1e1398] [cursor=pointer]:
+            - /url: mailto:info@bitstamp.net
+          - link "press@bitstamp.net" [ref=f1e1399] [cursor=pointer]:
+            - /url: mailto:press@bitstamp.net
+          - link "support@bitstamp.net" [ref=f1e1400] [cursor=pointer]:
+            - /url: mailto:support@bitstamp.net
+          - link "complaints@bitstamp.net" [ref=f1e1401] [cursor=pointer]:
+            - /url: mailto:complaints@bitstamp.net
+          - link "+44 20 3868 9628" [ref=f1e1402] [cursor=pointer]:
+            - /url: tel:+442038689628
+          - link "+1 800 712 5702" [ref=f1e1403] [cursor=pointer]:
+            - /url: tel:+18007125702
+          - link "+352 20 88 10 96" [ref=f1e1404] [cursor=pointer]:
+            - /url: tel:+35220881096
+          - link:
+            - /url: "tel:"
+      - generic [ref=f1e1405]:
+        - generic [ref=f1e1406]:
+          - link "twitter" [ref=f1e1407] [cursor=pointer]:
+            - /url: https://x.com/RobinhoodCrypto
+          - link "linkedin" [ref=f1e1411] [cursor=pointer]:
+            - /url: https://www.linkedin.com/company/bitstamp
+          - link "facebook" [ref=f1e1414] [cursor=pointer]:
+            - /url: https://www.facebook.com/Bitstamp
+          - link "instagram" [ref=f1e1417] [cursor=pointer]:
+            - /url: https://www.instagram.com/bitstampexchange
+        - generic [ref=f1e1421]:
+          - img "visa"
+          - img "mastercard"
+          - img "maestro"
+          - img "Apple Pay"
+          - img "Google Pay"
+      - generic [ref=f1e1426]:
+        - generic [ref=f1e1427]:
+          - paragraph [ref=f1e1428]:
+            - text: Please read the general
+            - link "Risk Warning" [ref=f1e1429] [cursor=pointer]:
+              - /url: /legal/risk-warning/
+            - text: ", and"
+            - link "Risk Summary" [ref=f1e1430] [cursor=pointer]:
+              - /url: /legal/uk-investment-risk-warning/
+            - text: for UK residents before investing in crypto-assets.
+          - paragraph [ref=f1e1431]: "Crypto-assets services are provided by the following Bitstamp legal entities depending on client residency: (1) Bitstamp Europe S.A., which is authorized by the Commission de Surveillance du Secteur Financier (CSSF) in Luxembourg as a payment institution (licence number Z00000012) and crypto-asset service provider (licence number N00000003); Registered address: 40, avenue Monterey, L-2163 Luxembourg, Grand Duchy of Luxembourg; Registration number: B196856; (2) Bitstamp UK Ltd., which is registered with the Financial Conduct Authority (FCA) in the UK for the provision of certain cryptoassets activities under the Money Laundering Regulations (Firm Reference Number 978690); Registered address: 5 New Street Square, EC4A 3TW London, United Kingdom; Registration number: 14174243; (3) Bitstamp Ltd.with its registered address at 5 New Street Square, EC4A 3TW London, United Kingdom and registration number: 8157033; (4) Bitstamp Global Ltd., which is registered as a Virtual Asset Service Provider in the British Virgin Islands and is supervised by the British Virgin Islands Financial Services Commission (FSC); Registered address: Floor 4, Banco Popular Building, Road Town, Tortola VG1110, British Virgin Islands; Registered number: 2086429; and (5) Bitstamp Asia Pte Ltd, which is authorized by the Monetary Authority of Singapore (MAS) as a major payment institution (licence number PS20200667); Registered address: 21 Collyer Quay, Level 11, Singapore 049320 (Suite 11-101); Registered number: 202016687K;"
+          - paragraph [ref=f1e1432]:
+            - text: Virtual currency services to US residents are provided by Bitstamp USA, Inc., which is licensed to engage in virtual currency business activity by the New York State Department of Financial Services. Licensed as a Money Transmitter by the New York State Department of Financial Services. Review a
+            - link "list of its licenses and other registrations" [ref=f1e1433] [cursor=pointer]:
+              - /url: /legal/usa-inc/
+            - text: (NMLS number
+            - link "1905429" [ref=f1e1434] [cursor=pointer]:
+              - /url: https://www.nmlsconsumeraccess.org/EntityDetails.aspx/COMPANY/1905429
+            - text: ") for more information; Registered address: 85 Willow Road, Menlo Park, CA 94025, United States of America; Registered number: 5481543."
+          - paragraph [ref=f1e1435]:
+            - text: "Investment services with regards to trading in derivatives are provided by Bitstamp Financial Services Ltd., Dalmatinova ulica 2, 1000 Ljubljana, Slovenia (Reg. No: 9776745000; VAT ID: SI59825707; Share Capital: 3,450,000.00 EUR) (BFS). BFS is authorized and supervised by the Slovenian Securities Market Agency (ATVP) as a MiFiD investment firm. Trading derivatives carries significant risks and may result in substantial losses. Please trade responsibly and ensure you understand the associated risks; refer to our"
+            - link "Contract Specifications" [ref=f1e1436] [cursor=pointer]:
+              - /url: /derivatives/perpetual-futures/contract-specifications/
+            - text: ","
+            - link "General Terms and Conditions" [ref=f1e1437] [cursor=pointer]:
+              - /url: /legal/financial-services/general-terms-and-conditions/
+            - text: and
+            - link "Key Information Documents (KIDs)" [ref=f1e1438] [cursor=pointer]:
+              - /url: /derivatives/key-information-documents/
+            - text: for specific contract details and risk disclosures. Derivatives trading is not available to customers in certain jurisdictions. BFS does not provide crypto-asset services.
+          - paragraph [ref=f1e1439]:
+            - text: To find out more about which Bitstamp entity you receive services from, please check the Profile/My information in your Bitstamp account. You can read more about our legal terms, policies and disclosures
+            - link "here" [ref=f1e1440] [cursor=pointer]:
+              - /url: /legal/
+            - text: .
+        - generic [ref=f1e1441]:
+          - text: All rights reserved © 2026 Bitstamp by Robinhood.
+          - 'link "NMLS #1905429" [ref=f1e1442] [cursor=pointer]':
+            - /url: https://www.nmlsconsumeraccess.org/EntityDetails.aspx/COMPANY/1905429
+  - generic [ref=f1e1444]:
+    - generic [ref=f1e1445]:
+      - text: We use cookies and similar technologies to operate core site features, customize core services, analyze our traffic, and for security and marketing. Accept all cookies, customize your settings or read our full
+      - link "Cookie Policy" [ref=f1e1446] [cursor=pointer]:
+        - /url: /legal/cookie-statement/
+      - text: .
+    - generic [ref=f1e1447]:
+      - button "Customize" [ref=f1e1448] [cursor=pointer]
+      - button "Enable all" [ref=f1e1449] [cursor=pointer]

@@ -1,0 +1,17 @@
+[    8208ms] [ERROR] Docusaurus React Root onRecoverableError: Error: Minified React error #418; visit https://react.dev/errors/418?args[]=HTML&args[]= for the full message or use the non-minified dev environment for full errors and additional helpful warnings.
+    at ba (https://exchange-developer.crypto.com/exchange/v1/assets/js/main.91d625bb.js:2:423900)
+    at cc (https://exchange-developer.crypto.com/exchange/v1/assets/js/main.91d625bb.js:2:473275)
+    at pu (https://exchange-developer.crypto.com/exchange/v1/assets/js/main.91d625bb.js:2:511254)
+    at du (https://exchange-developer.crypto.com/exchange/v1/assets/js/main.91d625bb.js:2:511226)
+    at https://exchange-developer.crypto.com/exchange/v1/assets/js/main.91d625bb.js:2:506343
+    at Jl (https://exchange-developer.crypto.com/exchange/v1/assets/js/main.91d625bb.js:2:506441)
+    at $u (https://exchange-developer.crypto.com/exchange/v1/assets/js/main.91d625bb.js:2:522320)
+    at MessagePort.R (https://exchange-developer.crypto.com/exchange/v1/assets/js/main.91d625bb.js:2:608182) {componentStack: 
+    at span (<anonymous>)
+    at span (<anonymous…/exchange/v1/assets/js/main.91d625bb.js:2:575125)} @ https://exchange-developer.crypto.com/exchange/v1/assets/js/main.91d625bb.js:1
+[   13953ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://exchange-developer.crypto.com/fcm-b2c/v1/docs/api/fix-introduction/:0
+[   14143ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://exchange-developer.crypto.com/fcm-b2c-margined/v1/docs/api/fix-introduction/:0
+[   14908ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://exchange-developer.crypto.com/fcm-non-us-margined/v1/docs/api/fix-introduction/:0
+[   14909ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://exchange-developer.crypto.com/fcm-non-us-margined/v1/docs/api/rest-introduction/:0
+[   14909ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://exchange-developer.crypto.com/exchange-caas/v1/docs/api/rest-introduction/:0
+[   14910ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://exchange-developer.crypto.com/exchange-caas/v1/docs/api/websocket-introduction/:0
