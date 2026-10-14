@@ -720,6 +720,9 @@ impl Chart {
             .map(|h| if nt == self.tf { h.to_vec() } else { resample(h, self.tf) });
         let loading_tf = nt > 1 && tf_hist.is_none();
         if let (Some(h), Some(first)) = (tf_hist.as_deref(), raw.first()) { bars = stitch(h, bars, first.t, self.tf); }
+        // a cross-venue bar opened by trades before any index price exists has no OHLC yet: a zero
+        // low would stretch the price axis to 0
+        bars.retain(|b| b.l > 0.0 && b.c > 0.0);
         if bars.is_empty() { ui.centered_and_justified(|ui| ui.label(t("chart.empty"))); return; }
         // bar replay: advance while playing, then hide every bar after the replay bar
         let now = ui.input(|i| i.time);
