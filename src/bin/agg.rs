@@ -163,6 +163,15 @@ async fn main() {
         let worst = steps.iter().copied().fold(0.0, f64::max);
         println!("largest minute-to-minute cross-venue OI step: {:.3}%", worst * 100.0);
         if worst > 0.03 { bad.push(format!("cross-venue OI jumps {:.1}% between minutes", worst * 100.0)); }
+        // panic index replayed over the window: it should rise into sell-offs and fall into rallies
+        let bars: Vec<agg::Bar> = s.bars.iter().cloned().collect();
+        println!("panic index replay (every 30m): t, close, 1h return, score, parts");
+        for i in (120..=bars.len()).step_by(30).chain([bars.len()]) {
+            let Some(p) = agg::panic(&bars[..i]) else { continue };
+            let r = bars[i - 1].c / bars[i - 61].c - 1.0;
+            let parts: Vec<String> = p.parts.iter().map(|(k, v)| format!("{k} {:.0}", v * 100.0)).collect();
+            println!("  t-{:>4.0}m {:>10.1} {:>+6.2}% {:>5.1}  {}", (now_ms() - bars[i - 1].t) as f64 / 6e4, bars[i - 1].c, r * 100.0, p.score, parts.join(", "));
+        }
         if s.bars.len() < 900 { bad.push(format!("only {} cross-venue perp bars after history", s.bars.len())); }
         if let (Some(b), (oi, _)) = (s.bars.back(), agg.oi_total()) {
             if b.oi.is_none_or(|x| (x / oi - 1.0).abs() > 0.1) { bad.push(format!("series OI {:?} vs live OI total {oi:.0}", b.oi)); }

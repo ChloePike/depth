@@ -1087,6 +1087,44 @@ impl Agg {
     }
 }
 
+/// Panic index from the cross-venue perp 1m bars: each component's latest value ranked against the
+/// same component at every earlier minute of the window (0 = calmest seen, 1 = most panicked), then
+/// averaged. 50 is ordinary for the window, high is fear, low is greed.
+/// ponytail: relative to the loaded window (~16 h at start, up to BAR_CAP), so a day-long crash
+/// reads as ordinary by its end; anchor to a longer REST history if an absolute level matters.
+pub struct Panic { pub score: f64, pub parts: Vec<(&'static str, f64)> }
+
+pub fn panic(bars: &[Bar]) -> Option<Panic> {
+    const LONG: usize = 60;
+    const SHORT: usize = 15;
+    let n = bars.len();
+    if n < LONG + 60 { return None; }
+    let sum = |i: usize, f: &dyn Fn(&Bar) -> f64| bars[i + 1 - SHORT..=i].iter().map(f).sum::<f64>();
+    let ratio = |a: f64, b: f64| (b > 0.0).then(|| a / b);
+    // each feature points toward panic: bigger = more fear
+    let feats: [(&'static str, &dyn Fn(usize) -> Option<f64>); 6] = [
+        ("Price 1h", &|i| ratio(bars[i].c, bars[i - LONG].c).filter(|_| bars[i].c > 0.0).map(|r| 1.0 - r)),
+        ("OI 1h", &|i| ratio(bars[i].oi?, bars[i - LONG].oi?).map(|r| 1.0 - r)),
+        ("Taker sell 15m", &|i| ratio(sum(i, &|b| b.sell - b.buy), sum(i, &|b| b.buy + b.sell))),
+        ("Long liquidations 15m", &|i| ratio(sum(i, &|b| b.liq_long - b.liq_short), sum(i, &|b| b.vol))),
+        // live predicted rate only: history carries the settled step line, a different series
+        ("Funding", &|i| bars[i].funding_h.map(|f| -f)),
+        // 1m basis is mostly quote noise; 15m mean
+        ("Basis", &|i| { let v: Vec<f64> = bars[i + 1 - SHORT..=i].iter().filter_map(|b| b.basis_bps).collect(); (!v.is_empty()).then(|| -v.iter().sum::<f64>() / v.len() as f64) }),
+    ];
+    let mut parts = vec![];
+    for (name, f) in feats {
+        let Some(now) = f(n - 1) else { continue };
+        let base: Vec<f64> = (LONG..n - 1).filter_map(|i| f(i)).collect();
+        // liquidations have no history: all-zero minutes from REST would rank any live print at 100
+        if base.len() < 60 || (name == "Long liquidations 15m" && base.iter().filter(|x| **x != 0.0).count() < 60) { continue; }
+        let below = base.iter().filter(|x| **x < now).count() as f64;
+        let ties = base.iter().filter(|x| **x == now).count() as f64;
+        parts.push((name, (below + ties / 2.0) / base.len() as f64));
+    }
+    (parts.len() >= 3).then(|| Panic { score: 100.0 * parts.iter().map(|p| p.1).sum::<f64>() / parts.len() as f64, parts })
+}
+
 /// 1, 2, 2.5, 5 x 10^k at or above x
 pub fn nice(x: f64) -> f64 {
     let m = 10f64.powf(x.log10().floor());
@@ -1095,6 +1133,19 @@ pub fn nice(x: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn panic_peaks_in_a_crash() {
+        use super::*;
+        let bar = |t: i64, c: f64, oi: f64, sell: f64| Bar { t, o: c, h: c, l: c, c, vol: 10.0, buy: 10.0 - sell, sell, oi: Some(oi), funding_h: Some((c - 99.0) * 1e-5), basis_bps: Some(c - 98.0), ..Default::default() };
+        let mut bars: Vec<Bar> = (0..600).map(|i| bar(i * BAR_MS, 100.0 + (i % 7) as f64 * 0.1, 1000.0 + (i % 5) as f64, 5.0 + (i % 3) as f64 - 1.0)).collect();
+        assert!((30.0..70.0).contains(&panic(&bars).unwrap().score));
+        for k in 0..60 { bars.push(bar((600 + k) * BAR_MS, 100.0 - k as f64 * 0.1, 1000.0 - k as f64, 9.0)); }
+        assert!(panic(&bars).unwrap().score > 90.0);
+        for k in 0..60 { bars.push(bar((660 + k) * BAR_MS, 94.0 + k as f64 * 0.2, 940.0 + k as f64 * 2.0, 1.0)); }
+        assert!(panic(&bars).unwrap().score < 20.0);
+        assert!(panic(&bars[..100]).is_none());
+    }
 
     #[test]
     fn footprint_bins_buys_and_sells_per_minute() {

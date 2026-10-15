@@ -98,7 +98,7 @@ impl StockMarket {
 
 /// Header state: last composite price with its tick direction and flash.
 #[derive(Default)]
-pub struct TopBar { last: Option<f64>, dir: i8, flash: Option<Instant> }
+pub struct TopBar { last: Option<f64>, dir: i8, flash: Option<Instant>, panic: (i64, Option<depth::agg::Panic>) }
 
 const FLASH: f32 = 0.45;
 
@@ -178,6 +178,73 @@ impl TopBar {
         if mode != Market::Option {
             stat(ui, l("CVD"), &[(f("cvd").map(|x| signed(x, 1)).unwrap_or("–".into()), sign(f("cvd")))]);
         }
+    }
+
+    /// Intraday panic index (own, cross-venue perps, recomputed every 5 s) next to the market-wide
+    /// daily Fear & Greed from alternative.me (inverted so both read high = fear).
+    pub fn panic(&mut self, ui: &mut Ui, a: &depth::agg::Agg, fng: Option<(f64, String)>) {
+        let slot = depth::now_ms() / 5_000;
+        if self.panic.0 != slot {
+            let bars: Vec<depth::agg::Bar> = a.series.get(&(None, Market::Perp)).map(|s| s.bars.iter().cloned().collect()).unwrap_or_default();
+            self.panic = (slot, depth::agg::panic(&bars));
+        }
+        let fear = |x: f64| if x >= 75.0 { dn() } else if x <= 25.0 { up() } else { fg() };
+        let mut parts: Vec<(String, egui::FontId, Color32)> = vec![(l("Panic").into(), prop_m(12.0), mu())];
+        let score = self.panic.1.as_ref().map(|p| p.score);
+        parts.push((score.map(|x| format!("{x:.0}")).unwrap_or("–".into()), mono_m(12.0), score.map(fear).unwrap_or(dim())));
+        if let Some((g, _)) = &fng {
+            parts.push((l("Market").into(), prop_m(12.0), mu()));
+            parts.push((format!("{:.0}", 100.0 - g), mono_m(12.0), fear(100.0 - g)));
+        }
+        let gs: Vec<_> = parts.into_iter().map(|(t, f, c)| ui.painter().layout_no_wrap(t, f, c)).collect();
+        let w: f32 = gs.iter().map(|g| g.size().x).sum::<f32>() + 5.0 * (gs.len() - 1) as f32 + 4.0 * (gs.len() / 2 - 1) as f32;
+        let (r, resp) = ui.allocate_exact_size(vec2(w + 16.0, 30.0), Sense::hover());
+        let mut x = r.left() + 8.0;
+        for (i, g) in gs.into_iter().enumerate() {
+            let gw = g.size().x;
+            ui.painter().galley(pos2(x, r.center().y - g.size().y / 2.0), g, fg());
+            x += gw + 5.0 + if i % 2 == 1 { 4.0 } else { 0.0 };
+        }
+        let p = self.panic.1.as_ref();
+        resp.on_hover_ui(|ui| {
+            ui.set_max_width(300.0);
+            ui.label(egui::RichText::new(l("Panic index, 0 calm to 100 panic")).font(prop_s(12.0)).color(fg_strong()));
+            ui.label(egui::RichText::new(l("Cross-venue perps ranked against every minute of the loaded window (about 16 h at start, up to 7 days): it measures fear relative to the recent past, not an absolute level.")).font(prop(11.5)).color(mu()));
+            ui.add_space(4.0);
+            for (k, v) in p.map(|p| p.parts.as_slice()).unwrap_or_default() {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(l(k)).font(prop(12.0)).color(fg()));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(egui::RichText::new(format!("{:.0}", v * 100.0)).font(mono_m(12.0)).color(fear(v * 100.0))));
+                });
+            }
+            if p.is_none() { ui.label(egui::RichText::new(l("Waiting for an hour of perp history")).font(prop(12.0)).color(dim())); }
+            ui.add_space(4.0);
+            let fg_txt = match &fng { Some((g, c)) => format!("{} {:.0} ({c}) · {}", l("Market (alternative.me, daily):"), 100.0 - g, l("Fear & Greed inverted")), None => l("Market index unavailable").into() };
+            ui.label(egui::RichText::new(fg_txt).font(prop(11.5)).color(mu()));
+        });
+    }
+
+    /// Stock markets open right now.
+    pub fn open_now(ui: &mut Ui) {
+        let now = depth::now_ms();
+        let open: Vec<&str> = MARKETS.iter().filter(|m| m.status(now).0).map(|m| m.short).collect();
+        let txt = if open.is_empty() { l("All closed").to_string() } else { open.join(" · ") };
+        let lg = ui.painter().layout_no_wrap(l("Open").into(), prop_m(12.0), mu());
+        let tg = ui.painter().layout_no_wrap(txt, prop_m(12.0), if open.is_empty() { dim() } else { fg() });
+        let (r, resp) = ui.allocate_exact_size(vec2(lg.size().x + tg.size().x + 30.0, 30.0), Sense::hover());
+        let p = ui.painter();
+        let cy = r.center().y;
+        p.circle_filled(pos2(r.left() + 10.0, cy), 3.0, if open.is_empty() { dim() } else { up() });
+        let x = r.left() + 18.0;
+        p.galley(pos2(x, cy - lg.size().y / 2.0), lg.clone(), mu());
+        p.galley(pos2(x + lg.size().x + 5.0, cy - tg.size().y / 2.0), tg, fg());
+        resp.on_hover_text(l("Stock markets in their regular session now"));
+    }
+
+    /// Thin vertical divider between header groups.
+    pub fn divider(ui: &mut Ui) {
+        let (r, _) = ui.allocate_exact_size(vec2(9.0, 30.0), Sense::hover());
+        ui.painter().vline(r.center().x, r.shrink2(vec2(0.0, 8.0)).y_range(), egui::Stroke::new(1.0, line()));
     }
 
     /// The next stock market to open with a countdown; click for every market's session.

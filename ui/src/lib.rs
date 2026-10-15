@@ -339,6 +339,11 @@ impl App {
                 }
                 ui.add_space(6.0);
                 top::TopBar::clock(ui);
+                top::TopBar::divider(ui);
+                top::TopBar::open_now(ui);
+                top::TopBar::divider(ui);
+                let fng = self.eng.fng.lock().unwrap().clone();
+                self.top.panic(ui, a, fng);
             });
         });
         // stats strip, 44 px, hairline below; scrolls when the window is narrow

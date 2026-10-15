@@ -227,6 +227,9 @@ impl BookView {
         // exact, OKX inferred), mid-aligned onto the rows as the aggregated book is; a single
         // venue shows its own orders at raw prices
         let mut blocks: HashMap<(bool, i64), Vec<(f64, depth::l3::Src, Exchange, i64, bool)>> = HashMap::new();
+        // L4: each level's life-cycle events in the last minute, (adds, fills, cancels) as (count, qty)
+        let mut life: HashMap<(bool, i64), [(u32, f64); 3]> = HashMap::new();
+        let since = depth::now_ms() - 60_000;
         let feeds: Vec<(Exchange, Market)> = match self.src {
             None => [(Exchange::Lighter, Market::Perp), (Exchange::Okx, market), (Exchange::Hyperliquid, Market::Perp)].into_iter().filter(|(e, m)| *m == market && scope.contains(e)).collect(),
             Some(e @ (Exchange::Lighter | Exchange::Hyperliquid)) => vec![(e, Market::Perp)].into_iter().filter(|(_, m)| *m == market).collect(),
@@ -243,6 +246,15 @@ impl BookView {
                     blocks.entry((ask, key)).or_default().extend(orders.iter().map(|o| (o.qty, o.src, e, o.since, o.since_known)));
                 }
             }
+            for ev in b.events.iter().rev().take_while(|ev| ev.ts >= since) {
+                use depth::l3::Kind::*;
+                let i = match ev.kind { Add => 0, Fill | Partial => 1, Cancel => 2, Amend => continue };
+                let p = ev.px * k;
+                let key = if ev.bid { (p / bin).floor() } else { (p / bin).ceil() } as i64;
+                let c = &mut life.entry((!ev.bid, key)).or_default()[i];
+                c.0 += 1;
+                c.1 += ev.qty;
+            }
         }
         if !blocks.is_empty() {
             // what the thin strip under the rows is
@@ -256,6 +268,8 @@ impl BookView {
         let hover = ui.input(|i| i.pointer.hover_pos());
         // strings for the block tooltip (the row closure's `l` is a level)
         let (s_exact, s_inf, s_split, s_rest) = (l("exact"), l("inferred"), l("split estimate"), l("resting"));
+        let (s_orders, s_largest, s_oldest, s_l4) = (l("Orders at this level"), l("Largest orders"), l("Oldest order"), l("Last 60s"));
+        let s_kinds = [l("adds"), l("fills"), l("cancels")];
         let tip: std::cell::RefCell<Option<String>> = Default::default();
         let now = depth::now_ms();
         let row = |y: f32, l: &Level, c: f64, is_ask: bool| {
@@ -298,8 +312,7 @@ impl BookView {
                         if Rect::from_min_max(pos2(b.left(), r.top()), pos2(b.right(), r.bottom())).contains(h) {
                             painter.rect_filled(b, 1, fg_strong().gamma_multiply(0.5));
                             let (q, src, e, since, known) = &os[i];
-                            let age = (now - since).max(0) / 1000;
-                            let age = if age < 60 { format!("{age}s") } else if age < 3600 { format!("{}m {:02}s", age / 60, age % 60) } else { format!("{}h {:02}m", age / 3600, age % 3600 / 60) };
+                            let age = age(now - since);
                             let how = match src { depth::l3::Src::Exact => s_exact, depth::l3::Src::Inferred => s_inf, depth::l3::Src::Split => s_split };
                             *tip.borrow_mut() = Some(format!("{e:?} · {}\n{s_rest} {}{age} · {how}", qty_sig(*q), if *known { "" } else { "> " }));
                         }
@@ -311,12 +324,31 @@ impl BookView {
             painter.text(pos2(x_px, cy), Align2::LEFT_CENTER, fmt_dp(l.px, dp), mono_m(12.0), col);
             painter.text(pos2(x_size, cy), Align2::RIGHT_CENTER, fs(size(l)), mono(12.0), fg());
             painter.text(pos2(x_tot, cy), Align2::RIGHT_CENTER, ft(c), mono(12.0), mu());
-            // hovering a row of the aggregate: where its size rests (an order block's tooltip wins)
-            if l.by.len() > 1 && hover.is_some_and(|h| r.contains(h)) && tip.borrow().is_none() {
-                let total = l.qty.max(1e-12);
-                let mut by: Vec<&(Exchange, f64)> = l.by.iter().collect();
-                by.sort_by(|x, y| y.1.total_cmp(&x.1));
-                *tip.borrow_mut() = Some(by.iter().map(|(e, q)| format!("{e:?}  {}  {:.0}%", qty_sig(*q), q / total * 100.0)).collect::<Vec<_>>().join("\n"));
+            // hovering a row: where its size rests across venues, then its L3 orders and L4 events
+            // (an order block's tooltip wins)
+            if hover.is_some_and(|h| r.contains(h)) && tip.borrow().is_none() {
+                let mut lines: Vec<String> = vec![];
+                if l.by.len() > 1 {
+                    let total = l.qty.max(1e-12);
+                    let mut by: Vec<&(Exchange, f64)> = l.by.iter().collect();
+                    by.sort_by(|x, y| y.1.total_cmp(&x.1));
+                    lines.extend(by.iter().map(|(e, q)| format!("{e:?}  {}  {:.0}%", qty_sig(*q), q / total * 100.0)));
+                }
+                let key = (is_ask, (l.px / bin).round() as i64);
+                if let Some(os) = blocks.get(&key) {
+                    let known: Vec<_> = os.iter().filter(|o| o.1 != depth::l3::Src::Split).collect();
+                    let exact = known.iter().filter(|o| o.1 == depth::l3::Src::Exact).count();
+                    let how = if exact == known.len() { s_exact } else if exact == 0 { s_inf } else { "" };
+                    lines.push(format!("{s_orders}  {}  {how}", os.len()));
+                    let mut qs: Vec<f64> = known.iter().map(|o| o.0).collect();
+                    qs.sort_by(|a, b| b.total_cmp(a));
+                    if !qs.is_empty() { lines.push(format!("{s_largest}  {}", qs.iter().take(3).map(|q| qty_sig(*q)).collect::<Vec<_>>().join("  "))); }
+                    if let Some(o) = known.iter().min_by_key(|o| o.3) { lines.push(format!("{s_oldest}  {}{}  {}", if o.4 { "" } else { "> " }, age(now - o.3), qty_sig(o.0))); }
+                }
+                if let Some(c) = life.get(&key) {
+                    lines.push(format!("{s_l4}  {}", (0..3).filter(|i| c[*i].0 > 0).map(|i| format!("{} {} {}", s_kinds[i], c[i].0, qty_sig(c[i].1))).collect::<Vec<_>>().join("  ")));
+                }
+                if !lines.is_empty() { *tip.borrow_mut() = Some(lines.join("\n")); }
             }
         };
         let top = rect.top() + HEAD;
@@ -538,6 +570,12 @@ impl BookView {
 }
 
 /// Order size with enough decimals to show it (0.00012 stays visible, 12.5 does not grow digits).
+/// 42s / 3m 05s / 2h 07m
+fn age(ms: i64) -> String {
+    let s = ms.max(0) / 1000;
+    if s < 60 { format!("{s}s") } else if s < 3600 { format!("{}m {:02}s", s / 60, s % 60) } else { format!("{}h {:02}m", s / 3600, s % 3600 / 60) }
+}
+
 fn qty_sig(q: f64) -> String { let d = if q > 0.0 { (3.0 - q.log10().floor()).clamp(0.0, 8.0) as usize } else { 2 }; fmt_dp(q, d) }
 
 

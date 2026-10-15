@@ -216,6 +216,8 @@ pub struct Engine {
     pub tickers: Arc<Mutex<Vec<Ticker>>>,
     /// (venue, "BTCUSDT") -> funding, for every listed perp (positions in symbols not on screen)
     pub funding: Arc<Mutex<HashMap<(Exchange, String), VenueFunding>>>,
+    /// alternative.me crypto Fear & Greed (0 fear .. 100 greed, daily) and its label
+    pub fng: Arc<Mutex<Option<(f64, String)>>>,
     /// detected signals for the current base (quant::detect every 5 s, per-kind cooldown)
     pub signals: Arc<Mutex<depth::quant::Feed>>,
     /// private trading state (kept across base switches)
@@ -247,7 +249,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new() -> Self {
-        Engine { agg: Default::default(), stats: Default::default(), base: String::new(), rt: None, tx: None, started: vec![], tfs: vec![], venue_tasks: HashMap::new(), tickers: Default::default(), funding: Default::default(), signals: Default::default(), account: {
+        Engine { agg: Default::default(), stats: Default::default(), base: String::new(), rt: None, tx: None, started: vec![], tfs: vec![], venue_tasks: HashMap::new(), tickers: Default::default(), funding: Default::default(), fng: Default::default(), signals: Default::default(), account: {
             let mut a = Account::default();
             for ex in trade::TRADABLE { if let Some(k) = trade::keychain(ex) { a.keys.insert(ex, k); } }
             Arc::new(Mutex::new(a))
@@ -418,6 +420,20 @@ impl Engine {
                 if !f.is_empty() { funding.lock().unwrap().extend(f); }
             }
         });
+
+        // market-wide daily Fear & Greed, the absolute anchor next to the intraday panic index
+        let fng = self.fng.clone();
+        rt.spawn(depth::ws::poll("fear & greed".into(), Duration::from_secs(3600), move || {
+            let fng = fng.clone();
+            async move {
+                let v = depth::ws::get_json("https://api.alternative.me/fng/?limit=1").await?;
+                let d = &v["data"][0];
+                if let Some(x) = d["value"].as_str().and_then(|x| x.parse().ok()) {
+                    *fng.lock().unwrap() = Some((x, d["value_classification"].as_str().unwrap_or_default().to_string()));
+                }
+                Ok(())
+            }
+        }));
 
         // live last / 24h change between REST refreshes: Binance futures leads `all_tickers`, so its
         // all-market mini ticker (changed symbols, 1/s, no weight) updates the same rows in place
