@@ -197,18 +197,32 @@ impl TopBar {
             parts.push((format!("{:.0}", 100.0 - g), mono_m(12.0), fear(100.0 - g)));
         }
         let gs: Vec<_> = parts.into_iter().map(|(t, f, c)| ui.painter().layout_no_wrap(t, f, c)).collect();
-        let w: f32 = gs.iter().map(|g| g.size().x).sum::<f32>() + 5.0 * (gs.len() - 1) as f32 + 4.0 * (gs.len() / 2 - 1) as f32;
+        const GW: f32 = 26.0;
+        let w: f32 = gs.iter().map(|g| g.size().x).sum::<f32>() + 5.0 * (gs.len() - 1) as f32 + 4.0 * (gs.len() / 2 - 1) as f32 + GW + 5.0;
         let (r, resp) = ui.allocate_exact_size(vec2(w + 16.0, 30.0), Sense::hover());
         let mut x = r.left() + 8.0;
         for (i, g) in gs.into_iter().enumerate() {
             let gw = g.size().x;
             ui.painter().galley(pos2(x, r.center().y - g.size().y / 2.0), g, fg());
             x += gw + 5.0 + if i % 2 == 1 { 4.0 } else { 0.0 };
+            if i == 0 {
+                gauge(ui.painter(), pos2(x + GW / 2.0, r.center().y + 6.0), GW / 2.0, score, 2.5);
+                x += GW + 5.0;
+            }
         }
         let p = self.panic.1.as_ref();
         resp.on_hover_ui(|ui| {
             ui.set_max_width(300.0);
             ui.label(egui::RichText::new(l("Panic index, 0 calm to 100 panic")).font(prop_s(12.0)).color(fg_strong()));
+            // two dials: intraday (own) and market-wide daily
+            let (r, _) = ui.allocate_exact_size(vec2(280.0, 92.0), Sense::hover());
+            let mkt = fng.as_ref().map(|f| 100.0 - f.0);
+            for (k, (v, cap)) in [(score, l("Short-term")), (mkt, l("Market"))].into_iter().enumerate() {
+                let c = pos2(r.left() + 70.0 + k as f32 * 140.0, r.top() + 60.0);
+                gauge(ui.painter(), c, 52.0, v, 7.0);
+                ui.painter().text(c + vec2(0.0, -14.0), Align2::CENTER_CENTER, v.map(|x| format!("{x:.0}")).unwrap_or("–".into()), display_s(22.0), v.map(fear).unwrap_or(dim()));
+                ui.painter().text(c + vec2(0.0, 20.0), Align2::CENTER_CENTER, cap, prop_m(11.5), mu());
+            }
             ui.label(egui::RichText::new(l("Cross-venue perps ranked against every minute of the loaded window (about 16 h at start, up to 7 days): it measures fear relative to the recent past, not an absolute level.")).font(prop(11.5)).color(mu()));
             ui.add_space(4.0);
             for (k, v) in p.map(|p| p.parts.as_slice()).unwrap_or_default() {
@@ -283,6 +297,23 @@ impl TopBar {
                     p.text(pos2(r.right() - 10.0, cy), Align2::RIGHT_CENTER, left(until - now), mono_m(12.5), if open { fg_strong() } else { mu() });
                 }
             });
+    }
+}
+
+/// Half-circle dial, greed (left, up color) to panic (right, down color), with a needle at `v` (0..100).
+fn gauge(p: &egui::Painter, c: egui::Pos2, rad: f32, v: Option<f64>, w: f32) {
+    const N: usize = 40;
+    let at = |t: f32, r: f32| { let a = std::f32::consts::PI * (1.0 - t); c + vec2(a.cos(), -a.sin()) * r };
+    for i in 0..N {
+        let (t0, t1) = (i as f32 / N as f32, (i + 1) as f32 / N as f32);
+        let col = if t0 < 0.5 { lerp(up(), WARN, t0 * 2.0) } else { lerp(WARN, dn(), t0 * 2.0 - 1.0) };
+        let col = if v.is_some() { col } else { dim() };
+        p.line_segment([at(t0, rad - w / 2.0), at(t1, rad - w / 2.0)], egui::Stroke::new(w, col.gamma_multiply(0.85)));
+    }
+    if let Some(v) = v {
+        let t = (v / 100.0).clamp(0.0, 1.0) as f32;
+        p.line_segment([c, at(t, rad - w * 0.6)], egui::Stroke::new((w * 0.4).max(1.2), fg_strong()));
+        p.circle_filled(c, (w * 0.45).max(1.6), fg_strong());
     }
 }
 

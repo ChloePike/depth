@@ -111,3 +111,4 @@ Market index unavailable = 全網指數暫不可用
 Open = 開盤中
 All closed = 全部休市
 Stock markets in their regular session now = 目前處於常規交易時段的股市
+Short-term = 短期

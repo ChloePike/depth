@@ -855,13 +855,14 @@ fn status_venue(ui: &mut Ui, e: Exchange, on: bool, alive: bool, lat: Option<f64
     let name = ui.painter().layout_no_wrap(format!("{e:?}"), prop(11.5), if on { mu() } else { dim() });
     let ms_col = if !on { dim() } else if alive { lat_col } else { dn() };
     let ms = ui.painter().layout_no_wrap(if on { lat.map(|l| format!("{l:.0}ms")).unwrap_or("–".into()) } else { "off".into() }, mono(11.5), ms_col);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0 + name.size().x + 5.0 + ms.size().x, 18.0), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(30.0 + name.size().x + 5.0 + ms.size().x, 18.0), egui::Sense::click());
     let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered(), 0.1);
     let p = ui.painter();
     if hv > 0.0 { p.rect_filled(rect.expand2(egui::vec2(5.0, 1.0)), 3, hl().gamma_multiply(0.7 * hv)); }
     let y = rect.center().y;
     p.circle_filled(egui::pos2(rect.left() + 3.0, y), 3.0, if !on { dim() } else if alive { up() } else { dn() });
-    let x = rect.left() + 12.0;
+    theme::icon(p, e, egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, y), egui::vec2(12.0, 12.0)), !on);
+    let x = rect.left() + 30.0;
     p.galley(egui::pos2(x, y - name.size().y / 2.0), name.clone(), mu());
     p.galley(egui::pos2(x + name.size().x + 5.0, y - ms.size().y / 2.0), ms, mu());
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
