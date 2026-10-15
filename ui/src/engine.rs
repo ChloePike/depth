@@ -47,6 +47,10 @@ pub struct Account {
     /// order / trade / closed-PnL history per venue with fetch time; loaded on demand
     pub history: HashMap<Exchange, (trade::History, i64)>,
     pub history_loading: std::collections::HashSet<Exchange>,
+    /// bumped when own fills were stored (the chart re-reads them from the db); (venue, symbol)
+    /// pairs already back-filled over REST this session
+    pub fills_ver: u64,
+    pub fills_done: std::collections::HashSet<(Exchange, String)>,
     pub transferring: bool,
     /// auto top-up rules per venue (persisted in settings.json) and the last time one fired
     pub auto: HashMap<Exchange, AutoTopUp>,
@@ -1094,11 +1098,32 @@ impl Engine {
                 let r = trade::history(ex, &k, &symbols).await;
                 let mut a = account.lock().unwrap();
                 match r {
-                    Ok(h) => { a.history.insert(ex, (h, now_ms())); }
+                    Ok(h) => { a.history.insert(ex, (h, now_ms())); a.fills_ver += 1; }
                     Err(e) => a.note(format!("{ex:?} history: {e:#}"), false),
                 }
                 a.history_loading.remove(&ex);
                 ctx.request_repaint();
+            });
+        }
+    }
+
+    /// Own fills of `symbol` missed while the app was closed: once per venue and symbol per
+    /// session, from the newest stored fill (pushes keep it current afterwards).
+    pub fn backfill_fills(&self, symbol: &str, ctx: &eframe::egui::Context) {
+        let Some(rt) = self.acct_rt.as_ref() else { return };
+        let todo: Vec<(Exchange, Keys)> = {
+            let mut a = self.account.lock().unwrap();
+            let ks: Vec<_> = a.keys.iter().filter(|(e, _)| matches!(e, Exchange::Bybit | Exchange::Binance)).map(|(e, k)| (*e, k.clone())).collect();
+            ks.into_iter().filter(|(e, _)| a.fills_done.insert((*e, symbol.to_string()))).collect()
+        };
+        for (ex, k) in todo {
+            let (account, ctx, symbol) = (self.account.clone(), ctx.clone(), symbol.to_string());
+            rt.spawn(async move {
+                let since = depth::db::fills_last(ex, &symbol).map_or(0, |t| t + 1);
+                match trade::fills_since(ex, &k, &symbol, since).await {
+                    Ok(f) => { depth::db::fills_put(&f); account.lock().unwrap().fills_ver += 1; ctx.request_repaint(); }
+                    Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} {symbol} fills: {e:#}\n")),
+                }
             });
         }
     }
@@ -1133,16 +1158,13 @@ impl Engine {
     }
 }
 
-fn cache_path(ex: Exchange, sub: &Sub, tf: u32) -> Option<std::path::PathBuf> {
-    Some(depth::sys::cache_dir()?.join("history")
-        .join(&sub.base).join(format!("{ex:?}-{:?}-{tf}m.json", sub.market)))
-}
+fn cache_key(ex: Exchange, sub: &Sub, tf: u32) -> String { format!("{}/{ex:?}-{:?}-{tf}m", sub.base, sub.market) }
 
 /// History from the local cache plus only the candles since its last bar; a full fetch when
 /// there is no usable cache. On fetch failure the cache alone is used. The result is written back.
 async fn cached_history(ex: Exchange, sub: &Sub, tf: u32, stats: &Arc<Mutex<Stats>>) -> History {
-    let path = cache_path(ex, sub, tf);
-    let cached: Option<History> = path.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok());
+    let key = cache_key(ex, sub, tf);
+    let cached: Option<History> = depth::db::hist_get(&key).and_then(|b| serde_json::from_slice(&b).ok());
     let step = tf as i64 * 60_000;
     // bars missing since the cached tip (+2 to refresh the forming candle and overlap)
     let need = cached.as_ref().and_then(|c| c.klines.last()).map(|k| ((now_ms() - k.t) / step + 2) as usize).filter(|n| *n < HISTORY_MINUTES);
@@ -1158,10 +1180,7 @@ async fn cached_history(ex: Exchange, sub: &Sub, tf: u32, stats: &Arc<Mutex<Stat
             return c.unwrap_or_default();
         }
     };
-    if let Some(p) = path.filter(|_| !h.klines.is_empty()) {
-        if let Some(d) = p.parent() { let _ = std::fs::create_dir_all(d); }
-        if let Ok(b) = serde_json::to_vec(&h) { let _ = std::fs::write(p, b); }
-    }
+    if !h.klines.is_empty() { if let Ok(b) = serde_json::to_vec(&h) { depth::db::hist_put(&key, &b); } }
     h
 }
 
@@ -1300,6 +1319,7 @@ fn apply(a: &mut Account, ex: Exchange, ev: trade::AccEvent) -> bool {
         }
         E::TpSl(t) => { a.tpsl.retain(|x| !(x.ex == ex && x.id == t.id)); a.tpsl.push(t); true }
         E::TpSlDone { id } => { a.tpsl.retain(|x| !(x.ex == ex && x.id == id)); true }
+        E::Fill(f) => { depth::db::fills_put(&[f]); a.fills_ver += 1; true }
         E::Resync | E::BalanceDirty => false,
     }
 }

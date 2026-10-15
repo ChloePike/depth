@@ -322,6 +322,8 @@ pub struct Chart {
     fp_style: u8,
     /// trades of at least `whale_usd` as bubbles on the candles
     whales: bool,
+    /// own fills as B / S tags (perp)
+    fills_on: bool,
     whale_usd: f64,
     /// indicator inputs
     ind: Ind,
@@ -337,6 +339,8 @@ pub struct Chart {
     scale: Scale,
     /// positions / orders of the current symbol, set by the app every frame
     #[serde(skip)] pub lines: Vec<ChartLine>,
+    /// own fills of the current symbol (perp), oldest first, set by the app when they change
+    #[serde(skip)] pub fills: Vec<depth::trade::Fill>,
     #[serde(skip)] base_unit: String,
     /// manual price range (None = fit the visible bars): set by dragging the price axis,
     /// then vertical drags on the plot pan it; "auto" or a double-click returns to fitting
@@ -397,7 +401,7 @@ impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, whale_usd: 100_000.0, cone: false, style: 2, lines: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, fills_on: true, whale_usd: 100_000.0, cone: false, style: 2, lines: vec![], fills: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
             panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false), (Pane::Delta, false)],
         }
     }
@@ -1400,6 +1404,42 @@ impl Chart {
                 let r = 3.0 + 13.0 * (usd / top).sqrt() as f32;
                 let c = if buy { up() } else { dn() };
                 clip.circle(pos2(fr.x(i.round()), y(px)), r, c.linear_multiply(0.35), Stroke::new(1.0, c));
+            }
+        }
+
+        // own fills: one B / S tag per bar and side at the size-weighted price, B under it, S over it
+        if self.fills_on && market == Market::Perp && !self.fills.is_empty() {
+            let ms = self.tf * 60_000;
+            // (bar, buy) -> (sum px*qty, qty, fee, count, venues)
+            let mut g: std::collections::BTreeMap<(i64, bool), (f64, f64, f64, usize, Vec<Exchange>)> = Default::default();
+            for f in &self.fills {
+                let i = idx_of(&bars, f.ts, ms);
+                if i < i0 as f32 - 0.5 || i > i1 as f32 + 0.5 { continue; }
+                let px = if self.src.is_some() { f.price } else { f.price * a.usdt(f.ex, Market::Perp) };
+                let e = g.entry((i.round() as i64, f.side == depth::Side::Buy)).or_default();
+                (e.0, e.1, e.2, e.3) = (e.0 + px * f.qty, e.1 + f.qty, e.2 + f.fee, e.3 + 1);
+                if !e.4.contains(&f.ex) { e.4.push(f.ex); }
+            }
+            let clip = painter.with_clip_rect(main_plot);
+            let mut tip = None;
+            for ((i, buy), (pq, q, fee, cnt, exs)) in g {
+                let vwap = pq / q.max(1e-12);
+                let (x, py) = (fr.x(i as f32), y(vwap));
+                let col = if buy { up() } else { dn() };
+                // a 3 px pointer at the price, the 14 px tag beyond it
+                let dir = if buy { 1.0 } else { -1.0 };
+                let tag = Rect::from_center_size(pos2(x, py + dir * 12.0), vec2(14.0, 14.0));
+                clip.add(egui::Shape::convex_polygon(vec![pos2(x, py + dir * 2.0), pos2(x - 4.0, py + dir * 5.5), pos2(x + 4.0, py + dir * 5.5)], col, Stroke::NONE));
+                clip.rect_filled(tag, 3, col);
+                clip.text(tag.center(), Align2::CENTER_CENTER, if buy { "B" } else { "S" }, prop_s(10.0), Color32::WHITE);
+                if resp.hover_pos().is_some_and(|p| tag.expand(2.0).contains(p)) {
+                    let venues = exs.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>().join(", ");
+                    tip = Some(format!("{venues} · {} {}\n@ {} · {cnt}× · fee {}", if buy { t("tr.buy") } else { t("tr.sell") }, crate::fmt_qty(q), fmt_px(vwap), crate::fmt_qty(fee)));
+                }
+            }
+            if let Some(s) = tip {
+                egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), ui.id().with("filltip"), egui::PopupAnchor::Pointer)
+                    .show(|ui| ui.label(egui::RichText::new(s).font(mono(11.5)).color(fg())));
             }
         }
 
@@ -2477,6 +2517,7 @@ impl Chart {
                 ui.checkbox(&mut self.whales, super::l("Whale trades"));
                 ui.add_enabled(self.whales, egui::DragValue::new(&mut self.whale_usd).range(10_000.0..=50_000_000.0).speed(5_000.0).prefix("≥ $").custom_formatter(|v, _| fmt_usd_short(v)));
             });
+            if perp { ui.checkbox(&mut self.fills_on, super::l("My fills (B / S)")); }
             ui.checkbox(&mut self.heat, super::l("Book heatmap"));
             if perp { ui.checkbox(&mut self.liqmap, super::l("Liquidation map")).on_hover_text(t("chart.liqmap_tip")); }
             menu_sep(ui);

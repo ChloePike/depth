@@ -225,3 +225,4 @@ Max open = 最大建玉
 Unified account: liquidation is decided on the whole account (UniMMR / margin ratio in the account card), not per order. = 統合口座：清算は口座全体（口座カードの UniMMR / 証拠金率）で決まり、注文ごとではありません。
 Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ. = 分離マージン・現在のレバレッジ・維持率0.5%での推定。取引所の値と異なる場合があります。
 Unified account: the price at which the whole account would be liquidated after this order, other positions unchanged; estimated with a 0.5% maintenance rate. = 統合口座：この注文後、他のポジションが変わらない場合に口座全体が清算される価格（維持証拠金率 0.5% で推定）。
+My fills (B / S) = 自分の約定 (B / S)

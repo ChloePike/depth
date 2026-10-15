@@ -223,6 +223,8 @@ pub struct App {
     pub(crate) layout: String,
     cell: usize,
     others: Vec<(usize, chart::Chart)>,
+    /// (symbol, account fills version) the chart's own fills were read from the db for
+    fills_key: (String, u64),
     /// egui ports of the native panels: their state document (when built, stale) and the order panel
     st: (std::sync::Arc<serde_json::Value>, Instant, bool),
     order: order::OrderPanel,
@@ -297,7 +299,7 @@ impl App {
             shot: env("T1_SHOT").map(|p| (p, env("T1_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(30.0))),
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
             route: st.route.clone().unwrap_or_default(), pending_base: None, pending_mode: None, pending_restart: false, book_w: 0.0,
-            layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(),
+            layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(), fills_key: Default::default(),
             st: (Default::default(), Instant::now(), true), order: Default::default(), venue_toggle: None, order_panel: st.order_panel.unwrap_or(true), top: Default::default(), venue_pages: Default::default(),
             account: Default::default(),
         }
@@ -625,6 +627,7 @@ impl App {
                 let c = &mut o.1;
                 c.multi = true;
                 c.lines = self.chart.lines.clone();
+                c.fills = self.chart.fills.clone();
                 (c.confirm, c.trading, c.equity, c.amends) = (self.chart.confirm, self.chart.trading, self.chart.equity, self.chart.amends);
                 c.adopt_drawings(&self.chart);
                 c.show(&mut child, a, self.mode, &base);
@@ -753,6 +756,14 @@ impl App {
             // positions and resting orders of the traded symbol, drawn on the chart
             {
                 let sym = depth::trade::symbol(&self.eng.base);
+                // own fills: re-read from the db when the symbol changes or new ones were stored
+                // (backfill_fills locks the account itself: before `acc` below)
+                let ver = self.eng.account.lock().unwrap().fills_ver;
+                if self.mode == Market::Perp && (self.fills_key.0 != sym || self.fills_key.1 != ver) {
+                    if self.fills_key.0 != sym { self.eng.backfill_fills(&sym, ui.ctx()); }
+                    self.fills_key = (sym.clone(), ver);
+                    self.chart.fills = depth::db::fills(&sym, now_ms() - 30 * 86_400_000);
+                }
                 let acc = self.eng.account.lock().unwrap();
                 let mut lines: Vec<chart::ChartLine> = acc.positions.iter().filter(|p| p.symbol == sym).map(|p| chart::ChartLine {
                     price: p.entry, col: if p.side == depth::Side::Buy { up() } else { dn() },

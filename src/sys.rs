@@ -231,13 +231,13 @@ fn walk(dir: &std::path::Path, f: &mut impl FnMut(&std::path::Path, &std::fs::Me
 pub fn cache_bytes() -> u64 {
     let mut n = 0;
     for d in [cache_dir(), log_dir()].into_iter().flatten() { walk(&d, &mut |_, m| n += m.len()); }
-    n
+    n + crate::db::hist_bytes()
 }
 
 /// Delete everything in the cache and log folders except the rate-limit pauses (a cleared ban
 /// record would let the next requests extend an active IP ban). Returns the bytes freed.
 pub fn clear_cache() -> u64 {
-    let mut n = 0;
+    let mut n = crate::db::hist_clear(None);
     for d in [cache_dir(), log_dir()].into_iter().flatten() {
         walk(&d, &mut |p, m| {
             if p.file_name().is_some_and(|f| f == "rate-pauses.json") { return; }
@@ -249,6 +249,7 @@ pub fn clear_cache() -> u64 {
 
 /// Drop cache files untouched for `days` (history of symbols no longer viewed).
 pub fn prune_cache(days: u64) {
+    crate::db::hist_clear(Some(days));
     let Some(d) = cache_dir() else { return };
     let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
     walk(&d, &mut |p, m| {

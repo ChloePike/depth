@@ -1,6 +1,7 @@
 //! Depth data layer: every exchange feed is normalized into `Msg` and sent over one channel.
 pub mod agg;
 pub mod alias;
+pub mod db;
 pub mod l3;
 pub mod algo;
 pub mod ex;

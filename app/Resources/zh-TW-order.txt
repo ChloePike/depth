@@ -225,3 +225,4 @@ Max open = 可開
 Unified account: liquidation is decided on the whole account (UniMMR / margin ratio in the account card), not per order. = 統一帳戶：強平按整個帳戶判斷（看帳戶卡片裡的 UniMMR / 保證金率），不是按單筆訂單。
 Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ. = 按逐倉、當前槓桿、0.5% 維持保證金率估算；交易所的實際數值可能不同。
 Unified account: the price at which the whole account would be liquidated after this order, other positions unchanged; estimated with a 0.5% maintenance rate. = 統一帳戶：下單後、其他持倉不變時整個帳戶被強平的價格；按 0.5% 維持保證金率估算。
+My fills (B / S) = 我的成交 (B / S)

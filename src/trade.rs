@@ -840,6 +840,8 @@ pub enum AccEvent {
     /// a TP/SL (whole-position or partial) appeared or changed; removed with TpSlDone
     TpSl(tpsl::TpSl),
     TpSlDone { id: String },
+    /// one of our orders traded (stored in the db, drawn on the chart)
+    Fill(Fill),
 }
 
 pub type AccTx = tokio::sync::mpsc::UnboundedSender<(Exchange, AccEvent)>;
@@ -868,7 +870,7 @@ async fn bybit_stream(k: Keys, tx: AccTx) {
         let sig = hmac_hex(&k.secret, &format!("GET/realtime{expires}"));
         let spec = ws::Spec::new("bybit account", url)
             .sub(json!({"op": "auth", "args": [k.key, expires, sig]}).to_string())
-            .sub(json!({"op": "subscribe", "args": ["position.linear", "order.linear", "wallet"]}).to_string())
+            .sub(json!({"op": "subscribe", "args": ["position.linear", "order.linear", "execution.linear", "wallet"]}).to_string())
             .ping(std::time::Duration::from_secs(20), r#"{"op":"ping"}"#);
         let mut auth_failed = false;
         let r = ws::once(&spec, |f| {
@@ -890,6 +892,7 @@ async fn bybit_stream(k: Keys, tx: AccTx) {
                     let open = matches!(o["orderStatus"].as_str(), Some("New" | "PartiallyFilled" | "Untriggered"));
                     send(if open { AccEvent::Order(bybit_order(o)) } else { AccEvent::OrderDone { id: o["orderId"].as_str().unwrap_or_default().into() } });
                 },
+                (_, Some("execution.linear")) => for f in v["data"].as_array().into_iter().flatten().filter_map(bybit_fill) { send(AccEvent::Fill(f)); },
                 (_, Some("wallet")) => for w in v["data"].as_array().into_iter().flatten().filter(|w| w["accountType"] == "UNIFIED") {
                     send(AccEvent::Wallet { equity: n(&w["totalEquity"]), available: n(&w["totalAvailableBalance"]) });
                 },
@@ -966,6 +969,12 @@ async fn binance_stream(k: Keys, tx: AccTx) {
                     Some("ORDER_TRADE_UPDATE") => {
                         let o = &v["o"];
                         let id = o["i"].to_string();
+                        if o["x"] == "TRADE" {
+                            send(AccEvent::Fill(Fill {
+                                ex, id: o["t"].to_string(), symbol: o["s"].as_str().unwrap_or_default().into(), side: if o["S"] == "SELL" { Side::Sell } else { Side::Buy },
+                                price: n(&o["L"]), qty: n(&o["l"]), fee: n(&o["n"]), realized: crate::opt_num(&o["rp"]), ts: o["T"].as_i64().unwrap_or(0),
+                            }));
+                        }
                         if matches!(o["X"].as_str(), Some("NEW" | "PARTIALLY_FILLED")) {
                             send(AccEvent::Order(OpenOrder {
                                 ex, symbol: o["s"].as_str().unwrap_or_default().into(), id, side: if o["S"] == "SELL" { Side::Sell } else { Side::Buy },
@@ -996,8 +1005,62 @@ async fn binance_stream(k: Keys, tx: AccTx) {
 
 // ---------------------------------------------------------------- history (on demand only)
 
+/// One Bybit execution (REST list or `execution.linear` push); funding / settlement rows are not fills.
+fn bybit_fill(f: &Value) -> Option<Fill> {
+    f["execType"].as_str().is_none_or(|t| t == "Trade").then(|| Fill {
+        ex: Exchange::Bybit, id: f["execId"].as_str().unwrap_or_default().into(), symbol: f["symbol"].as_str().unwrap_or_default().into(),
+        side: if f["side"] == "Sell" { Side::Sell } else { Side::Buy }, price: n(&f["execPrice"]), qty: n(&f["execQty"]),
+        fee: n(&f["execFee"]), realized: crate::opt_num(&f["execPnl"]), ts: n(&f["execTime"]) as i64,
+    })
+}
+
+/// Own fills of one symbol since `since` (ms), for the chart's buy / sell marks. Called once per
+/// symbol per session; pushes keep it current after that. Both venues cap a query at 7 days, so
+/// the span is walked in week windows, each paged. Bybit / Binance only (others: empty).
+/// ponytail: at most the last 30 days (what the chart shows); older gaps stay empty
+pub async fn fills_since(ex: Exchange, k: &Keys, symbol: &str, since: i64) -> Result<Vec<Fill>> {
+    if !matches!(ex, Exchange::Bybit | Exchange::Binance) { return Ok(vec![]); }
+    let now = crate::now_ms();
+    let binance = if ex == Exchange::Binance {
+        Some(if binance_pm(k).await? { (papi_url(), "/papi/v1/um/userTrades") } else { (binance_url(), "/fapi/v1/userTrades") })
+    } else { None };
+    let mut out = vec![];
+    let mut t0 = since.max(now - 30 * 86_400_000);
+    while t0 < now {
+        let t1 = (t0 + 7 * 86_400_000 - 1).min(now);
+        if let Some((base, path)) = binance {
+            // pages of 1000 (weight 5 each), the next one from the last fill's time (repeats are deduped by id)
+            let mut s = t0;
+            loop {
+                let t = binance_at(k, base, reqwest::Method::GET, path, &[("symbol", symbol.to_string()), ("startTime", s.to_string()), ("endTime", t1.to_string()), ("limit", "1000".into())]).await?;
+                let rows: Vec<Fill> = t.as_array().into_iter().flatten().map(|f| Fill {
+                    ex, id: f["id"].to_string(), symbol: symbol.into(), side: if f["side"] == "SELL" { Side::Sell } else { Side::Buy },
+                    price: n(&f["price"]), qty: n(&f["qty"]), fee: n(&f["commission"]), realized: crate::opt_num(&f["realizedPnl"]), ts: f["time"].as_i64().unwrap_or(0),
+                }).collect();
+                let last = rows.iter().map(|f| f.ts).max().unwrap_or(s);
+                let full = rows.len() >= 1000;
+                out.extend(rows);
+                if !full || last <= s { break; }
+                s = last;
+            }
+        } else {
+            let mut cursor = String::new();
+            loop {
+                let mut q = json!({"category": "linear", "symbol": symbol, "startTime": t0.to_string(), "endTime": t1.to_string(), "limit": "100"});
+                if !cursor.is_empty() { q["cursor"] = cursor.clone().into(); }
+                let e = bybit(k, true, "/v5/execution/list", q).await?;
+                out.extend(e["list"].as_array().into_iter().flatten().filter_map(bybit_fill));
+                cursor = e["nextPageCursor"].as_str().unwrap_or_default().into();
+                if cursor.is_empty() || e["list"].as_array().is_none_or(|l| l.is_empty()) { break; }
+            }
+        }
+        t0 = t1 + 1;
+    }
+    Ok(out)
+}
+
 #[derive(Clone, Debug)]
-pub struct Fill { pub ex: Exchange, pub symbol: String, pub side: Side, pub price: f64, pub qty: f64, pub fee: f64, pub realized: Option<f64>, pub ts: i64 }
+pub struct Fill { pub ex: Exchange, pub id: String, pub symbol: String, pub side: Side, pub price: f64, pub qty: f64, pub fee: f64, pub realized: Option<f64>, pub ts: i64 }
 
 #[derive(Clone, Debug)]
 pub struct HistOrder { pub ex: Exchange, pub symbol: String, pub side: Side, pub kind: String, pub price: f64, pub avg: f64, pub qty: f64, pub filled: f64, pub status: String, pub ts: i64 }
@@ -1023,10 +1086,7 @@ pub async fn history(ex: Exchange, k: &Keys, symbols: &[String]) -> Result<Histo
                 price: n(&o["price"]), avg: n(&o["avgPrice"]), qty: n(&o["qty"]), filled: n(&o["cumExecQty"]), status: o["orderStatus"].as_str().unwrap_or_default().into(), ts: n(&o["createdTime"]) as i64,
             }).collect();
             let e = bybit(k, true, "/v5/execution/list", json!({"category": "linear", "settleCoin": "USDT", "limit": "100"})).await?;
-            h.fills = e["list"].as_array().into_iter().flatten().map(|f| Fill {
-                ex, symbol: f["symbol"].as_str().unwrap_or_default().into(), side: side(&f["side"]), price: n(&f["execPrice"]), qty: n(&f["execQty"]),
-                fee: n(&f["execFee"]), realized: crate::opt_num(&f["execPnl"]), ts: n(&f["execTime"]) as i64,
-            }).collect();
+            h.fills = e["list"].as_array().into_iter().flatten().filter_map(bybit_fill).collect();
             let c = bybit(k, true, "/v5/position/closed-pnl", json!({"category": "linear", "limit": "100"})).await?;
             // the row's side is the closing order's side: Sell closed a long
             h.closed = c["list"].as_array().into_iter().flatten().map(|c| ClosedPnl {
@@ -1047,7 +1107,7 @@ pub async fn history(ex: Exchange, k: &Keys, symbols: &[String]) -> Result<Histo
                 }));
                 let t = binance_at(k, base, reqwest::Method::GET, trades, &q).await?;
                 h.fills.extend(t.as_array().into_iter().flatten().map(|f| Fill {
-                    ex, symbol: sym.clone(), side: side(&f["side"]), price: n(&f["price"]), qty: n(&f["qty"]), fee: n(&f["commission"]),
+                    ex, id: f["id"].to_string(), symbol: sym.clone(), side: side(&f["side"]), price: n(&f["price"]), qty: n(&f["qty"]), fee: n(&f["commission"]),
                     realized: crate::opt_num(&f["realizedPnl"]), ts: f["time"].as_i64().unwrap_or(0),
                 }));
             }
@@ -1062,6 +1122,7 @@ pub async fn history(ex: Exchange, k: &Keys, symbols: &[String]) -> Result<Histo
         }
         _ => bail!("{ex:?} history not implemented"),
     }
+    crate::db::fills_put(&h.fills);
     h.orders.sort_by(|a, b| b.ts.cmp(&a.ts));
     h.fills.sort_by(|a, b| b.ts.cmp(&a.ts));
     h.closed.sort_by(|a, b| b.ts.cmp(&a.ts));
@@ -1579,7 +1640,7 @@ mod tests {
 
     #[test]
     fn closes_rebuilt_from_fills() {
-        let f = |side, price, qty, r: f64, ts| Fill { ex: Exchange::Binance, symbol: "XUSDT".into(), side, price, qty, fee: 0.0, realized: Some(r), ts };
+        let f = |side, price, qty, r: f64, ts| Fill { ex: Exchange::Binance, id: String::new(), symbol: "XUSDT".into(), side, price, qty, fee: 0.0, realized: Some(r), ts };
         // a long of 3 bought at 100 closed in two fills at 110 / 112 in the same second
         let c = closes_from_fills(&[f(Side::Sell, 110.0, 1.0, 10.0, 5_000), f(Side::Sell, 112.0, 2.0, 24.0, 5_400), f(Side::Buy, 99.0, 1.0, 0.0, 6_000)]);
         assert_eq!(c.len(), 1);

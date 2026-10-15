@@ -225,3 +225,4 @@ Max open = Макс. открыть
 Unified account: liquidation is decided on the whole account (UniMMR / margin ratio in the account card), not per order. = Единый счёт: ликвидация определяется по всему счёту (UniMMR / уровень маржи), а не по ордеру.
 Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ. = Оценка для изолированной позиции при этом плече и 0,5% поддержки; значение биржи может отличаться.
 Unified account: the price at which the whole account would be liquidated after this order, other positions unchanged; estimated with a 0.5% maintenance rate. = Единый счёт: цена, при которой после этого ордера будет ликвидирован весь счёт (прочие позиции без изменений; оценка при марже поддержания 0,5 %).
+My fills (B / S) = Мои сделки (B / S)

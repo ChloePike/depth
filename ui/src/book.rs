@@ -41,7 +41,10 @@ pub struct BookView { trades: bool,
     /// newest trade time already checked for hits, per venue
     #[serde(skip)] seen: HashMap<Exchange, i64>,
     /// last mid and whether its last move was up (mid row color)
-    #[serde(skip)] last_mid: (f64, bool) }
+    #[serde(skip)] last_mid: (f64, bool),
+    /// hover tooltip width while the same tooltip (by its row labels) stays open: only grows,
+    /// so counts and ages changing digits don't make it twitch every frame
+    #[serde(skip)] tip_w: (u64, f32) }
 
 /// How long an eaten level stays lit, fading out; at most one flash per level per FLASH_GAP.
 const FLASH: Duration = Duration::from_millis(400);
@@ -51,7 +54,7 @@ const FLASH_GAP: Duration = Duration::from_millis(300);
 /// (and the aggregation across ten venues is not free).
 const REFRESH: Duration = Duration::from_millis(100);
 
-impl Default for BookView { fn default() -> Self { BookView { trades: false, show_tape: true, page: 0, src: None, group: 0, clicked: None, quote: false, min_usd: 0, cache: None, flash: Default::default(), seen: Default::default(), last_mid: (0.0, true) } } }
+impl Default for BookView { fn default() -> Self { BookView { trades: false, show_tape: true, page: 0, src: None, group: 0, clicked: None, quote: false, min_usd: 0, cache: None, flash: Default::default(), seen: Default::default(), last_mid: (0.0, true), tip_w: (0, 0.0) } } }
 
 /// Quote amounts: 12.3K / 4.56M style, whole units below a thousand.
 fn fmt_big_book(v: f64) -> String {
@@ -382,8 +385,15 @@ impl BookView {
             rows_at.push((Rect::from_min_size(pos2(rect.left() - 2.0, y), vec2(rect.width() + 4.0, rh)), l.px));
         }
         if let Some(t) = tip.into_inner() {
-            egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), ui.id().with("l3tip"), egui::PopupAnchor::Pointer)
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for line in t.lines() { line.split("  ").next().hash(&mut h); }
+            let key = h.finish();
+            if self.tip_w.0 != key { self.tip_w = (key, 0.0); }
+            let min_w = self.tip_w.1;
+            let shown = egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), ui.id().with("l3tip"), egui::PopupAnchor::Pointer)
                 .show(|ui| {
+                    ui.set_min_width(min_w);
                     // never wrapped; sections split by a blank line, each its own grid so column
                     // counts never mix; "a  b  c" rows are aligned columns (names left, numbers
                     // right), a "#caption" line heads its section
@@ -408,8 +418,10 @@ impl BookView {
                             }
                         });
                     }
+                    ui.min_rect().width()
                 });
-        }
+            if let Some(r) = shown { self.tip_w.1 = self.tip_w.1.max(r.inner); }
+        } else { self.tip_w = (0, 0.0); }
         // click-to-fill only on a single venue's raw book (aligned aggregate prices are not executable)
         if let Some(e) = self.src {
             for (i, (r, px)) in rows_at.iter().enumerate() {
