@@ -12,6 +12,7 @@ mod top;
 mod venues;
 pub mod theme;
 mod trade;
+mod spot;
 mod settings;
 mod native;
 
@@ -201,6 +202,7 @@ pub struct App {
     opt: options::OptView,
     picker: picker::Picker,
     trade: trade::TradeView,
+    spot: spot::SpotPanel,
     rate: (Instant, u64, f64),
     /// screenshot request from env: (path, after seconds)
     shot: Option<(String, f64)>,
@@ -294,7 +296,7 @@ impl App {
         if let Some(tf) = env("T1_TF").and_then(|s| s.parse().ok()) { chart.tf = tf; }
         let layout = env("T1_LAYOUT").or(st.layout).unwrap_or_else(|| "1".into());
         App {
-            eng, prefs, settings: Default::default(), saved: (saved, Instant::now()), window: st.window, mode, chart, book, opt: Default::default(), picker, trade,
+            eng, prefs, settings: Default::default(), saved: (saved, Instant::now()), window: st.window, mode, chart, book, opt: Default::default(), picker, trade, spot: Default::default(),
             rate: (Instant::now(), 0, 0.0),
             shot: env("T1_SHOT").map(|p| (p, env("T1_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(30.0))),
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
@@ -330,9 +332,9 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 if kit::icon_button(ui, 30.0, false, top::gear).on_hover_text(t("set.title")).clicked() { self.settings.open = true; }
-                // show / hide the order panel (the Swift toolbar's sidebar.trailing button); Perp only
+                // show / hide the order panel (the Swift toolbar's sidebar.trailing button); Perp and Spot
                 let tip = l("Show or hide the order panel (Option-Command-I)");
-                if self.mode == Market::Perp {
+                if matches!(self.mode, Market::Perp | Market::Spot) {
                     let on = self.order_panel;
                     if kit::icon_button(ui, 30.0, false, |p, r, c| top::panel_glyph(p, r, c, on)).on_hover_text(tip).clicked() { self.order_panel = !on; }
                 } else {
@@ -650,7 +652,9 @@ impl App {
         if since < budget && !self.hosted { std::thread::sleep(budget - since); }
         self.last_frame = Instant::now();
         let ctx = ui.ctx().clone();
-        ctx.request_repaint_after(Duration::from_millis(100));
+        // live data does not request repaints itself: this timer is the chart / book refresh rate.
+        // 30 Hz while focused (10 Hz read as a stuttering, late candle), 10 Hz in the background
+        ctx.request_repaint_after(Duration::from_millis(if focused { 33 } else { 100 }));
         // T1_SPIN: repaint every frame (diagnostics: worst case of constant mouse movement)
         if std::env::var("T1_SPIN").is_ok() { ctx.request_repaint(); }
         self.screenshot(&ctx);
@@ -695,6 +699,8 @@ impl App {
             egui::Panel::bottom("account").show_separator_line(false).frame(card(12)).resizable(true).default_size(230.0)
                 .show(ui, |ui| ap.show(ui, &st, &mut |v| { let r = self.call(&ctx, &v); self.st.2 = true; r }));
             if let Some(tab) = ap.open_settings.take() { self.settings.open_tab(tab); }
+            if let Some(p) = ap.insure.take() { self.trade.ins_pos = Some(p); }
+            if self.trade.ins_pos.is_some() { let g = agg.lock().unwrap(); self.trade.insure_modal(&ctx, &g, &self.eng); }
             if self.mode == Market::Perp && self.order_panel {
                 let mut op = std::mem::take(&mut self.order);
                 egui::Panel::right("order").show_separator_line(false).frame(Frame::new().fill(bg()).inner_margin(Margin::symmetric(4, 4))).resizable(false).exact_size(300.0)
@@ -714,6 +720,14 @@ impl App {
                     else if at.elapsed() < Duration::from_secs(10) { ap.prefill = Some((p, at)); }
                 }
                 self.order = op;
+            }
+            if self.mode == Market::Spot && self.order_panel {
+                egui::Panel::right("spot_order").show_separator_line(false).frame(Frame::new().fill(bg()).inner_margin(Margin::symmetric(4, 4))).resizable(false).exact_size(300.0)
+                    .show(ui, |ui| egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                        let g = agg.lock().unwrap();
+                        let base = self.eng.base.clone();
+                        self.spot.show(ui, &g, &self.eng, &base);
+                    }));
             }
             self.account = ap;
             a = agg.lock().unwrap();

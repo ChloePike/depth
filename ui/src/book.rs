@@ -259,6 +259,13 @@ impl BookView {
                 c.1 += ev.qty;
             }
         }
+        // likely icebergs (algoscan), mapped onto the rows like the L3 orders: an "ICE" tag beside the price
+        let mut ices: HashMap<(bool, i64), Vec<&depth::algoscan::Iceberg>> = HashMap::new();
+        for i in a.scan.found.1.iter().filter(|i| i.market == market && scope.contains(&i.ex) && self.src.is_none_or(|e| e == i.ex)) {
+            let k = if self.src.is_some() { 1.0 } else { match a.venues.get(&(i.ex, i.market)).and_then(|v| v.book_mid()) { Some(vm) if vm > 0.0 => mid / vm, _ => continue } };
+            let p = i.px * k;
+            ices.entry((!i.bid, if i.bid { (p / bin).floor() } else { (p / bin).ceil() } as i64)).or_default().push(i);
+        }
         if !blocks.is_empty() {
             // what the thin strip under the rows is
             let c = pos2(rect.left() + rect.width() * 0.30, hy);
@@ -324,7 +331,13 @@ impl BookView {
                 }
             }
             let cy = r.center().y;
-            painter.text(pos2(x_px, cy), Align2::LEFT_CENTER, fmt_dp(l.px, dp), mono_m(12.0), col);
+            let pr = painter.text(pos2(x_px, cy), Align2::LEFT_CENTER, fmt_dp(l.px, dp), mono_m(12.0), col);
+            let ice = ices.get(&(is_ask, (l.px / bin).round() as i64));
+            if ice.is_some() {
+                let tag = Rect::from_min_size(pos2(pr.right() + 5.0, cy - 6.5), vec2(24.0, 13.0));
+                painter.rect_filled(tag, 3, col.gamma_multiply(0.85));
+                painter.text(tag.center(), Align2::CENTER_CENTER, "ICE", prop_s(9.0), egui::Color32::WHITE);
+            }
             painter.text(pos2(x_size, cy), Align2::RIGHT_CENTER, fs(size(l)), mono(12.0), fg());
             painter.text(pos2(x_tot, cy), Align2::RIGHT_CENTER, ft(c), mono(12.0), mu());
             // hovering a row: where its size rests across venues, then its L3 orders and L4 events
@@ -348,6 +361,11 @@ impl BookView {
                     qs.sort_by(|a, b| b.total_cmp(a));
                     if !qs.is_empty() { lines.push(format!("{s_largest}  {}", qs.iter().take(3).map(|q| qty_sig(*q)).collect::<Vec<_>>().join(" · "))); }
                     if let Some(o) = known.iter().min_by_key(|o| o.3) { lines.push(format!("{s_oldest}  {} · {}{}", qty_sig(o.0), if o.4 { "" } else { "> " }, age(now - o.3))); }
+                }
+                for i in ice.into_iter().flatten() {
+                    if !lines.is_empty() { lines.push(String::new()); }
+                    lines.push(format!("{:?} · {}", i.ex, t(if i.bid { "algo.ice_bid" } else { "algo.ice_ask" })));
+                    lines.push(format!("{} {} · {} {} · {} {}", t("algo.traded"), qty_sig(i.traded), t("algo.shown"), qty_sig(i.shown_max), i.fills, t("algo.fills")));
                 }
                 if let Some(c) = life.get(&key) {
                     // own section: a caption, then kind / count / size per row

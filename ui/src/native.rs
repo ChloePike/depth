@@ -88,6 +88,10 @@ impl App {
             "read_only": acc.can_trade.get(&ex) == Some(&false),
         });
         let funds = self.eng.funding.lock().unwrap().clone();
+        let opt_positions: Vec<Value> = acc.opts.iter().map(|o| json!({
+            "ex": ex_name(o.ex), "symbol": o.symbol, "base": o.base, "expiry": o.expiry, "strike": o.strike, "call": o.call,
+            "side": side_name(o.side), "qty": o.qty, "entry": o.avg, "mark": o.mark, "upnl": o.upnl, "option": true,
+        })).collect();
         let positions: Vec<Value> = acc.positions.iter().map(|p| {
             let f = funds.get(&(p.ex, p.symbol.clone()));
             // a positive rate: longs pay shorts
@@ -101,10 +105,11 @@ impl App {
                 "funding_paid": paid.map(|x| x.amount), "funding_since": paid.map(|x| x.since).filter(|t| *t > 0), "funding_since_lower": paid.map(|x| x.lower),
             })
         }).collect();
-        let orders: Vec<Value> = acc.orders.iter().map(|o| json!({
+        let order_json = |o: &trade::OpenOrder, spot: bool| json!({
             "ex": ex_name(o.ex), "symbol": o.symbol, "id": o.id, "side": if o.side == Side::Buy { "buy" } else { "sell" }, "price": o.price, "qty": o.qty,
-            "filled": o.filled, "kind": o.kind, "reduce_only": o.reduce_only, "ts": o.ts, "pos": o.pos.map(side_name),
-        })).collect();
+            "filled": o.filled, "kind": o.kind, "reduce_only": o.reduce_only, "ts": o.ts, "pos": o.pos.map(side_name), "spot": spot,
+        });
+        let orders: Vec<Value> = acc.orders.iter().map(|o| order_json(o, false)).chain(acc.spot_orders.iter().map(|o| order_json(o, true))).collect();
         let tpsl: Vec<Value> = acc.tpsl.iter().map(|t| json!({
             "ex": ex_name(t.ex), "id": t.id, "symbol": t.symbol, "pos": side_name(t.pos), "take_profit": t.take_profit, "trigger_px": t.trigger_px,
             "qty": t.qty, "trigger": if matches!(t.trigger, trade::tpsl::Trigger::Last) { "last" } else { "mark" },
@@ -187,7 +192,7 @@ impl App {
         json!({
             "base": self.eng.base, "mode": format!("{:?}", self.mode), "lang": super::lang_code(), "langs": super::LANGS,
             "header": header, "venues": venues, "stats": stats, "trade": trade_v,
-            "positions": positions, "orders": orders, "tpsl": tpsl,
+            "positions": positions, "opt_positions": opt_positions, "orders": orders, "tpsl": tpsl,
             "history": {"orders": hist.0, "fills": hist.1, "closed": hist.2, "updated_ms": (hist.3 != i64::MAX).then_some(hist.3),
                         "loading": !self.eng.account.lock().unwrap().history_loading.is_empty()},
             "wallets": wallets, "balances": balances, "algos": algos, "transferring": transferring, "binance_pm": pm, "log": log, "keys": keys,
@@ -243,6 +248,11 @@ impl App {
                     for leg in &plan.legs { self.eng.submit(leg.ex, leg.req.clone(), leg.ref_px, ctx); }
                 }
                 return Ok(plan_json(&plan));
+            }
+            "cancel" if v["spot"] == true => {
+                let (e, id) = (exv()?, s("id"));
+                let o = self.eng.account.lock().unwrap().spot_orders.iter().find(|o| o.ex == e && o.id == id).cloned().ok_or("order not found")?;
+                self.eng.spot_cancel(&o, ctx);
             }
             "cancel" => {
                 let (e, id) = (exv()?, s("id"));

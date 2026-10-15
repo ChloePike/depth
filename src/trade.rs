@@ -19,6 +19,7 @@ pub mod hyperliquid;
 pub mod kraken;
 pub mod lighter;
 pub mod okx;
+pub mod spot;
 pub mod tpsl;
 
 pub const TRADABLE: [Exchange; 8] = KEY_VENUES;
@@ -655,6 +656,97 @@ pub async fn place(ex: Exchange, k: &Keys, req: &OrderReq, r: &Rules, ref_px: f6
     }
 }
 
+// ---------------------------------------------------------------- options (position insurance)
+
+/// Venues where protection options can be bought. ponytail: Bybit only; Binance / OKX / Gate
+/// option order entry goes here behind the same two functions.
+pub const OPTION_VENUES: &[Exchange] = &[Exchange::Bybit];
+
+/// A protection buy priced off the venue's real ask side: one IOC limit at the worst level the
+/// size needs, so it fills at once or not at all past that price.
+#[derive(Clone, Debug)]
+pub struct OptBuy { pub ex: Exchange, pub symbol: String, pub qty: f64, pub limit: f64, pub tick: f64, pub step: f64,
+    /// size the book holds up to `limit` (< qty when the asks run out), its average price and cost (venue quote)
+    pub fill: f64, pub avg: f64, pub cost: f64 }
+
+/// Walk `asks` (best first) for `qty`: (limit = last level touched, filled qty, average price).
+pub fn sweep(asks: &[(f64, f64)], qty: f64) -> Option<(f64, f64, f64)> {
+    let (mut got, mut paid, mut limit) = (0.0, 0.0, None);
+    for &(px, q) in asks {
+        if got >= qty - 1e-12 { break; }
+        let take = q.min(qty - got);
+        got += take;
+        paid += take * px;
+        limit = Some(px);
+    }
+    limit.map(|l| (l, got, paid / got))
+}
+
+/// Size rounded UP to the venue step (a hedge rounded down leaves part of the position bare).
+pub fn ceil_step(qty: f64, step: f64, min: f64) -> f64 { ((qty / step - 1e-9).ceil() * step).max(min) }
+
+pub async fn option_plan(ex: Exchange, symbol: &str, qty: f64) -> Result<OptBuy> {
+    match ex {
+        Exchange::Bybit => {
+            let i = ws::get_json(&format!("{}/v5/market/instruments-info?category=option&symbol={symbol}", bybit_url())).await?;
+            let i = &i["result"]["list"][0];
+            let (tick, step, min) = (n(&i["priceFilter"]["tickSize"]), n(&i["lotSizeFilter"]["qtyStep"]), n(&i["lotSizeFilter"]["minOrderQty"]));
+            if !(tick > 0.0 && step > 0.0) { bail!("{symbol}: no trading rules"); }
+            let b = ws::get_json(&format!("{}/v5/market/orderbook?category=option&symbol={symbol}&limit=25", bybit_url())).await?;
+            let asks: Vec<(f64, f64)> = b["result"]["a"].as_array().into_iter().flatten().map(|l| (n(&l[0]), n(&l[1]))).filter(|(p, q)| *p > 0.0 && *q > 0.0).collect();
+            let qty = ceil_step(qty, step, min);
+            let (limit, fill, avg) = sweep(&asks, qty).ok_or_else(|| anyhow!("{symbol}: no asks"))?;
+            Ok(OptBuy { ex, symbol: symbol.into(), qty, limit, tick, step, fill, avg, cost: fill * avg })
+        }
+        _ => bail!("{ex:?}: option orders not supported yet"),
+    }
+}
+
+/// A held option (bought protection). Symbol parts are parsed from the venue symbol
+/// (Bybit: BASE-DDMMMYY-STRIKE-P|C[-USDT]); prices in the venue quote.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OptPos { pub ex: Exchange, pub symbol: String, pub base: String, pub expiry: String, pub strike: f64, pub call: bool,
+    pub side: Side, pub qty: f64, pub avg: f64, pub mark: f64, pub upnl: f64 }
+
+/// (base, expiry, strike, call) from a Bybit option symbol.
+pub fn bybit_opt_parts(s: &str) -> Option<(String, String, f64, bool)> {
+    let p: Vec<&str> = s.split('-').collect();
+    if p.len() < 4 { return None; }
+    Some((p[0].into(), p[1].into(), p[2].parse().ok()?, p[3] == "C"))
+}
+
+/// One Bybit option position row (REST list or `position.option` push); size 0 = closed.
+fn bybit_opt_pos(p: &Value) -> Option<OptPos> {
+    let symbol = p["symbol"].as_str()?;
+    let (base, expiry, strike, call) = bybit_opt_parts(symbol)?;
+    Some(OptPos { ex: Exchange::Bybit, symbol: symbol.into(), base, expiry, strike, call,
+        side: if p["side"] == "Sell" { Side::Sell } else { Side::Buy }, qty: n(&p["size"]), avg: n(&p["avgPrice"]), mark: n(&p["markPrice"]), upnl: n(&p["unrealisedPnl"]) })
+}
+
+/// Open option positions on a venue (empty where option trading is not built).
+pub async fn option_positions(ex: Exchange, k: &Keys) -> Result<Vec<OptPos>> {
+    match ex {
+        Exchange::Bybit => {
+            let v = bybit(k, true, "/v5/position/list", json!({"category": "option"})).await?;
+            Ok(v["list"].as_array().into_iter().flatten().filter_map(bybit_opt_pos).filter(|p| p.qty > 0.0).collect())
+        }
+        _ => Ok(vec![]),
+    }
+}
+
+/// Buy the planned options: limit IOC at `p.limit`, so nothing rests and nothing fills above it.
+pub async fn buy_option(k: &Keys, p: &OptBuy) -> Result<String> {
+    match p.ex {
+        Exchange::Bybit => {
+            // orderLinkId is mandatory for Bybit options
+            let body = json!({"category": "option", "symbol": p.symbol, "side": "Buy", "orderType": "Limit", "timeInForce": "IOC",
+                "qty": fmt_step(p.qty, p.step, true), "price": fmt_step(p.limit, p.tick, false), "orderLinkId": format!("t1ins{}", crate::now_ms())});
+            Ok(bybit(k, false, "/v5/order/create", body).await?["orderId"].as_str().unwrap_or_default().to_string())
+        }
+        ex => bail!("{ex:?}: option orders not supported yet"),
+    }
+}
+
 /// Whether the key may trade USDT perps: Some(false) for a read-only key, None when the venue
 /// has no way to ask (Gate, Kraken, Hyperliquid, Lighter, Bitget) or the answer is unclear.
 /// Read once per key (stream start, key change), never polled.
@@ -842,6 +934,10 @@ pub enum AccEvent {
     TpSlDone { id: String },
     /// one of our orders traded (stored in the db, drawn on the chart)
     Fill(Fill),
+    /// option position upsert by symbol; qty 0 removes
+    OptPos(OptPos),
+    /// a spot order changed (placed, filled, cancelled): refetch spot orders and balances
+    SpotDirty,
 }
 
 pub type AccTx = tokio::sync::mpsc::UnboundedSender<(Exchange, AccEvent)>;
@@ -871,6 +967,9 @@ async fn bybit_stream(k: Keys, tx: AccTx) {
         let spec = ws::Spec::new("bybit account", url)
             .sub(json!({"op": "auth", "args": [k.key, expires, sig]}).to_string())
             .sub(json!({"op": "subscribe", "args": ["position.linear", "order.linear", "execution.linear", "wallet"]}).to_string())
+            // its own request: an account without options must not fail the main subscription
+            .sub(json!({"op": "subscribe", "req_id": "opt", "args": ["position.option"]}).to_string())
+            .sub(json!({"op": "subscribe", "req_id": "spot", "args": ["order.spot"]}).to_string())
             .ping(std::time::Duration::from_secs(20), r#"{"op":"ping"}"#);
         let mut auth_failed = false;
         let r = ws::once(&spec, |f| {
@@ -879,7 +978,9 @@ async fn bybit_stream(k: Keys, tx: AccTx) {
             let send = |e: AccEvent| { let _ = tx.send((ex, e)); };
             match (v["op"].as_str(), v["topic"].as_str()) {
                 (Some("auth"), _) if v["success"] == false => { eprintln!("[bybit account] auth failed: {}", v["ret_msg"]); auth_failed = true; return false; }
-                (Some("subscribe"), _) if v["success"] == true => send(AccEvent::Resync),
+                (Some("subscribe"), _) if v["success"] == true && v["req_id"] != "opt" && v["req_id"] != "spot" => send(AccEvent::Resync),
+                (_, Some("order.spot")) => send(AccEvent::SpotDirty),
+                (_, Some("position.option")) => for p in v["data"].as_array().into_iter().flatten().filter_map(bybit_opt_pos) { send(AccEvent::OptPos(p)); },
                 (_, Some("position.linear")) => for p in v["data"].as_array().into_iter().flatten() {
                     send(AccEvent::Position { p: bybit_position(p), one_way: p["positionIdx"].as_i64() == Some(0) });
                 },
@@ -1559,6 +1660,27 @@ async fn bybit_usd_prices() -> Result<std::collections::HashMap<String, f64>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bybit_option_symbol() {
+        assert_eq!(bybit_opt_parts("HYPE-30OCT26-72-P-USDT"), Some(("HYPE".into(), "30OCT26".into(), 72.0, false)));
+        assert_eq!(bybit_opt_parts("BTC-25DEC26-105000-C"), Some(("BTC".into(), "25DEC26".into(), 105000.0, true)));
+        assert_eq!(bybit_opt_parts("BTCUSDT"), None);
+    }
+
+    #[test]
+    fn option_sweep_and_size() {
+        let asks = [(1.33, 334.0), (1.34, 30.0), (1.94, 451.0)];
+        assert_eq!(sweep(&asks, 287.0), Some((1.33, 287.0, 1.33)));
+        let (l, got, avg) = sweep(&asks, 400.0).unwrap();
+        assert_eq!((l, got), (1.94, 400.0));
+        assert!((avg - (334.0 * 1.33 + 30.0 * 1.34 + 36.0 * 1.94) / 400.0).abs() < 1e-12);
+        assert_eq!(sweep(&asks, 2000.0).unwrap().1, 815.0);
+        assert_eq!(sweep(&[], 1.0), None);
+        assert_eq!(ceil_step(286.2, 1.0, 1.0), 287.0);
+        assert_eq!(ceil_step(287.0, 1.0, 1.0), 287.0);
+        assert_eq!(ceil_step(0.2, 1.0, 1.0), 1.0);
+    }
+
     use super::*;
 
     #[test]

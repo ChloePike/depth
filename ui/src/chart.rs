@@ -324,6 +324,8 @@ pub struct Chart {
     whales: bool,
     /// own fills as B / S tags (perp)
     fills_on: bool,
+    /// likely algos (algoscan): slicer clips as diamonds, icebergs as dotted levels
+    algos: bool,
     whale_usd: f64,
     /// indicator inputs
     ind: Ind,
@@ -401,7 +403,7 @@ impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, fills_on: true, whale_usd: 100_000.0, cone: false, style: 2, lines: vec![], fills: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, fills_on: true, algos: true, whale_usd: 100_000.0, cone: false, style: 2, lines: vec![], fills: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
             panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false), (Pane::Delta, false)],
         }
     }
@@ -1404,6 +1406,52 @@ impl Chart {
                 let r = 3.0 + 13.0 * (usd / top).sqrt() as f32;
                 let c = if buy { up() } else { dn() };
                 clip.circle(pos2(fr.x(i.round()), y(px)), r, c.linear_multiply(0.35), Stroke::new(1.0, c));
+            }
+        }
+
+        // likely algos (engine pass every 5 s): an iceberg as a dotted level from its first fill with a
+        // small square at its start, every slicer clip as a small diamond at its own price; nothing
+        // over the bid/ask box (the names live in the hover)
+        if self.algos && !fp_text {
+            let ms = self.tf * 60_000;
+            // the last 30 min of detections; a running iceberg extends to the right edge, a finished one
+            // ends at its last fill
+            let (clips, ices) = (a.scan.seen.0.values(), a.scan.seen.1.values());
+            let live: std::collections::HashSet<String> = a.scan.found.1.iter().map(depth::algoscan::ice_key).collect();
+            let k = |e: Exchange| if self.src.is_some() { 1.0 } else { a.usdt(e, smarket) };
+            let mine = |e: Exchange, m: Market| m == smarket && self.src.is_none_or(|s| s == e);
+            let clip = painter.with_clip_rect(main_plot);
+            let hp = resp.hover_pos().filter(|p| main_plot.contains(*p));
+            let mut tip = None;
+            for i in ices.filter(|i| mine(i.ex, i.market)) {
+                let (py, col) = (y(i.px * k(i.ex)), if i.bid { up() } else { dn() });
+                let x0 = fr.x(idx_of(&bars, i.first, ms)).max(main_plot.left());
+                let x1 = if live.contains(&depth::algoscan::ice_key(i)) { main_plot.right() } else { fr.x(idx_of(&bars, i.last, ms)).max(x0 + 24.0) };
+                if x1 < main_plot.left() { continue; }
+                dashed(&clip, x0, x1, py, col);
+                let sq = Rect::from_center_size(pos2(x0, py), vec2(7.0, 7.0));
+                if !ba_rect.is_some_and(|b| b.intersects(sq)) { clip.rect(sq, 1, col, Stroke::new(1.0, bg()), egui::StrokeKind::Outside); }
+                if hp.is_some_and(|p| p.x >= x0 && p.x <= x1 && (p.y - py).abs() <= 4.0) {
+                    tip = Some(format!("{:?} · {} @ {}\n{} {} · {} {} · {} {}", i.ex, t(if i.bid { "algo.ice_bid" } else { "algo.ice_ask" }), fmt_px(i.px),
+                        t("algo.traded"), crate::fmt_qty(i.traded), t("algo.shown"), crate::fmt_qty(i.shown_max), i.fills, t("algo.fills")));
+                }
+            }
+            for c in clips.filter(|c| mine(c.ex, c.market)) {
+                let col = if c.buy { up() } else { dn() };
+                for &(ts, px) in &c.pts {
+                    let i = idx_of(&bars, ts, ms);
+                    if i < i0 as f32 - 0.5 || i > i1 as f32 + 0.5 { continue; }
+                    let p = pos2(fr.x(i), y(px * k(c.ex)));
+                    if ba_rect.is_some_and(|b| b.expand(3.0).contains(p)) { continue; }
+                    clip.add(egui::Shape::convex_polygon(vec![p + vec2(0.0, -3.5), p + vec2(3.5, 0.0), p + vec2(0.0, 3.5), p + vec2(-3.5, 0.0)], col, Stroke::new(1.0, bg())));
+                    if hp.is_some_and(|h| h.distance(p) <= 6.0) {
+                        tip = Some(format!("{:?} · {}\n{} · {:.0}s · {} {}", c.ex, t(if c.buy { "algo.slicer_buy" } else { "algo.slicer_sell" }), crate::fmt_qty(c.qty), c.period_ms / 1e3, c.count, t("algo.clips")));
+                    }
+                }
+            }
+            if let Some(s) = tip {
+                egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), ui.id().with("algotip"), egui::PopupAnchor::Pointer)
+                    .show(|ui| ui.label(egui::RichText::new(s).font(mono(11.5)).color(fg())));
             }
         }
 
@@ -2518,6 +2566,7 @@ impl Chart {
                 ui.add_enabled(self.whales, egui::DragValue::new(&mut self.whale_usd).range(10_000.0..=50_000_000.0).speed(5_000.0).prefix("≥ $").custom_formatter(|v, _| fmt_usd_short(v)));
             });
             if perp { ui.checkbox(&mut self.fills_on, super::l("My fills (B / S)")); }
+            ui.checkbox(&mut self.algos, t("chart.algos")).on_hover_text(t("chart.algos_tip"));
             ui.checkbox(&mut self.heat, super::l("Book heatmap"));
             if perp { ui.checkbox(&mut self.liqmap, super::l("Liquidation map")).on_hover_text(t("chart.liqmap_tip")); }
             menu_sep(ui);

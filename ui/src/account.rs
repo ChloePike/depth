@@ -31,7 +31,7 @@ impl Tab {
 enum PosAct { Market(Value, f64), Limit(Value, f64, f64), Reverse(Value), CloseAll(Vec<Value>) }
 
 /// Something a table cell or menu asked for, run after the frame's tables are drawn.
-enum Act { Op(Value), Goto(String), Copy(String), Confirm(PosAct), TpSl(Value), Share(Value), Prefill(Value), Transfer(String), Keys }
+enum Act { Op(Value), Goto(String), Copy(String), Confirm(PosAct), TpSl(Value), Share(Value), Prefill(Value), Transfer(String), Keys, Insure(Value) }
 
 /// PnL card options (what the copied text reveals).
 struct Share { p: Value, amount: bool, prices: bool, copied: bool }
@@ -64,6 +64,8 @@ pub struct AccountPanel {
     pub open_settings: Option<u8>,
     /// a position to limit-close in the order panel, once it shows that symbol
     pub prefill: Option<(Value, std::time::Instant)>,
+    /// a position to open the options-hedge dialog for, once its base is the engine's
+    pub insure: Option<(Exchange, String)>,
 }
 
 impl Default for AccountPanel {
@@ -74,7 +76,7 @@ impl Default for AccountPanel {
             sort_orders: (0, true), sort_tpsl: (0, false), sort_oh: (0, true), sort_fills: (0, true), sort_closed: (0, true),
             sel_orders: vec![], sel_tpsl: vec![], close_px: HashMap::new(),
             confirm: None, share: None, sheet: None, xfer: None, wallets_requested: vec![], error: None, xfer_shot: false,
-            open_settings: None, prefill: None,
+            open_settings: None, prefill: None, insure: None,
         }
     }
 }
@@ -93,7 +95,13 @@ fn time(ms: i64) -> String {
     let (m, day) = d.split_once('/').unwrap_or(("", ""));
     format!("{m:0>2}-{day:0>2} {}", hms(ms))
 }
-fn base_of(symbol: &str) -> &str { symbol.strip_suffix("USDT").unwrap_or(symbol) }
+/// Base asset of a perp ("BTCUSDT") or option ("BTC-25DEC26-105000-P-USDT") symbol.
+fn base_of(symbol: &str) -> &str { let s = symbol.split('-').next().unwrap_or(symbol); s.strip_suffix("USDT").unwrap_or(s) }
+
+/// Option size protecting a perp position: long puts for a long, long calls for a short, same base.
+fn held_protection(opts: &[Value], base: &str, long: bool) -> f64 {
+    opts.iter().filter(|o| s(&o["base"]) == base && o["call"] == !long && s(&o["side"]) == "long").map(|o| f(&o["qty"])).sum()
+}
 fn pos_key(p: &Value) -> String { format!("{}|{}|{}", s(&p["ex"]), s(&p["symbol"]), s(&p["side"])) }
 fn row_key(v: &Value) -> String { format!("{}|{}", s(&v["ex"]), s(&v["id"])) }
 fn side_name(side: &str) -> &'static str {
@@ -236,6 +244,38 @@ fn symbol_cell(ui: &mut Ui, r: Rect, ex: &str, symbol: &str, key: &str, acts: &m
     if resp.hovered() { ui.painter().hline(tr.x_range(), tr.bottom(), egui::Stroke::new(1.0, mu())); }
     if resp.clicked() { acts.push(Act::Goto(base.to_string())); }
     tr.right()
+}
+
+/// One held option row in the positions table: size, average, mark, PnL, expiry, and whether a perp
+/// it protects is still open (an orphan keeps running to expiry).
+fn opt_cell(ui: &mut Ui, i: usize, r: Rect, p: &Value, perps: &[Value], acts: &mut Vec<Act>) {
+    let (q, entry, mark, upnl) = (f(&p["qty"]), f(&p["entry"]), f(&p["mark"]), f(&p["upnl"]));
+    let call = p["call"] == true;
+    let key = pos_key(p);
+    match i {
+        0 => {
+            let x = symbol_cell(ui, r, s(&p["ex"]), s(&p["symbol"]), &key, acts);
+            chip_at(ui, x + 8.0, r.center().y, if call { "Call" } else { "Put" }, side_tone(call));
+        }
+        1 => two(ui, r, (format!("{} USDT", usd(q * mark)), fg()), Some((format!("{} {}", qty(q), s(&p["base"])), mu())), true),
+        2 => { txt(ui, r, fmt_px(entry), mono(12.5), fg(), true); }
+        3 => { txt(ui, r, fmt_px(mark), mono(12.5), fg(), true); }
+        6 => {
+            let cost = entry * q;
+            let (top, bot) = halves(r);
+            txt(ui, top, format!("{} USDT", signed(upnl)), mono_s(12.5), pnl_col(upnl), true);
+            txt(ui, bot, format!("{}%", signed(if cost > 0.0 { upnl / cost * 100.0 } else { 0.0 })), mono_m(11.0), pnl_col(upnl), true);
+        }
+        7 => { txt(ui, r, format!("{} {}", super::t("ins.exp"), s(&p["expiry"])), prop(12.0), mu(), false); }
+        11 => {
+            let base = s(&p["base"]);
+            let covers = perps.iter().any(|x| base_of(s(&x["symbol"])) == base && (s(&x["side"]) == "long") != call);
+            let tr = if covers { txt(ui, r, super::t("ins.protecting"), prop(12.0), up(), true) } else { txt(ui, r, super::t("ins.orphan"), prop(12.0), WARN, true) };
+            if !covers { ui.interact(tr.expand(4.0), ui.id().with(("orph", &key)), egui::Sense::hover()).on_hover_text(super::t("ins.orphan_tip")); }
+        }
+        12 => {}
+        _ => { txt(ui, r, "—", mono(12.5), dim(), true); }
+    }
 }
 
 /// "Est. PnL" bubble under `anchor`, above everything (rows below must not cover it).
@@ -496,6 +536,11 @@ impl AccountPanel {
                 }
                 Act::Transfer(ex) => self.open_transfer(&ex, st, call),
                 Act::Keys => self.open_settings = Some(3),
+                Act::Insure(p) => {
+                    // option chains load for the engine's base: move there first
+                    if s(&st["base"]) != base_of(s(&p["symbol"])) { let _ = call(json!({"op": "set_base", "base": base_of(s(&p["symbol"]))})); }
+                    self.insure = Exchange::parse(s(&p["ex"])).map(|e| (e, s(&p["symbol"]).to_string()));
+                }
             }
         }
     }
@@ -539,11 +584,17 @@ impl AccountPanel {
     // ---- positions ----
 
     fn positions(&mut self, ui: &mut Ui, st: &Value, acts: &mut Vec<Act>) {
-        let cur = format!("{}USDT", s(&st["base"]));
-        let mut rows: Vec<&Value> = st["positions"].as_array().map(|a| a.iter().filter(|p| !self.hide_others || s(&p["symbol"]) == cur).collect()).unwrap_or_default();
-        // stable order: pushes reorder the engine's vector; ties broken by venue then side
-        rows.sort_by(|a, b| (s(&a["symbol"]), s(&a["ex"]), s(&a["side"])).cmp(&(s(&b["symbol"]), s(&b["ex"]), s(&b["side"]))));
+        let cur = s(&st["base"]);
+        let mut rows: Vec<&Value> = st["positions"].as_array().map(|a| a.iter().filter(|p| !self.hide_others || base_of(s(&p["symbol"])) == cur).collect()).unwrap_or_default();
+        // close-all covers perps only: options are closed on their venue
         let all: Vec<Value> = rows.iter().map(|p| (*p).clone()).collect();
+        let opts: Vec<Value> = st["opt_positions"].as_array().cloned().unwrap_or_default();
+        let perps: Vec<Value> = st["positions"].as_array().cloned().unwrap_or_default();
+        rows.extend(st["opt_positions"].as_array().into_iter().flatten().filter(|p| !self.hide_others || s(&p["base"]) == cur));
+        // stable order: pushes reorder the engine's vector; options right under their base's perps,
+        // ties broken by venue then side
+        rows.sort_by(|a, b| (base_of(s(&a["symbol"])), a["option"] == true, s(&a["symbol"]), s(&a["ex"]), s(&a["side"]))
+            .cmp(&(base_of(s(&b["symbol"])), b["option"] == true, s(&b["symbol"]), s(&b["ex"]), s(&b["side"]))));
         let pm = st["binance_pm"] == true;
         let tpsl = st["tpsl"].as_array().cloned().unwrap_or_default();
         let cols = [
@@ -551,6 +602,7 @@ impl AccountPanel {
             col(l("Size"), 130.0, true, Key::No), col(l("Entry"), 92.0, true, Key::No), col(l("Mark"), 92.0, true, Key::No), col(l("Liq. Price"), 92.0, true, Key::No),
             col(l("Margin"), 116.0, true, Key::No), col(l("PnL (ROE%)"), 140.0, true, Key::No), col(l("Close Position"), 236.0, false, Key::No),
             col(l("TP / SL"), 130.0, true, Key::No), col(l("Est. Funding"), 140.0, true, Key::No), col(l("Funding paid"), 120.0, true, Key::No),
+            col(super::t("ins.col"), 96.0, true, Key::No),
             Col { name: "", w: 84.0, right: true, grow: false, key: Key::No },
         ];
         let px_map = &mut self.close_px;
@@ -569,6 +621,7 @@ impl AccountPanel {
                 let c = if s(&p["side"]) == "long" { up() } else { dn() };
                 ui.painter().rect_filled(Rect::from_center_size(egui::pos2(r.left() + PAD - 4.5, r.center().y), egui::vec2(3.0, 22.0)), 2, c);
             }
+            Part::Cell(i, r, p) if p["option"] == true => opt_cell(ui, i, r, p, &perps, acts),
             Part::Cell(i, r, p) => {
                 let long = s(&p["side"]) == "long";
                 let side = if long { up() } else { dn() };
@@ -680,17 +733,27 @@ impl AccountPanel {
                         };
                         ui.interact(r, ui.id().with(("paid", &key)), egui::Sense::hover()).on_hover_text(tip);
                     }
+                    11 => {
+                        let b = Rect::from_min_max(egui::pos2(r.left(), r.center().y - 13.0), egui::pos2(r.right(), r.center().y + 13.0));
+                        // protection already held shows instead of the plain button (opening it again buys only the rest)
+                        let held = held_protection(&opts, base, long);
+                        let label = if held > 0.0 { format!("{} {}/{}", super::t("ins.held"), qty(held), qty(q)) } else { super::t("ins.btn").to_string() };
+                        if at(ui, b, |ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| kit::button(ui, &label, Look::Secondary, 26.0, None, true)).inner)
+                            .on_hover_text(super::t("ins.btn_tip")).clicked() { acts.push(Act::Insure(p.clone())); }
+                    }
                     _ => {
                         let b = Rect::from_min_max(egui::pos2(r.left(), r.center().y - 13.0), egui::pos2(r.right(), r.center().y + 13.0));
                         if at(ui, b, |ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| kit::button(ui, l("Reverse"), Look::Secondary, 26.0, None, true)).inner).on_hover_text(l("Close at market and open the same size on the other side (asks to confirm)")).clicked() { acts.push(Act::Confirm(PosAct::Reverse(p.clone()))); }
                     }
                 }
             }
+            Part::Menu(ps) if ps[0]["option"] == true => { if menu_item(ui, l("Copy Symbol")) { acts.push(Act::Copy(s(&ps[0]["symbol"]).into())); } }
             Part::Menu(ps) => {
                 let p = ps[0];
                 if menu_item(ui, l("Close at Market…")) { acts.push(Act::Confirm(PosAct::Market(p.clone(), f(&p["qty"])))); }
                 if menu_item(ui, l("Limit Close in Order Panel")) { acts.push(Act::Prefill(p.clone())); }
                 if menu_item(ui, l("TP/SL…")) { acts.push(Act::TpSl(p.clone())); }
+                if menu_item(ui, &format!("{}…", super::t("ins.btn"))) { acts.push(Act::Insure(p.clone())); }
                 if menu_item(ui, l("Share PnL…")) { acts.push(Act::Share(p.clone())); }
                 ui.separator();
                 if menu_item(ui, l("Copy Symbol")) { acts.push(Act::Copy(s(&p["symbol"]).into())); }
@@ -813,7 +876,7 @@ impl AccountPanel {
                 ui.set_height(30.0);
                 ui.add_space(PAD);
                 ui.label(RichText::new(format!("{} {}", picked.len(), l("selected"))).font(prop(12.0)).color(mu()));
-                if kit::button(ui, l("Cancel Selected Orders"), Look::Link, H_SM, None, true).clicked() { for o in &picked { acts.push(Act::Op(json!({"op": "cancel", "ex": o["ex"], "id": o["id"]}))); } }
+                if kit::button(ui, l("Cancel Selected Orders"), Look::Link, H_SM, None, true).clicked() { for o in &picked { acts.push(Act::Op(json!({"op": "cancel", "ex": o["ex"], "id": o["id"], "spot": o["spot"]}))); } }
             });
         }
         table(ui, "orders", &cols, rows, 36.0, l("No open orders"), Some(&mut self.sort_orders), Some(&mut self.sel_orders), &mut |ui, part| match part {
@@ -828,6 +891,7 @@ impl AccountPanel {
                 3 => {
                     let tr = txt(ui, r, s(&o["kind"]), prop(12.5), fg(), false);
                     if o["reduce_only"] == true { chip_at(ui, tr.right() + 6.0, r.center().y, l("Reduce"), kit::Tone::Neutral); }
+                    if o["spot"] == true { chip_at(ui, tr.right() + 6.0, r.center().y, super::t("spot.tag"), kit::Tone::Neutral); }
                 }
                 4 => { txt(ui, r, fmt_px(f(&o["price"])), mono_m(12.5), fg(), true); }
                 5 => { txt(ui, r, qty(f(&o["qty"])), mono(12.5), fg(), true); }
@@ -840,11 +904,11 @@ impl AccountPanel {
                 7 => { txt(ui, r, usd(f(&o["price"]) * f(&o["qty"])), mono(12.5), mu(), true); }
                 _ => {
                     let b = Rect::from_min_max(egui::pos2(r.left(), r.center().y - H_SM / 2.0), egui::pos2(r.right(), r.center().y + H_SM / 2.0));
-                    if at(ui, b, |ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| kit::button(ui, l("Cancel"), Look::Secondary, H_SM, None, true)).inner).clicked() { acts.push(Act::Op(json!({"op": "cancel", "ex": o["ex"], "id": o["id"]}))); }
+                    if at(ui, b, |ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| kit::button(ui, l("Cancel"), Look::Secondary, H_SM, None, true)).inner).clicked() { acts.push(Act::Op(json!({"op": "cancel", "ex": o["ex"], "id": o["id"], "spot": o["spot"]}))); }
                 }
             },
             Part::Menu(sel) => {
-                if menu_item(ui, if sel.len() == 1 { l("Cancel Order") } else { l("Cancel Selected Orders") }) { for o in &sel { acts.push(Act::Op(json!({"op": "cancel", "ex": o["ex"], "id": o["id"]}))); } }
+                if menu_item(ui, if sel.len() == 1 { l("Cancel Order") } else { l("Cancel Selected Orders") }) { for o in &sel { acts.push(Act::Op(json!({"op": "cancel", "ex": o["ex"], "id": o["id"], "spot": o["spot"]}))); } }
                 if menu_item(ui, l("Copy Order ID")) { acts.push(Act::Copy(sel.iter().map(|o| s(&o["id"])).collect::<Vec<_>>().join("\n"))); }
             }
             _ => {}

@@ -48,7 +48,8 @@ pub struct Quote {
     pub cost_pct: f64,
     /// cost_pct annualized over the days to expiry
     pub cost_apr: f64,
-    /// worst-case loss until expiry measured from `entry`, premium included, USD
+    /// worst-case further loss until expiry measured from `mark` (the open PnL is already sunk),
+    /// premium included, USD
     pub max_loss: f64,
     /// distance from mark to the strike (protection floor), fraction
     pub floor_dist: f64,
@@ -80,7 +81,8 @@ pub fn quotes(chains: &HashMap<Exchange, Chain>, usd: impl Fn(Exchange) -> f64, 
             let ask = ask * k;
             let cost = ask * pos.qty;
             let cost_pct = cost / notional;
-            let gap = if long { (pos.entry - o.strike).max(0.0) } else { (o.strike - pos.entry).max(0.0) };
+            // an ITM strike makes gap negative: its intrinsic value offsets part of the premium
+            let gap = if long { pos.mark - o.strike } else { o.strike - pos.mark };
             out.push(Quote {
                 ex: *ex, symbol: sym.clone(), expiry_ms: o.expiry_ms, days, strike: o.strike, call: o.call,
                 ask, ask_qty, iv: o.ask_iv.or(o.iv), delta: o.delta,

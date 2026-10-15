@@ -565,6 +565,8 @@ pub struct Agg {
     pub fp: HashMap<(Option<Exchange>, Market), Footprint>,
     /// order-by-order books: exact (Lighter) or inferred from order counts (OKX), native prices
     pub l3: HashMap<(Exchange, Market), crate::l3::L3Book>,
+    /// other traders' slicers and icebergs, from the prints and fills below
+    pub scan: crate::algoscan::Scan,
 }
 
 /// History at one chart timeframe: per-venue bars and the cross-venue bars built from them.
@@ -613,7 +615,7 @@ impl Agg {
         }
         let (ex, mk, ts) = (m.ex, m.market, m.ts);
         let k_usdt = self.usdt(ex, mk);
-        let Agg { venues, series, cvd, seeded, trades, big, fp, l3, .. } = self;
+        let Agg { venues, series, cvd, seeded, trades, big, fp, l3, scan, .. } = self;
         let v = venues.entry((ex, mk)).or_default();
         if v.symbol.is_none() { v.symbol = Some(m.symbol.clone()); }
         v.ts = ts;
@@ -628,6 +630,8 @@ impl Agg {
                         t.qty += qty;
                     }
                     _ => {
+                        // the print before this one is complete: no later fill can merge into it
+                        if let Some(p) = trades.back() { scan.print(p.ex, p.market, p.side == Side::Buy, p.ts, p.qty, p.px); }
                         trades.push_back(Tick { ts, ex, market: mk, px: *px, qty: *qty, side: *side });
                         if trades.len() > TAPE_CAP { trades.pop_front(); }
                     }
@@ -639,6 +643,7 @@ impl Agg {
                         _ => { big.push_back(t); if big.len() > TAPE_CAP { big.pop_front(); } }
                     }
                 }
+                scan.fill(ex, mk, *side == Side::Buy, ts, *px, *qty, v.book.qty_at(*side != Side::Buy, *px));
                 fp.entry((Some(ex), mk)).or_default().add(ts, *px, *qty, *side);
                 // taker volume per level for the L3 inference (only books that infer)
                 if let Some(b) = l3.get_mut(&(ex, mk)).filter(|_| matches!(ex, Exchange::Okx | Exchange::Hyperliquid)) { b.trade(*px, *qty, *side == Side::Buy); }

@@ -132,3 +132,7 @@ Last 60s = 近 60 秒
 adds = 新掛單
 fills = 成交
 cancels = 撤單
+Likely slicer buying = 疑似拆單買入（TWAP）
+Likely slicer selling = 疑似拆單賣出（TWAP）
+Likely iceberg bid = 疑似冰山買單
+Likely iceberg ask = 疑似冰山賣單

@@ -4,6 +4,7 @@ pub mod alias;
 pub mod db;
 pub mod l3;
 pub mod algo;
+pub mod algoscan;
 pub mod ex;
 pub mod insure;
 pub mod quant;
@@ -171,6 +172,8 @@ impl Book {
             for &(p, q) in lv { if q > 0.0 { side.insert(Px(p), q); } else { side.remove(&Px(p)); } }
         }
     }
+    /// Size resting at exactly `px` on one side (0 when absent).
+    pub fn qty_at(&self, bid: bool, px: f64) -> f64 { (if bid { &self.bids } else { &self.asks }).get(&Px(px)).copied().unwrap_or(0.0) }
     pub fn best_bid(&self) -> Option<(f64, f64)> { self.bids.iter().next_back().map(|(p, q)| (p.0, *q)) }
     pub fn best_ask(&self) -> Option<(f64, f64)> { self.asks.iter().next().map(|(p, q)| (p.0, *q)) }
     pub fn depth(&self) -> (usize, usize) { (self.bids.len(), self.asks.len()) }

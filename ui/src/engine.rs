@@ -16,9 +16,16 @@ const HISTORY_MARKETS: [Market; 2] = [Market::Spot, Market::Perp];
 #[derive(Default)]
 pub struct Account {
     pub keys: HashMap<Exchange, Keys>,
+    /// protection buy priced for the insurance dialog: (venue, option symbol) -> plan or error
+    pub opt_plan: Option<((Exchange, String), Result<trade::OptBuy, String>)>,
     /// per keyed venue: may the key trade (false = read-only); absent = unknown / not asked
     pub can_trade: HashMap<Exchange, bool>,
     pub positions: Vec<Position>,
+    /// held options (bought protection), every venue
+    pub opts: Vec<trade::OptPos>,
+    /// spot: resting orders and wallet coins per venue (trade::spot::VENUES)
+    pub spot_orders: Vec<trade::OpenOrder>,
+    pub spot_bal: HashMap<Exchange, Vec<trade::spot::Bal>>,
     pub orders: Vec<OpenOrder>,
     pub balances: HashMap<Exchange, Balance>,
     pub rules: HashMap<(Exchange, String), Rules>,
@@ -374,9 +381,23 @@ impl Engine {
         let (agg_s, feed, base_s) = (self.agg.clone(), self.signals.clone(), self.base.clone());
         rt.spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(5));
+            // algo detections already reported (key -> last seen): each algo once while it runs, again after 30 min quiet
+            let mut algos_seen: HashMap<String, i64> = HashMap::new();
             loop {
                 tick.tick().await;
                 let now = depth::now_ms();
+                let algos = {
+                    let mut a = agg_s.lock().unwrap();
+                    let vols: Vec<f64> = a.series.get(&(None, Market::Perp)).map(|s| s.bars.iter().rev().take(120).map(|b| b.vol * b.c).collect()).unwrap_or_default();
+                    let vol_1m = depth::quant::robust(&vols).map_or(0.0, |x| x.0);
+                    let found = depth::algoscan::significant(&a.scan, now, vol_1m, |e, m| a.usdt(e, m),
+                        |e, m, bid, px| a.venues.get(&(e, m)).is_some_and(|v| v.book.qty_at(bid, px) > 0.0));
+                    let s = depth::algoscan::signals(&found, now, vol_1m, |e, m| a.usdt(e, m));
+                    a.scan.remember(now, found);
+                    s
+                };
+                algos_seen.retain(|_, t| now - *t < 30 * 60_000);
+                let algos: Vec<_> = algos.into_iter().filter(|(k, _)| algos_seen.insert(k.clone(), now).is_none()).map(|(_, s)| s).collect();
                 let found = {
                     let a = agg_s.lock().unwrap();
                     let bars = |m: Market| a.series.get(&(None, m)).map(|s| s.bars.iter().cloned().collect::<Vec<_>>()).unwrap_or_default();
@@ -401,6 +422,8 @@ impl Engine {
                 };
                 let mut f = feed.lock().unwrap();
                 for sg in found { f.offer(sg, 600_000); }
+                // already deduplicated per algo above
+                for sg in algos { f.offer(sg, 0); }
             }
         });
 
@@ -515,6 +538,9 @@ impl Engine {
         rt.spawn(async move {
             let mut buf = Vec::with_capacity(1024);
             let mut dirty: std::collections::HashSet<Exchange> = Default::default();
+            // spot orders / balances changed (Bybit order.spot push): one REST refetch per 3s at most
+            let mut spot_dirty: std::collections::HashSet<Exchange> = Default::default();
+            let mut last_spot: HashMap<Exchange, std::time::Instant> = HashMap::new();
             // venues whose position pushes carry no liquidation price (Binance, Kraken): positions are
             // refetched after a push, at most every 3s, so the venue's own figure replaces the old one
             let mut pos_dirty: std::collections::HashSet<Exchange> = Default::default();
@@ -535,6 +561,7 @@ impl Engine {
                             for (ex, ev) in buf.drain(..) {
                                 match ev {
                                     trade::AccEvent::Resync => resync.push(ex),
+                                    trade::AccEvent::SpotDirty => { spot_dirty.insert(ex); }
                                     trade::AccEvent::BalanceDirty => {
                                         dirty.insert(ex);
                                         // equity moved (fill, funding, transfer): cross liquidation prices with it
@@ -582,6 +609,13 @@ impl Engine {
                                     ctx.request_repaint();
                                 }
                             });
+                        }
+                        let due: Vec<Exchange> = spot_dirty.iter().copied().filter(|e| last_spot.get(e).is_none_or(|t| t.elapsed() >= Duration::from_secs(3))).collect();
+                        for ex in due {
+                            spot_dirty.remove(&ex);
+                            last_spot.insert(ex, std::time::Instant::now());
+                            let (acc, ctx) = (account.clone(), ctx.clone());
+                            tokio::spawn(async move { refresh_spot(&acc, ex).await; ctx.request_repaint(); });
                         }
                         let due: Vec<Exchange> = dirty.iter().copied().filter(|e| last_bal.get(e).is_none_or(|t| t.elapsed() >= Duration::from_secs(3))).collect();
                         for ex in due {
@@ -716,6 +750,73 @@ impl Engine {
         let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
         rt.spawn(async move {
             place_logged(&account, ex, &req, ref_px).await;
+            ctx.request_repaint();
+        });
+    }
+
+    /// Price a protection buy on the venue's ask side (REST book + rules), into `Account::opt_plan`.
+    pub fn plan_option(&self, ex: Exchange, symbol: String, qty: f64, ctx: &eframe::egui::Context) {
+        let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        account.lock().unwrap().opt_plan = None;
+        rt.spawn(async move {
+            let r = trade::option_plan(ex, &symbol, qty).await.map_err(|e| format!("{e:#}"));
+            account.lock().unwrap().opt_plan = Some(((ex, symbol), r));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Send a priced protection buy (limit IOC); the result lands in the account log.
+    pub fn buy_option(&self, p: trade::OptBuy, ctx: &eframe::egui::Context) {
+        let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        rt.spawn(async move {
+            let Some(k) = account.lock().unwrap().keys.get(&p.ex).cloned() else { return };
+            let res = trade::buy_option(&k, &p).await;
+            let what = format!("{:?} {} buy {} limit {} IOC", p.ex, p.symbol, p.qty, p.limit);
+            let mut a = account.lock().unwrap();
+            match res { Ok(id) => a.note(format!("OK {what} id {id}"), true), Err(e) => a.note(format!("FAIL {what}: {e:#}"), false) }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Spot buy / sell on `ex` (limit or market, base units), on the account runtime; the result goes
+    /// to the account log, then spot orders and balances are refetched (Binance has no spot push here).
+    #[allow(clippy::too_many_arguments)]
+    pub fn spot_submit(&self, ex: Exchange, symbol: String, side: depth::Side, kind: trade::Kind, qty: f64, ref_px: f64, ctx: &eframe::egui::Context) {
+        let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        rt.spawn(async move {
+            let Some(k) = account.lock().unwrap().keys.get(&ex).cloned() else { return };
+            let key = (ex, format!("spot:{symbol}"));
+            let cached = account.lock().unwrap().rules.get(&key).copied();
+            let rules = match cached { Some(r) => Ok(r), None => trade::spot::rules(ex, &symbol).await };
+            let res = match rules {
+                Ok(r) => { account.lock().unwrap().rules.insert(key, r); trade::spot::place(ex, &k, &symbol, side, kind, qty, &r, ref_px).await }
+                Err(e) => Err(e),
+            };
+            let what = format!("{ex:?} spot {} {symbol} {qty} {}", if side == depth::Side::Buy { "buy" } else { "sell" }, kind.label());
+            { let mut a = account.lock().unwrap(); match res { Ok(id) => a.note(format!("OK {what} id {id}"), true), Err(e) => a.note(format!("FAIL {what}: {e:#}"), false) } }
+            ctx.request_repaint();
+            // a market order has filled by now; a limit shows as resting
+            for wait in [500, 2_500] {
+                tokio::time::sleep(Duration::from_millis(wait)).await;
+                refresh_spot(&account, ex).await;
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// Fetch spot orders and balances for `ex` now (the spot panel's first look at a venue).
+    pub fn spot_refresh(&self, ex: Exchange, ctx: &eframe::egui::Context) {
+        let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        rt.spawn(async move { refresh_spot(&account, ex).await; ctx.request_repaint(); });
+    }
+
+    pub fn spot_cancel(&self, o: &trade::OpenOrder, ctx: &eframe::egui::Context) {
+        let (Some(rt), account, ctx, o) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone(), o.clone()) else { return };
+        rt.spawn(async move {
+            let Some(k) = account.lock().unwrap().keys.get(&o.ex).cloned() else { return };
+            let res = trade::spot::cancel(o.ex, &k, &o.symbol, &o.id).await;
+            { let mut a = account.lock().unwrap(); match res { Ok(()) => a.note(format!("OK {:?} spot cancel {} {}", o.ex, o.symbol, o.id), true), Err(e) => a.note(format!("FAIL {:?} spot cancel {} {}: {e:#}", o.ex, o.symbol, o.id), false) } }
+            refresh_spot(&account, o.ex).await;
             ctx.request_repaint();
         });
     }
@@ -1184,10 +1285,22 @@ async fn cached_history(ex: Exchange, sub: &Sub, tf: u32, stats: &Arc<Mutex<Stat
     h
 }
 
+/// REST snapshot of one venue's spot orders and coins (replaces that venue's rows). Errors (a key
+/// without spot permission) go to the trade log only: they must not mark the venue's perp account.
+async fn refresh_spot(account: &Arc<Mutex<Account>>, ex: Exchange) {
+    if !trade::spot::VENUES.contains(&ex) { return; }
+    let Some(k) = account.lock().unwrap().keys.get(&ex).cloned() else { return };
+    let (o, b) = tokio::join!(trade::spot::open_orders(ex, &k), trade::spot::balances(ex, &k));
+    let mut a = account.lock().unwrap();
+    match o { Ok(o) => { a.spot_orders.retain(|x| x.ex != ex); a.spot_orders.extend(o); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} spot orders: {e:#}\n")) }
+    match b { Ok(b) => { a.spot_bal.insert(ex, b); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} spot balances: {e:#}\n")) }
+}
+
 /// REST snapshot of one venue's positions, open orders and balance (replaces that venue's rows).
 async fn refresh_venue(account: &Arc<Mutex<Account>>, ex: Exchange) {
+    refresh_spot(account, ex).await;
     let Some(k) = account.lock().unwrap().keys.get(&ex).cloned() else { return };
-    let (p, o, b) = tokio::join!(trade::positions(ex, &k), trade::open_orders(ex, &k), trade::balance(ex, &k));
+    let (p, o, b, op) = tokio::join!(trade::positions(ex, &k), trade::open_orders(ex, &k), trade::balance(ex, &k), trade::option_positions(ex, &k));
     // TP/SL snapshot (Binance: 40 weight for the account; snapshots only run on resync / 5 min)
     if matches!(ex, Exchange::Bybit | Exchange::Binance) {
         if let Ok(t) = trade::tpsl::list(ex, &k).await {
@@ -1201,6 +1314,8 @@ async fn refresh_venue(account: &Arc<Mutex<Account>>, ex: Exchange) {
     let mut err = None;
     match p { Ok(p) => { a.positions.retain(|x| x.ex != ex); a.positions.extend(p); } Err(e) => err = err.or(Some(e)) }
     match o { Ok(o) => { a.orders.retain(|x| x.ex != ex); a.orders.extend(o); } Err(e) => err = err.or(Some(e)) }
+    // an account without option trading answers with an error: keep it out of the venue's status
+    if let Ok(op) = op { a.opts.retain(|x| x.ex != ex); a.opts.extend(op); }
     match b { Ok(b) => { a.balances.insert(ex, b); } Err(e) => err = err.or(Some(e)) }
     match err {
         None => { a.errors.remove(&ex); }
@@ -1320,7 +1435,12 @@ fn apply(a: &mut Account, ex: Exchange, ev: trade::AccEvent) -> bool {
         E::TpSl(t) => { a.tpsl.retain(|x| !(x.ex == ex && x.id == t.id)); a.tpsl.push(t); true }
         E::TpSlDone { id } => { a.tpsl.retain(|x| !(x.ex == ex && x.id == id)); true }
         E::Fill(f) => { depth::db::fills_put(&[f]); a.fills_ver += 1; true }
-        E::Resync | E::BalanceDirty => false,
+        E::OptPos(p) => {
+            a.opts.retain(|x| !(x.ex == ex && x.symbol == p.symbol));
+            if p.qty > 0.0 { a.opts.push(p); }
+            true
+        }
+        E::Resync | E::BalanceDirty | E::SpotDirty => false,
     }
 }
 

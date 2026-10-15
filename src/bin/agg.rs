@@ -44,6 +44,16 @@ fn print(a: &Agg, base: &str) {
     }
     for (m, h) in &a.heat { println!("heatmap {m:?}: {} columns, bin {}, last column {} bins", h.cols.len(), h.bin, h.cols.back().map(|c| c.1.len()).unwrap_or(0)); }
 
+    let now = now_ms();
+    println!("\n==== {base} likely algos ====");
+    for c in a.scan.clips(now) {
+        println!("slicer  {:<11} {:?} {} {} every {:.1}s x{} (${:.0}k so far)", format!("{:?}", c.ex), c.market, if c.buy { "BUY " } else { "SELL" }, c.qty, c.period_ms / 1e3, c.count, c.qty * c.px * c.count as f64 / 1e3);
+    }
+    let alive = |e: Exchange, m: Market, bid: bool, px: f64| a.venues.get(&(e, m)).is_some_and(|v| v.book.qty_at(bid, px) > 0.0);
+    for i in a.scan.icebergs(now, alive) {
+        println!("iceberg {:<11} {:?} {} @ {} traded {:.4} vs shown max {:.4} ({} fills, {:.0}s)", format!("{:?}", i.ex), i.market, if i.bid { "bid" } else { "ask" }, i.px, i.traded, i.shown_max, i.fills, (i.last - i.first) as f64 / 1e3);
+    }
+
     println!("\n==== {base} options (first 4 expiries per venue) ====");
     let mut chains: Vec<_> = a.chains.iter().collect();
     chains.sort_by_key(|(e, _)| format!("{e:?}"));

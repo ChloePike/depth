@@ -254,13 +254,13 @@ fn progress(ui: &mut Ui, frac: f32, col: Color32) {
 }
 
 /// Dialog frame: popup surface, radius 6, hairline, soft shadow, 20 px padding.
-fn dialog(id: &str) -> egui::Modal {
+pub(crate) fn dialog(id: &str) -> egui::Modal {
     egui::Modal::new(egui::Id::new(id)).backdrop_color(Color32::from_black_alpha(140)).frame(egui::Frame::new().fill(popup_bg()).corner_radius(6)
         .stroke(Stroke::new(1.0, line())).inner_margin(20).shadow(egui::Shadow { offset: [0, 12], blur: 32, spread: 0, color: Color32::from_black_alpha(110) }))
 }
 
 /// Dialog title row: 16 semibold, a grey subtitle beside it, an optional tag on the right.
-fn dialog_title(ui: &mut Ui, title: &str, sub: &str, tag: Option<(&str, Tone)>) {
+pub(crate) fn dialog_title(ui: &mut Ui, title: &str, sub: &str, tag: Option<(&str, Tone)>) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         ui.label(RichText::new(title).font(prop_s(16.0)).color(fg_strong()));
