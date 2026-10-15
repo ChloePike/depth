@@ -129,6 +129,6 @@ Orders at this level = 此价位挂单
 Largest orders = 最大挂单
 Oldest order = 最早挂单
 Last 60s = 近 60 秒
-adds = 挂入
+adds = 新挂单
 fills = 成交
 cancels = 撤单

@@ -411,19 +411,6 @@ impl App {
         let txt = |s: String, col: Color32| RichText::new(s).font(mono(11.5)).color(col);
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
-            let nowms = now_ms();
-            for e in Exchange::ALL {
-                let last = stats.venue.iter().filter(|((x, _), _)| *x == e).map(|(_, v)| v.1).max();
-                let alive = last.is_some_and(|l| nowms - l < 5_000);
-                let on = !self.eng.off.contains(&e);
-                let lat = stats.latency(e);
-                let lat_col = match lat { Some(l) if l < 150.0 => up(), Some(l) if l < 400.0 => WARN, Some(_) => dn(), None => dim() };
-                let resp = status_venue(ui, e, on, alive, lat, lat_col)
-                    .on_hover_text(format!("{e:?}: {}", if on { t("status.scope_on") } else { t("status.scope_off") }));
-                // switching a venue off disconnects only that venue; on connects only it
-                // applied after the frame's agg lock is released (set_venue takes it): doing it here deadlocked
-                if resp.clicked() && (!on || self.eng.off.len() + 1 < Exchange::ALL.len()) { self.venue_toggle = Some((e, !on)); }
-            }
             // metrics on the right (laid out right to left)
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // language switch (rightmost, persisted)
@@ -461,6 +448,25 @@ impl App {
                     ui.label(txt(format!("{} {mb} MB", t("status.mem")), if mb > 1500 { dn() } else if mb > 800 { WARN } else { mu() }));
                 }
                 ui.label(txt(format!("{} {}", fmt_dp(self.rate.2, 0), t("status.msgs")), mu()));
+                // venues take what the metrics leave; too narrow for names: logo + latency only
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 14.0;
+                    let full: f32 = Exchange::ALL.iter().map(|e| ui.painter().layout_no_wrap(format!("{e:?}"), prop(11.5), mu()).size().x + 95.0).sum();
+                    let names = ui.available_width() >= full;
+                    let nowms = now_ms();
+                    for e in Exchange::ALL {
+                        let last = stats.venue.iter().filter(|((x, _), _)| *x == e).map(|(_, v)| v.1).max();
+                        let alive = last.is_some_and(|l| nowms - l < 5_000);
+                        let on = !self.eng.off.contains(&e);
+                        let lat = stats.latency(e);
+                        let lat_col = match lat { Some(l) if l < 150.0 => up(), Some(l) if l < 400.0 => WARN, Some(_) => dn(), None => dim() };
+                        let resp = status_venue(ui, e, on, alive, lat, lat_col, names)
+                            .on_hover_text(format!("{e:?}: {}", if on { t("status.scope_on") } else { t("status.scope_off") }));
+                        // switching a venue off disconnects only that venue; on connects only it
+                        // applied after the frame's agg lock is released (set_venue takes it): doing it here deadlocked
+                        if resp.clicked() && (!on || self.eng.off.len() + 1 < Exchange::ALL.len()) { self.venue_toggle = Some((e, !on)); }
+                    }
+                });
             });
         });
     }
@@ -489,6 +495,13 @@ struct Cc { egui_ctx: egui::Context }
 impl eframe::App for App {
     /// the gutters between cards show the window clear color: the darkest base
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] { bg().to_normalized_gamma_f32() }
+
+    /// Screenshot runs: `T1_HOVER=x,y` (points) parks the pointer there, so tooltips can be checked.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if self.shot.is_none() { return; }
+        let Some((x, y)) = std::env::var("T1_HOVER").ok().and_then(|v| { let (a, b) = v.split_once(',')?; Some((a.parse().ok()?, b.parse().ok()?)) }) else { return };
+        raw.events.push(egui::Event::PointerMoved(egui::pos2(x, y)));
+    }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         // with `--features hotpatch` under `dx serve --hotpatch`, edits to this crate swap in live
@@ -851,8 +864,8 @@ fn window_buttons(ui: &mut Ui, maximized: bool) {
 }
 
 /// Status bar venue: state dot (green streaming, red silent, grey switched off), name, push latency.
-fn status_venue(ui: &mut Ui, e: Exchange, on: bool, alive: bool, lat: Option<f64>, lat_col: Color32) -> egui::Response {
-    let name = ui.painter().layout_no_wrap(format!("{e:?}"), prop(11.5), if on { mu() } else { dim() });
+fn status_venue(ui: &mut Ui, e: Exchange, on: bool, alive: bool, lat: Option<f64>, lat_col: Color32, names: bool) -> egui::Response {
+    let name = ui.painter().layout_no_wrap(if names { format!("{e:?}") } else { String::new() }, prop(11.5), if on { mu() } else { dim() });
     let ms_col = if !on { dim() } else if alive { lat_col } else { dn() };
     let ms = ui.painter().layout_no_wrap(if on { lat.map(|l| format!("{l:.0}ms")).unwrap_or("–".into()) } else { "off".into() }, mono(11.5), ms_col);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(30.0 + name.size().x + 5.0 + ms.size().x, 18.0), egui::Sense::click());

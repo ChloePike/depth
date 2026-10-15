@@ -336,17 +336,21 @@ impl BookView {
                 }
                 let key = (is_ask, (l.px / bin).round() as i64);
                 if let Some(os) = blocks.get(&key) {
+                    if !lines.is_empty() { lines.push(String::new()); }
                     let known: Vec<_> = os.iter().filter(|o| o.1 != depth::l3::Src::Split).collect();
                     let exact = known.iter().filter(|o| o.1 == depth::l3::Src::Exact).count();
                     let how = if exact == known.len() { s_exact } else if exact == 0 { s_inf } else { "" };
-                    lines.push(format!("{s_orders}  {}  {how}", os.len()));
+                    lines.push(format!("{s_orders}  {}{}", os.len(), if how.is_empty() { String::new() } else { format!(" · {how}") }));
                     let mut qs: Vec<f64> = known.iter().map(|o| o.0).collect();
                     qs.sort_by(|a, b| b.total_cmp(a));
-                    if !qs.is_empty() { lines.push(format!("{s_largest}  {}", qs.iter().take(3).map(|q| qty_sig(*q)).collect::<Vec<_>>().join("  "))); }
-                    if let Some(o) = known.iter().min_by_key(|o| o.3) { lines.push(format!("{s_oldest}  {}{}  {}", if o.4 { "" } else { "> " }, age(now - o.3), qty_sig(o.0))); }
+                    if !qs.is_empty() { lines.push(format!("{s_largest}  {}", qs.iter().take(3).map(|q| qty_sig(*q)).collect::<Vec<_>>().join(" · "))); }
+                    if let Some(o) = known.iter().min_by_key(|o| o.3) { lines.push(format!("{s_oldest}  {} · {}{}", qty_sig(o.0), if o.4 { "" } else { "> " }, age(now - o.3))); }
                 }
                 if let Some(c) = life.get(&key) {
-                    lines.push(format!("{s_l4}  {}", (0..3).filter(|i| c[*i].0 > 0).map(|i| format!("{} {} {}", s_kinds[i], c[i].0, qty_sig(c[i].1))).collect::<Vec<_>>().join("  ")));
+                    // own section: a caption, then kind / count / size per row
+                    if !lines.is_empty() { lines.push(String::new()); }
+                    lines.push(format!("#{s_l4}"));
+                    lines.extend((0..3).filter(|i| c[*i].0 > 0).map(|i| format!("{}  {}  {}", s_kinds[i], c[i].0, qty_sig(c[i].1))));
                 }
                 if !lines.is_empty() { *tip.borrow_mut() = Some(lines.join("\n")); }
             }
@@ -380,16 +384,30 @@ impl BookView {
         if let Some(t) = tip.into_inner() {
             egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), ui.id().with("l3tip"), egui::PopupAnchor::Pointer)
                 .show(|ui| {
-                    // never wrapped; "a  b  c" lines become aligned columns (names left, numbers right)
-                    egui::Grid::new("booktip").spacing(vec2(12.0, 3.0)).show(ui, |ui| {
-                        for line in t.lines() {
-                            for (i, cell) in line.split("  ").map(str::trim).filter(|c| !c.is_empty()).enumerate() {
-                                let lab = egui::Label::new(egui::RichText::new(cell).font(if i == 0 { prop(11.5) } else { mono(11.5) }).color(if i == 0 { fg() } else { fg_strong() })).extend();
-                                if i == 0 { ui.add(lab); } else { ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(lab)); }
-                            }
-                            ui.end_row();
+                    // never wrapped; sections split by a blank line, each its own grid so column
+                    // counts never mix; "a  b  c" rows are aligned columns (names left, numbers
+                    // right), a "#caption" line heads its section
+                    for (k, sec) in t.split("\n\n").enumerate() {
+                        // hairline as wide as the content so far (ui.separator() would stretch the tooltip)
+                        if k > 0 {
+                            let (r, _) = ui.allocate_exact_size(vec2(ui.min_rect().width(), 9.0), Sense::hover());
+                            ui.painter().hline(r.x_range(), r.center().y, egui::Stroke::new(1.0, line()));
                         }
-                    });
+                        let mut rows = sec.lines().peekable();
+                        if let Some(c) = rows.peek().and_then(|r| r.strip_prefix('#')) {
+                            ui.label(egui::RichText::new(c).font(prop_s(11.0)).color(mu()));
+                            rows.next();
+                        }
+                        egui::Grid::new(("booktip", k)).spacing(vec2(14.0, 3.0)).show(ui, |ui| {
+                            for line in rows {
+                                for (i, cell) in line.split("  ").map(str::trim).filter(|c| !c.is_empty()).enumerate() {
+                                    let lab = egui::Label::new(egui::RichText::new(cell).font(if i == 0 { prop(11.5) } else { mono(11.5) }).color(if i == 0 { fg() } else { fg_strong() })).extend();
+                                    if i == 0 { ui.add(lab); } else { ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(lab)); }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    }
                 });
         }
         // click-to-fill only on a single venue's raw book (aligned aggregate prices are not executable)

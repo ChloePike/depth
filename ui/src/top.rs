@@ -193,7 +193,7 @@ impl TopBar {
         let score = self.panic.1.as_ref().map(|p| p.score);
         parts.push((score.map(|x| format!("{x:.0}")).unwrap_or("–".into()), mono_m(12.0), score.map(fear).unwrap_or(dim())));
         if let Some((g, _)) = &fng {
-            parts.push((l("Market").into(), prop_m(12.0), mu()));
+            parts.push((l("Market F&G").into(), prop_m(12.0), mu()));
             parts.push((format!("{:.0}", 100.0 - g), mono_m(12.0), fear(100.0 - g)));
         }
         let gs: Vec<_> = parts.into_iter().map(|(t, f, c)| ui.painter().layout_no_wrap(t, f, c)).collect();
@@ -217,7 +217,7 @@ impl TopBar {
             // two dials: intraday (own) and market-wide daily
             let (r, _) = ui.allocate_exact_size(vec2(280.0, 92.0), Sense::hover());
             let mkt = fng.as_ref().map(|f| 100.0 - f.0);
-            for (k, (v, cap)) in [(score, l("Short-term")), (mkt, l("Market"))].into_iter().enumerate() {
+            for (k, (v, cap)) in [(score, l("Short-term")), (mkt, l("Market F&G"))].into_iter().enumerate() {
                 let c = pos2(r.left() + 70.0 + k as f32 * 140.0, r.top() + 60.0);
                 gauge(ui.painter(), c, 52.0, v, 7.0);
                 ui.painter().text(c + vec2(0.0, -14.0), Align2::CENTER_CENTER, v.map(|x| format!("{x:.0}")).unwrap_or("–".into()), display_s(22.0), v.map(fear).unwrap_or(dim()));
@@ -243,7 +243,7 @@ impl TopBar {
         let now = depth::now_ms();
         let open: Vec<&str> = MARKETS.iter().filter(|m| m.status(now).0).map(|m| m.short).collect();
         let txt = if open.is_empty() { l("All closed").to_string() } else { open.join(" · ") };
-        let lg = ui.painter().layout_no_wrap(l("Open").into(), prop_m(12.0), mu());
+        let lg = ui.painter().layout_no_wrap(l("Stocks open").into(), prop_m(12.0), mu());
         let tg = ui.painter().layout_no_wrap(txt, prop_m(12.0), if open.is_empty() { dim() } else { fg() });
         let (r, resp) = ui.allocate_exact_size(vec2(lg.size().x + tg.size().x + 30.0, 30.0), Sense::hover());
         let p = ui.painter();

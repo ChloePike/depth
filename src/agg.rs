@@ -1108,9 +1108,9 @@ pub fn panic(bars: &[Bar]) -> Option<Panic> {
         ("Taker sell 15m", &|i| ratio(sum(i, &|b| b.sell - b.buy), sum(i, &|b| b.buy + b.sell))),
         ("Long liquidations 15m", &|i| ratio(sum(i, &|b| b.liq_long - b.liq_short), sum(i, &|b| b.vol))),
         // live predicted rate only: history carries the settled step line, a different series
-        ("Funding", &|i| bars[i].funding_h.map(|f| -f)),
+        ("Funding (predicted)", &|i| bars[i].funding_h.map(|f| -f)),
         // 1m basis is mostly quote noise; 15m mean
-        ("Basis", &|i| { let v: Vec<f64> = bars[i + 1 - SHORT..=i].iter().filter_map(|b| b.basis_bps).collect(); (!v.is_empty()).then(|| -v.iter().sum::<f64>() / v.len() as f64) }),
+        ("Basis 15m", &|i| { let v: Vec<f64> = bars[i + 1 - SHORT..=i].iter().filter_map(|b| b.basis_bps).collect(); (!v.is_empty()).then(|| -v.iter().sum::<f64>() / v.len() as f64) }),
     ];
     let mut parts = vec![];
     for (name, f) in feats {
