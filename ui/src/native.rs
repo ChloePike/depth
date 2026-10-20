@@ -109,7 +109,7 @@ impl App {
             "ex": ex_name(o.ex), "symbol": o.symbol, "id": o.id, "side": if o.side == Side::Buy { "buy" } else { "sell" }, "price": o.price, "qty": o.qty,
             "filled": o.filled, "kind": o.kind, "reduce_only": o.reduce_only, "ts": o.ts, "pos": o.pos.map(side_name), "spot": spot,
         });
-        let orders: Vec<Value> = acc.orders.iter().map(|o| order_json(o, false)).chain(acc.spot_orders.iter().map(|o| order_json(o, true))).collect();
+        let orders: Vec<Value> = acc.orders.iter().map(|o| order_json(o, false)).chain(acc.spot_orders.iter().chain(&acc.margin_orders).map(|o| order_json(o, true))).collect();
         let tpsl: Vec<Value> = acc.tpsl.iter().map(|t| json!({
             "ex": ex_name(t.ex), "id": t.id, "symbol": t.symbol, "pos": side_name(t.pos), "take_profit": t.take_profit, "trigger_px": t.trigger_px,
             "qty": t.qty, "trigger": if matches!(t.trigger, trade::tpsl::Trigger::Last) { "last" } else { "mark" },
@@ -251,8 +251,12 @@ impl App {
             }
             "cancel" if v["spot"] == true => {
                 let (e, id) = (exv()?, s("id"));
-                let o = self.eng.account.lock().unwrap().spot_orders.iter().find(|o| o.ex == e && o.id == id).cloned().ok_or("order not found")?;
-                self.eng.spot_cancel(&o, ctx);
+                let (o, margin) = {
+                    let a = self.eng.account.lock().unwrap();
+                    let find = |v: &[trade::OpenOrder]| v.iter().find(|o| o.ex == e && o.id == id).cloned();
+                    match find(&a.spot_orders) { Some(o) => (o, false), None => (find(&a.margin_orders).ok_or("order not found")?, true) }
+                };
+                self.eng.spot_cancel(&o, margin, ctx);
             }
             "cancel" => {
                 let (e, id) = (exv()?, s("id"));

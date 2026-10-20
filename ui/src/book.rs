@@ -496,10 +496,11 @@ impl BookView {
     pub fn tabs(&mut self, ui: &mut Ui) -> bool {
         let sp = ui.spacing().item_spacing.y;
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
-        let mut x = row.left();
+        // four equal tabs across the whole row
+        let w = (row.width() - 6.0) / 4.0;
         for (i, name) in [(0u8, l("Book")), (1, l("Trades")), (2, l("Venues")), (3, l("Quant"))] {
-            let r = pill(ui, pos2(x, row.top()), name, self.pane() == i, ("book_tab", i));
-            x = r.rect.right() + 2.0;
+            let cell = Rect::from_min_size(pos2(row.left() + i as f32 * (w + 2.0), row.top()), vec2(w, row.height()));
+            let r = pill_in(ui, cell, name, self.pane() == i, ("book_tab", i), 12.5);
             if r.clicked() && self.pane() != i {
                 if i < 2 { self.trades = i == 1; self.page = 0; } else { self.page = i; }
                 ui.ctx().request_repaint();
@@ -639,13 +640,13 @@ pub(super) fn overline_at(p: &egui::Painter, pos: egui::Pos2, align: Align2, tex
 
 /// Compact pill tab at `at` (26 px, 12.5): selected = hl solid and semibold, others grey medium;
 /// the fill fades in.
-fn pill(ui: &mut Ui, at: egui::Pos2, text: &str, on: bool, id: impl std::hash::Hash + std::fmt::Debug) -> egui::Response {
-    pill_sized(ui, at, text, on, id, 26.0, 12.5)
-}
-
 fn pill_sized(ui: &mut Ui, at: egui::Pos2, text: &str, on: bool, id: impl std::hash::Hash + std::fmt::Debug, h: f32, size: f32) -> egui::Response {
     let w = ui.painter().layout_no_wrap(text.to_string(), prop_s(size), fg()).size().x + if h > 24.0 { 20.0 } else { 14.0 };
-    let r = Rect::from_min_size(at, vec2(w, h));
+    pill_in(ui, Rect::from_min_size(at, vec2(w, h)), text, on, id, size)
+}
+
+/// A pill filling `r`.
+fn pill_in(ui: &mut Ui, r: Rect, text: &str, on: bool, id: impl std::hash::Hash + std::fmt::Debug, size: f32) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(id), Sense::click());
     let s = ui.ctx().animate_bool_with_time(resp.id.with("on"), on, 0.15);
     let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() && !on, 0.1);

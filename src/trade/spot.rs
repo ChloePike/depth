@@ -1,7 +1,9 @@
 //! Spot trading: Bybit v5 (`category=spot`, unified account) and Binance spot (`/api/v3`, the SPOT
 //! wallet; Portfolio Margin users move USDT there first, see `transfer`). Unified symbols
 //! ("BTCUSDT") and base-unit sizes, like the perp API. Orders are plain buy / sell: no position,
-//! leverage or reduce-only.
+//! leverage or reduce-only. Margin orders (Margin mode) go through the same functions with an
+//! `Effect`: Bybit unified spot with `isLeverage`, Binance cross margin (`/sapi/v1/margin`, Portfolio
+//! Margin `/papi/v1/margin`) with `sideEffectType`.
 //! ponytail: Bybit and Binance only; the other venues' spot order entry goes behind these functions.
 use super::{binance_at, bybit, fmt_step, n, side_str, testnet, Keys, Kind, OpenOrder, Rules, Tif};
 use crate::{ws, Exchange, Side};
@@ -13,9 +15,19 @@ pub const VENUES: &[Exchange] = &[Exchange::Bybit, Exchange::Binance];
 fn binance_spot() -> &'static str { if testnet() { "https://testnet.binance.vision" } else { "https://api.binance.com" } }
 fn bybit_base() -> &'static str { super::bybit_url() }
 
-/// One coin on the venue's spot wallet (Bybit: the unified account), base units.
+/// One coin on the venue's spot wallet (Bybit: the unified account), base units; `borrowed` is the
+/// margin loan (margin wallets and the Bybit unified account only).
 #[derive(Clone, Debug, PartialEq)]
-pub struct Bal { pub coin: String, pub free: f64, pub locked: f64 }
+pub struct Bal { pub coin: String, pub free: f64, pub locked: f64, pub borrowed: f64 }
+
+/// What a margin order does with loans: nothing, borrow what it needs, or repay debt with what it gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Effect { Plain, Borrow, Repay }
+
+/// Binance cross-margin API: (host, path prefix); Portfolio Margin accounts trade margin through papi.
+async fn binance_margin(k: &Keys) -> Result<(&'static str, &'static str)> {
+    Ok(if super::binance_pm(k).await? { (super::papi_url(), "/papi/v1/margin") } else { (binance_spot(), "/sapi/v1/margin") })
+}
 
 pub async fn rules(ex: Exchange, symbol: &str) -> Result<Rules> {
     match ex {
@@ -50,9 +62,10 @@ pub fn checked(kind: Kind, qty: f64, r: &Rules, ref_px: f64) -> Result<(String, 
     Ok((q, px))
 }
 
-pub fn bybit_body(symbol: &str, side: Side, kind: Kind, qty: &str, px: Option<&str>) -> Value {
+pub fn bybit_body(symbol: &str, side: Side, kind: Kind, qty: &str, px: Option<&str>, borrow: bool) -> Value {
     // marketUnit: a market buy is sized in quote by default; ours are always base units
     let mut b = json!({"category": "spot", "symbol": symbol, "side": side_str(Exchange::Bybit, side), "qty": qty, "marketUnit": "baseCoin"});
+    if borrow { b["isLeverage"] = 1.into(); }
     match kind {
         Kind::Limit { tif, .. } => {
             b["orderType"] = "Limit".into();
@@ -79,22 +92,84 @@ pub fn binance_params(symbol: &str, side: Side, kind: Kind, qty: &str, px: Optio
     p
 }
 
-pub async fn place(ex: Exchange, k: &Keys, symbol: &str, side: Side, kind: Kind, qty: f64, r: &Rules, ref_px: f64) -> Result<String> {
+pub fn effect_str(e: Effect) -> &'static str { match e { Effect::Plain => "NO_SIDE_EFFECT", Effect::Borrow => "MARGIN_BUY", Effect::Repay => "AUTO_REPAY" } }
+
+/// Spot order, or a margin order when `margin` is set.
+#[allow(clippy::too_many_arguments)]
+pub async fn place(ex: Exchange, k: &Keys, symbol: &str, side: Side, kind: Kind, qty: f64, r: &Rules, ref_px: f64, margin: Option<Effect>) -> Result<String> {
     let (q, px) = checked(kind, qty, r, ref_px)?;
     match ex {
-        Exchange::Bybit => Ok(bybit(k, false, "/v5/order/create", bybit_body(symbol, side, kind, &q, px.as_deref())).await?["orderId"].as_str().unwrap_or_default().to_string()),
-        Exchange::Binance => Ok(binance_at(k, binance_spot(), reqwest::Method::POST, "/api/v3/order", &binance_params(symbol, side, kind, &q, px.as_deref())).await?["orderId"].to_string()),
+        Exchange::Bybit => {
+            let id = bybit(k, false, "/v5/order/create", bybit_body(symbol, side, kind, &q, px.as_deref(), margin == Some(Effect::Borrow))).await?["orderId"].as_str().unwrap_or_default().to_string();
+            // ponytail: Bybit has no repay-on-fill flag; repays the liability once from what is free right
+            // after placing (a market order has filled by then, a resting limit has not)
+            if margin == Some(Effect::Repay) {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                let coin = if side == Side::Buy { symbol.strip_suffix("USDT").unwrap_or(symbol) } else { "USDT" };
+                bybit(k, false, "/v5/account/quick-repayment", json!({"coin": coin})).await.map_err(|e| anyhow!("order {id} placed, repay failed: {e:#}"))?;
+            }
+            Ok(id)
+        }
+        Exchange::Binance => {
+            let mut p = binance_params(symbol, side, kind, &q, px.as_deref());
+            let (host, path) = match margin {
+                None => (binance_spot(), "/api/v3/order".to_string()),
+                Some(e) => { p.push(("sideEffectType", effect_str(e).into())); let (h, pre) = binance_margin(k).await?; (h, format!("{pre}/order")) }
+            };
+            Ok(binance_at(k, host, reqwest::Method::POST, &path, &p).await?["orderId"].to_string())
+        }
         _ => bail!("{ex:?}: spot trading not supported yet"),
     }
 }
 
-pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {
+pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str, margin: bool) -> Result<()> {
     match ex {
         Exchange::Bybit => { bybit(k, false, "/v5/order/cancel", json!({"category": "spot", "symbol": symbol, "orderId": id})).await?; }
-        Exchange::Binance => { binance_at(k, binance_spot(), reqwest::Method::DELETE, "/api/v3/order", &[("symbol", symbol.into()), ("orderId", id.into())]).await?; }
+        Exchange::Binance => {
+            let (host, path) = if margin { let (h, pre) = binance_margin(k).await?; (h, format!("{pre}/order")) } else { (binance_spot(), "/api/v3/order".to_string()) };
+            binance_at(k, host, reqwest::Method::DELETE, &path, &[("symbol", symbol.into()), ("orderId", id.into())]).await?;
+        }
         _ => bail!("{ex:?}: spot trading not supported yet"),
     }
     Ok(())
+}
+
+fn binance_order(ex: Exchange, o: &Value) -> OpenOrder {
+    OpenOrder {
+        ex, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].to_string(),
+        side: if o["side"] == "SELL" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["origQty"]), filled: n(&o["executedQty"]),
+        kind: o["type"].as_str().unwrap_or("LIMIT").to_lowercase(), reduce_only: false, ts: n(&o["time"]) as i64, pos: None,
+    }
+}
+
+/// Resting margin orders on `symbol` (Binance: weight 10, papi 5). Bybit margin orders are spot
+/// orders with `isLeverage`: they come with `open_orders`.
+pub async fn margin_orders(ex: Exchange, k: &Keys, symbol: &str) -> Result<Vec<OpenOrder>> {
+    match ex {
+        Exchange::Binance => {
+            let (host, pre) = binance_margin(k).await?;
+            let v = binance_at(k, host, reqwest::Method::GET, &format!("{pre}/openOrders"), &[("symbol", symbol.into())]).await?;
+            Ok(v.as_array().into_iter().flatten().map(|o| binance_order(ex, o)).collect())
+        }
+        _ => Ok(vec![]),
+    }
+}
+
+/// Coins on the margin account with their loans. Bybit: the unified wallet (same as spot).
+pub async fn margin_balances(ex: Exchange, k: &Keys) -> Result<Vec<Bal>> {
+    match ex {
+        Exchange::Binance if super::binance_pm(k).await? => {
+            let v = binance_at(k, super::papi_url(), reqwest::Method::GET, "/papi/v1/balance", &[]).await?;
+            Ok(v.as_array().into_iter().flatten().map(|b| Bal { coin: b["asset"].as_str().unwrap_or_default().into(), free: n(&b["crossMarginFree"]),
+                locked: n(&b["crossMarginLocked"]), borrowed: n(&b["crossMarginBorrowed"]) }).filter(|b| b.free + b.locked + b.borrowed > 0.0).collect())
+        }
+        Exchange::Binance => {
+            let v = binance_at(k, binance_spot(), reqwest::Method::GET, "/sapi/v1/margin/account", &[]).await?;
+            Ok(v["userAssets"].as_array().into_iter().flatten().map(|b| Bal { coin: b["asset"].as_str().unwrap_or_default().into(), free: n(&b["free"]),
+                locked: n(&b["locked"]), borrowed: n(&b["borrowed"]) }).filter(|b| b.free + b.locked + b.borrowed > 0.0).collect())
+        }
+        _ => balances(ex, k).await,
+    }
 }
 
 /// Resting spot orders (Binance: all symbols, weight 80; read on resync, reconcile and after our own
@@ -111,11 +186,7 @@ pub async fn open_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
         }
         Exchange::Binance => {
             let v = binance_at(k, binance_spot(), reqwest::Method::GET, "/api/v3/openOrders", &[]).await?;
-            Ok(v.as_array().into_iter().flatten().map(|o| OpenOrder {
-                ex, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].to_string(),
-                side: if o["side"] == "SELL" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["origQty"]), filled: n(&o["executedQty"]),
-                kind: o["type"].as_str().unwrap_or("LIMIT").to_lowercase(), reduce_only: false, ts: n(&o["time"]) as i64, pos: None,
-            }).collect())
+            Ok(v.as_array().into_iter().flatten().map(|o| binance_order(ex, o)).collect())
         }
         _ => Ok(vec![]),
     }
@@ -130,12 +201,12 @@ pub async fn balances(ex: Exchange, k: &Keys) -> Result<Vec<Bal>> {
             let v = bybit(k, true, "/v5/account/wallet-balance", json!({"accountType": "UNIFIED"})).await?;
             Ok(v["list"][0]["coin"].as_array().into_iter().flatten().map(|c| {
                 let (wallet, locked) = (n(&c["walletBalance"]), n(&c["locked"]));
-                Bal { coin: c["coin"].as_str().unwrap_or_default().into(), free: (wallet - locked).max(0.0), locked }
-            }).filter(|b| b.free + b.locked > 0.0).collect())
+                Bal { coin: c["coin"].as_str().unwrap_or_default().into(), free: (wallet - locked).max(0.0), locked, borrowed: n(&c["borrowAmount"]) }
+            }).filter(|b| b.free + b.locked + b.borrowed > 0.0).collect())
         }
         Exchange::Binance => {
             let v = binance_at(k, binance_spot(), reqwest::Method::GET, "/api/v3/account", &[("omitZeroBalances", "true".into())]).await?;
-            Ok(v["balances"].as_array().into_iter().flatten().map(|b| Bal { coin: b["asset"].as_str().unwrap_or_default().into(), free: n(&b["free"]), locked: n(&b["locked"]) })
+            Ok(v["balances"].as_array().into_iter().flatten().map(|b| Bal { coin: b["asset"].as_str().unwrap_or_default().into(), free: n(&b["free"]), locked: n(&b["locked"]), borrowed: 0.0 })
                 .filter(|b| b.free + b.locked > 0.0).collect())
         }
         _ => Err(anyhow!("{ex:?}: spot trading not supported yet")),
@@ -153,8 +224,9 @@ mod tests {
         assert_eq!((q.as_str(), px.as_deref()), ("0.001234", Some("81000.00")));
         assert!(checked(Kind::Market, 0.00005, &r, 81_000.0).is_err());
         assert!(checked(Kind::Stop { trigger: 1.0, limit: None, by_mark: true }, 1.0, &r, 1.0).is_err());
-        let b = bybit_body("BTCUSDT", Side::Buy, Kind::Market, "0.001", None);
+        let b = bybit_body("BTCUSDT", Side::Buy, Kind::Market, "0.001", None, false);
         assert_eq!((b["category"].as_str(), b["orderType"].as_str(), b["marketUnit"].as_str()), (Some("spot"), Some("Market"), Some("baseCoin")));
+        assert!(b.get("isLeverage").is_none() && bybit_body("BTCUSDT", Side::Buy, Kind::Market, "0.001", None, true)["isLeverage"] == 1);
         let p = binance_params("BTCUSDT", Side::Sell, Kind::Limit { price: 1.0, tif: Tif::PostOnly }, "1", Some("1.00"));
         assert!(p.contains(&("type", "LIMIT_MAKER".into())) && !p.iter().any(|x| x.0 == "timeInForce"));
     }

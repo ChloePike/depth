@@ -5,7 +5,7 @@
 //! One `Agg` per base asset (e.g. BTC). Feed it every `Msg` for that asset via `on`, and call
 //! `sample_heatmap` about once a second.
 use crate::*;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 pub const BAR_MS: i64 = 60_000;
 /// minutes of venue volume used to weight the composite price
@@ -567,6 +567,52 @@ pub struct Agg {
     pub l3: HashMap<(Exchange, Market), crate::l3::L3Book>,
     /// other traders' slicers and icebergs, from the prints and fills below
     pub scan: crate::algoscan::Scan,
+    /// per minute (start ms): option-implied stats across option venues, drawn as chart panes
+    pub opt_min: BTreeMap<i64, OptStat>,
+    /// last option-stat sample (ms) and last save to the db; base the saves are keyed by
+    opt_at: i64, opt_saved: i64, opt_base: String,
+}
+
+/// Option-implied stats for one minute: 30-day constant-maturity ATM IV and the 25-delta risk
+/// reversal (call IV minus put IV, vol fraction), each the median across option venues.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OptStat { pub iv30: Option<f64>, pub rr25: Option<f64> }
+
+const OPT_SAMPLE_MS: i64 = 5_000;
+const OPT_SAVE_MS: i64 = 300_000;
+const DAY_MS: f64 = 86_400_000.0;
+
+pub fn opt_hist_key(base: &str) -> String { format!("{base}/optstat") }
+
+impl Chain {
+    /// 30-day ATM IV: total variance (iv² · T) interpolated between the expiries around 30 days,
+    /// the nearest one when 30 days is outside the listed range. Expiries under a day are skipped.
+    pub fn iv30(&self, now: i64) -> Option<f64> {
+        let pts: Vec<(f64, f64)> = self.expiries().iter().filter_map(|e| {
+            let d = (e.expiry_ms - now) as f64 / DAY_MS;
+            (d >= 1.0).then_some((d, e.atm_iv.filter(|v| *v > 0.0)?))
+        }).collect();
+        let below = pts.iter().rev().find(|p| p.0 <= 30.0);
+        let above = pts.iter().find(|p| p.0 >= 30.0);
+        Some(match (below, above) {
+            (Some(a), Some(b)) if b.0 > a.0 => {
+                let w = (30.0 - a.0) / (b.0 - a.0);
+                ((a.1 * a.1 * a.0 * (1.0 - w) + b.1 * b.1 * b.0 * w) / 30.0).sqrt()
+            }
+            (Some(a), _) => a.1,
+            (_, Some(b)) => b.1,
+            _ => return None,
+        })
+    }
+
+    /// 25-delta risk reversal on the expiry nearest 30 days (at least a day out).
+    pub fn rr25(&self, now: i64) -> Option<f64> {
+        let ok = |o: &&Opt| o.has_info && o.delta != 0.0 && o.iv.is_some_and(|v| v > 0.0) && (o.expiry_ms - now) as f64 >= DAY_MS;
+        let exp = self.opts.values().filter(ok).map(|o| o.expiry_ms).min_by_key(|e| ((e - now) as f64 / DAY_MS - 30.0).abs() as i64)?;
+        let pick = |call: bool, target: f64| self.opts.values().filter(ok).filter(|o| o.expiry_ms == exp && o.call == call)
+            .min_by(|a, b| (a.delta - target).abs().total_cmp(&(b.delta - target).abs())).and_then(|o| o.iv);
+        Some(pick(true, 0.25)? - pick(false, -0.25)?)
+    }
 }
 
 /// History at one chart timeframe: per-venue bars and the cross-venue bars built from them.
@@ -1072,7 +1118,35 @@ impl Agg {
         }
     }
 
+    /// Load saved option stats for `base` (minutes within the bar window); later samples save there.
+    pub fn load_opt_hist(&mut self, base: &str) {
+        self.opt_base = base.to_string();
+        let min = now_ms() - BAR_CAP as i64 * BAR_MS;
+        let saved: Vec<(i64, OptStat)> = crate::db::hist_get(&opt_hist_key(base)).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        self.opt_min.extend(saved.into_iter().filter(|(t, _)| *t >= min));
+    }
+
+    /// Sample the option stats into the current minute (every OPT_SAMPLE_MS at most).
+    fn sample_opt(&mut self, now: i64) {
+        if now - self.opt_at < OPT_SAMPLE_MS { return; }
+        self.opt_at = now;
+        let st = OptStat { iv30: median(self.chains.values().filter_map(|c| c.iv30(now)).collect()), rr25: median(self.chains.values().filter_map(|c| c.rr25(now)).collect()) };
+        if st.iv30.is_none() && st.rr25.is_none() { return; }
+        self.opt_min.insert(now.div_euclid(BAR_MS) * BAR_MS, st);
+        while self.opt_min.len() > BAR_CAP { self.opt_min.pop_first(); }
+        if !self.opt_base.is_empty() && now - self.opt_saved >= OPT_SAVE_MS {
+            self.opt_saved = now;
+            let rows: Vec<(i64, OptStat)> = self.opt_min.iter().map(|(t, s)| (*t, *s)).collect();
+            if let Ok(b) = serde_json::to_vec(&rows) { crate::db::hist_put(&opt_hist_key(&self.opt_base), &b); }
+        }
+    }
+
     fn on_option(&mut self, m: &Msg) {
+        self.on_option_ev(m);
+        self.sample_opt(now_ms());
+    }
+
+    fn on_option_ev(&mut self, m: &Msg) {
         let o = self.chains.entry(m.ex).or_default().opts.entry(m.symbol.clone()).or_default();
         match &m.ev {
             Event::OptionInfo { expiry_ms, strike, call, .. } => { o.has_info = true; o.expiry_ms = *expiry_ms; o.strike = *strike; o.call = *call; }
@@ -1258,6 +1332,23 @@ mod tests {
         assert_eq!(b[0].by.len(), 2);
         assert_eq!(k[0].px, 101.0);
         assert_eq!(k[0].qty, 5.0);
+    }
+
+    #[test]
+    fn option_iv30_and_rr25() {
+        let day = 86_400_000;
+        let mut c = Chain::default();
+        // 15d ATM 0.5; 35d ATM 0.6 with wings: 25d call 0.55, 25d put 0.65 (the 10-delta put ignored)
+        for (sym, d, strike, call, iv, delta) in [("a", 15, 100.0, true, 0.5, 0.5), ("b", 35, 100.0, true, 0.6, 0.5), ("c", 35, 110.0, true, 0.55, 0.26),
+                                                  ("d", 35, 90.0, false, 0.65, -0.24), ("e", 35, 80.0, false, 0.8, -0.1)] {
+            c.opts.insert(sym.into(), Opt { has_info: true, expiry_ms: d * day, strike, call, iv: Some(iv), delta, index: Some(100.0), ..Default::default() });
+        }
+        // total variance three quarters of the way from 15d to 35d
+        let want = ((0.25 * 15.0 * 0.25 + 0.36 * 35.0 * 0.75) / 30.0f64).sqrt();
+        assert!((c.iv30(0).unwrap() - want).abs() < 1e-12);
+        assert!((c.rr25(0).unwrap() + 0.10).abs() < 1e-12);
+        // past 35d: the last expiry alone; a day before 15d expires it no longer counts
+        assert_eq!(c.iv30(14 * day + 1), Some(0.6));
     }
 
     #[test]

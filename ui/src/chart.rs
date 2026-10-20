@@ -59,7 +59,7 @@ fn stitch(hist: &[Bar], live: Vec<Bar>, first_live_1m: i64, tf: i64) -> Vec<Bar>
 }
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-enum Pane { Vol, Cvd, Oi, Funding, Basis, Ls, Premium, Ofi, BookFlow, Rsi, Macd, Delta }
+enum Pane { Vol, Cvd, Oi, Funding, Basis, Ls, Premium, Ofi, BookFlow, Rsi, Macd, Delta, Iv, Skew }
 
 impl Pane {
     fn key(self) -> &'static str {
@@ -68,6 +68,7 @@ impl Pane {
             Pane::Funding => "chart.funding", Pane::Basis => "chart.basis", Pane::Ls => "chart.ls",
             Pane::Premium => "chart.premium", Pane::Ofi => "chart.ofi", Pane::BookFlow => "chart.bookflow",
             Pane::Rsi => "chart.rsi", Pane::Macd => "chart.macd", Pane::Delta => "chart.delta",
+            Pane::Iv => "chart.iv", Pane::Skew => "chart.skew",
         }
     }
     fn perp_only(self) -> bool { matches!(self, Pane::Oi | Pane::Funding | Pane::Basis | Pane::Ls) }
@@ -341,6 +342,8 @@ pub struct Chart {
     scale: Scale,
     /// positions / orders of the current symbol, set by the app every frame
     #[serde(skip)] pub lines: Vec<ChartLine>,
+    /// an option-data pane is on: the host subscribes the option chains
+    #[serde(skip)] pub wants_options: bool,
     /// own fills of the current symbol (perp), oldest first, set by the app when they change
     #[serde(skip)] pub fills: Vec<depth::trade::Fill>,
     #[serde(skip)] base_unit: String,
@@ -403,8 +406,8 @@ impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, fills_on: true, algos: true, whale_usd: 100_000.0, cone: false, style: 2, lines: vec![], fills: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
-            panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false), (Pane::Delta, false)],
+            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: false, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, fills_on: true, algos: true, whale_usd: 100_000.0, cone: false, style: 2, lines: vec![], wants_options: false, fills: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, true), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false), (Pane::Delta, false), (Pane::Iv, false), (Pane::Skew, false)],
         }
     }
 }
@@ -805,8 +808,9 @@ impl Chart {
         // one-time move to the calmer defaults (fewer overlays on by default); each stays a toggle
         if self.style < 2 { self.ma = false; self.walls = false; self.cone = false; self.style = 2; }
         // panes added after a layout was saved
-        for p in [Pane::Premium, Pane::Ofi, Pane::BookFlow, Pane::Rsi, Pane::Macd, Pane::Delta] { if !self.panes.iter().any(|x| x.0 == p) { self.panes.push((p, false)); } }
+        for p in [Pane::Premium, Pane::Ofi, Pane::BookFlow, Pane::Rsi, Pane::Macd, Pane::Delta, Pane::Iv, Pane::Skew] { if !self.panes.iter().any(|x| x.0 == p) { self.panes.push((p, false)); } }
         let smarket = if market == Market::Margin { Market::Spot } else { market };
+        self.wants_options = self.panes.iter().any(|(p, on)| *on && matches!(p, Pane::Iv | Pane::Skew));
         // hosted: the native toolbar above the chart drives these through native_set
         if !native() { self.toolbar(ui, a, smarket, base); }
         self.base_unit = base.to_string();
@@ -1610,7 +1614,7 @@ impl Chart {
         let hover = resp.hover_pos().filter(|p| p.x < main.right());
         let hi_idx = hover.map(|p| fr.idx(p.x).round().clamp(i0 as f32, i1 as f32) as usize).unwrap_or(bars.len() - 1);
         let prem = if panes.contains(&Pane::Premium) { premium_lines(a, smarket, vis, self.tf * 60_000, hi_idx.checked_sub(i0)) } else { vec![] };
-        let pane_scales: Vec<(Pane, Rect, Option<(f64, f64)>)> = pane_rects.iter().map(|(p, r)| (*p, *r, self.draw_pane(&painter, *p, *r, &bars, i0, i1, &fr, hi_idx, &prem))).collect();
+        let pane_scales: Vec<(Pane, Rect, Option<(f64, f64)>)> = pane_rects.iter().map(|(p, r)| (*p, *r, self.draw_pane(&painter, *p, *r, &bars, i0, i1, &fr, hi_idx, &prem, &a.opt_min))).collect();
 
         // time axis
         let ty = top + TIME_H / 2.0;
@@ -1803,7 +1807,7 @@ impl Chart {
 
     #[allow(clippy::too_many_arguments)]
     /// Returns the value range the pane was drawn with (for the crosshair), None when it drew nothing.
-    fn draw_pane(&self, painter: &egui::Painter, p: Pane, r: Rect, bars: &[Bar], i0: usize, i1: usize, fr: &Frame, hi: usize, prem: &[Prem]) -> Option<(f64, f64)> {
+    fn draw_pane(&self, painter: &egui::Painter, p: Pane, r: Rect, bars: &[Bar], i0: usize, i1: usize, fr: &Frame, hi: usize, prem: &[Prem], opt: &std::collections::BTreeMap<i64, depth::agg::OptStat>) -> Option<(f64, f64)> {
         let (vis, hb) = (&bars[i0..=i1], &bars[hi]);
         // the top 18px hold the legend, so lines never run through it
         let inner = Rect::from_min_max(pos2(r.left(), r.top() + 18.0), pos2(r.right(), r.bottom() - 4.0));
@@ -1978,6 +1982,20 @@ impl Chart {
                 if let Some(v) = hb.funding_h { lx = label(format!("{} {:+.4}", t("chart.funding_pred"), v * 1e4), accent(), lx); }
                 if let Some(v) = hb.funding_settled { label(format!("{} {:+.4} bp/h", t("chart.funding_settled"), v * 1e4), WARN, lx); }
                 axis(lo, hi, &|v| format!("{v:+.3}"));
+            }
+            // option-implied, sampled live from the chains (saved across restarts): the last minute
+            // sample inside each bar, in vol points
+            Pane::Iv | Pane::Skew => {
+                let ms = self.tf * 60_000;
+                let get = |b: &Bar| opt.range(b.t..b.t + ms).next_back().and_then(|(_, s)| if p == Pane::Iv { s.iv30 } else { s.rr25 }).map(|v| v * 100.0);
+                let vals: Vec<(usize, f64)> = vis.iter().enumerate().filter_map(|(k, b)| Some((k, get(b)?))).collect();
+                if vals.is_empty() { label(t("chart.opt_loading").to_string(), dim(), lx); return None; }
+                let (lo, hi) = range(&vals.iter().map(|x| x.1).collect::<Vec<_>>(), p == Pane::Skew);
+                zero_line(lo, hi);
+                let col = if p == Pane::Iv { WARN } else if get(hb).unwrap_or(0.0) >= 0.0 { up() } else { dn() };
+                line(vals, lo, hi, col, false);
+                if let Some(v) = get(hb) { label(if p == Pane::Iv { format!("{v:.2}%") } else { format!("{v:+.2}") }, col, lx); }
+                axis(lo, hi, &|v| format!("{v:.1}"));
             }
         }
         scale.get()

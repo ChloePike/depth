@@ -26,6 +26,13 @@ pub struct Account {
     /// spot: resting orders and wallet coins per venue (trade::spot::VENUES)
     pub spot_orders: Vec<trade::OpenOrder>,
     pub spot_bal: HashMap<Exchange, Vec<trade::spot::Bal>>,
+    /// margin (Margin mode): Binance cross-margin orders of `margin_sym` (Bybit's come with spot_orders),
+    /// margin wallet coins with loans per venue
+    pub margin_orders: Vec<trade::OpenOrder>,
+    pub margin_bal: HashMap<Exchange, Vec<trade::spot::Bal>>,
+    pub margin_sym: Option<String>,
+    /// resting option orders (option venues), refreshed on resync and after our own option orders
+    pub opt_orders: Vec<trade::OpenOrder>,
     pub orders: Vec<OpenOrder>,
     pub balances: HashMap<Exchange, Balance>,
     pub rules: HashMap<(Exchange, String), Rules>,
@@ -273,6 +280,7 @@ impl Engine {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().expect("tokio runtime");
         self.base = base.to_uppercase();
         self.agg = Arc::new(Mutex::new(Agg::default()));
+        self.agg.lock().unwrap().load_opt_hist(&self.base);
         self.stats = Arc::new(Mutex::new(Stats { hist_pending: self.venues().len() * HISTORY_MARKETS.len(), hist_total: self.venues().len() * HISTORY_MARKETS.len(), ..Default::default() }));
         self.started = vec![];
         self.tfs = vec![];
@@ -781,7 +789,7 @@ impl Engine {
     /// Spot buy / sell on `ex` (limit or market, base units), on the account runtime; the result goes
     /// to the account log, then spot orders and balances are refetched (Binance has no spot push here).
     #[allow(clippy::too_many_arguments)]
-    pub fn spot_submit(&self, ex: Exchange, symbol: String, side: depth::Side, kind: trade::Kind, qty: f64, ref_px: f64, ctx: &eframe::egui::Context) {
+    pub fn spot_submit(&self, ex: Exchange, symbol: String, side: depth::Side, kind: trade::Kind, qty: f64, ref_px: f64, margin: Option<trade::spot::Effect>, ctx: &eframe::egui::Context) {
         let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
         rt.spawn(async move {
             let Some(k) = account.lock().unwrap().keys.get(&ex).cloned() else { return };
@@ -789,10 +797,10 @@ impl Engine {
             let cached = account.lock().unwrap().rules.get(&key).copied();
             let rules = match cached { Some(r) => Ok(r), None => trade::spot::rules(ex, &symbol).await };
             let res = match rules {
-                Ok(r) => { account.lock().unwrap().rules.insert(key, r); trade::spot::place(ex, &k, &symbol, side, kind, qty, &r, ref_px).await }
+                Ok(r) => { account.lock().unwrap().rules.insert(key, r); trade::spot::place(ex, &k, &symbol, side, kind, qty, &r, ref_px, margin).await }
                 Err(e) => Err(e),
             };
-            let what = format!("{ex:?} spot {} {symbol} {qty} {}", if side == depth::Side::Buy { "buy" } else { "sell" }, kind.label());
+            let what = format!("{ex:?} {} {} {symbol} {qty} {}", if margin.is_some() { "margin" } else { "spot" }, if side == depth::Side::Buy { "buy" } else { "sell" }, kind.label());
             { let mut a = account.lock().unwrap(); match res { Ok(id) => a.note(format!("OK {what} id {id}"), true), Err(e) => a.note(format!("FAIL {what}: {e:#}"), false) } }
             ctx.request_repaint();
             // a market order has filled by now; a limit shows as resting
@@ -810,15 +818,58 @@ impl Engine {
         rt.spawn(async move { refresh_spot(&account, ex).await; ctx.request_repaint(); });
     }
 
-    pub fn spot_cancel(&self, o: &trade::OpenOrder, ctx: &eframe::egui::Context) {
+    /// Cancel a spot order, or a Binance cross-margin order when `margin`.
+    pub fn spot_cancel(&self, o: &trade::OpenOrder, margin: bool, ctx: &eframe::egui::Context) {
         let (Some(rt), account, ctx, o) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone(), o.clone()) else { return };
         rt.spawn(async move {
             let Some(k) = account.lock().unwrap().keys.get(&o.ex).cloned() else { return };
-            let res = trade::spot::cancel(o.ex, &k, &o.symbol, &o.id).await;
+            let res = trade::spot::cancel(o.ex, &k, &o.symbol, &o.id, margin).await;
             { let mut a = account.lock().unwrap(); match res { Ok(()) => a.note(format!("OK {:?} spot cancel {} {}", o.ex, o.symbol, o.id), true), Err(e) => a.note(format!("FAIL {:?} spot cancel {} {}: {e:#}", o.ex, o.symbol, o.id), false) } }
             refresh_spot(&account, o.ex).await;
             ctx.request_repaint();
         });
+    }
+
+    /// One option limit order (rules fetched once per symbol); option orders and positions are
+    /// refetched after it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn opt_submit(&self, ex: Exchange, symbol: String, side: depth::Side, qty: f64, price: f64, tif: trade::Tif, reduce_only: bool, ctx: &eframe::egui::Context) {
+        let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        rt.spawn(async move {
+            let Some(k) = account.lock().unwrap().keys.get(&ex).cloned() else { return };
+            let key = (ex, format!("opt:{symbol}"));
+            let cached = account.lock().unwrap().rules.get(&key).copied();
+            let rules = match cached { Some(r) => Ok(r), None => trade::option_rules(ex, &symbol).await };
+            let res = match rules {
+                Ok(r) => { account.lock().unwrap().rules.insert(key, r); trade::option_order(&k, ex, &symbol, side, qty, price, tif, reduce_only, &r).await }
+                Err(e) => Err(e),
+            };
+            let what = format!("{ex:?} option {} {symbol} {qty} @ {price} {tif:?}{}", if side == depth::Side::Buy { "buy" } else { "sell" }, if reduce_only { " reduce-only" } else { "" });
+            { let mut a = account.lock().unwrap(); match res { Ok(id) => a.note(format!("OK {what} id {id}"), true), Err(e) => a.note(format!("FAIL {what}: {e:#}"), false) } }
+            ctx.request_repaint();
+            for wait in [500, 2_500] {
+                tokio::time::sleep(Duration::from_millis(wait)).await;
+                refresh_opts(&account, ex).await;
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    pub fn opt_cancel(&self, o: &trade::OpenOrder, ctx: &eframe::egui::Context) {
+        let (Some(rt), account, ctx, o) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone(), o.clone()) else { return };
+        rt.spawn(async move {
+            let Some(k) = account.lock().unwrap().keys.get(&o.ex).cloned() else { return };
+            let res = trade::option_cancel(o.ex, &k, &o.symbol, &o.id).await;
+            { let mut a = account.lock().unwrap(); match res { Ok(()) => a.note(format!("OK {:?} option cancel {} {}", o.ex, o.symbol, o.id), true), Err(e) => a.note(format!("FAIL {:?} option cancel {} {}: {e:#}", o.ex, o.symbol, o.id), false) } }
+            refresh_opts(&account, o.ex).await;
+            ctx.request_repaint();
+        });
+    }
+
+    /// Fetch option orders and positions for `ex` now (the option ticket's first look at a venue).
+    pub fn opt_refresh(&self, ex: Exchange, ctx: &eframe::egui::Context) {
+        let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        rt.spawn(async move { refresh_opts(&account, ex).await; ctx.request_repaint(); });
     }
 
     /// Scaled (ladder) order: `n` limit orders from `from` to `to`, sizes tilted by `skew`.
@@ -1291,16 +1342,34 @@ async fn refresh_spot(account: &Arc<Mutex<Account>>, ex: Exchange) {
     if !trade::spot::VENUES.contains(&ex) { return; }
     let Some(k) = account.lock().unwrap().keys.get(&ex).cloned() else { return };
     let (o, b) = tokio::join!(trade::spot::open_orders(ex, &k), trade::spot::balances(ex, &k));
+    {
+        let mut a = account.lock().unwrap();
+        match o { Ok(o) => { a.spot_orders.retain(|x| x.ex != ex); a.spot_orders.extend(o); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} spot orders: {e:#}\n")) }
+        match b { Ok(b) => { a.spot_bal.insert(ex, b); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} spot balances: {e:#}\n")) }
+    }
+    // margin: only once Margin mode has asked for a symbol (Binance margin orders are per symbol)
+    let Some(sym) = account.lock().unwrap().margin_sym.clone() else { return };
+    let (o, b) = tokio::join!(trade::spot::margin_orders(ex, &k, &sym), trade::spot::margin_balances(ex, &k));
     let mut a = account.lock().unwrap();
-    match o { Ok(o) => { a.spot_orders.retain(|x| x.ex != ex); a.spot_orders.extend(o); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} spot orders: {e:#}\n")) }
-    match b { Ok(b) => { a.spot_bal.insert(ex, b); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} spot balances: {e:#}\n")) }
+    match o { Ok(o) => { a.margin_orders.retain(|x| x.ex != ex); a.margin_orders.extend(o); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} margin orders: {e:#}\n")) }
+    match b { Ok(b) => { a.margin_bal.insert(ex, b); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} margin balances: {e:#}\n")) }
+}
+
+/// REST snapshot of one venue's option orders and positions (option venues only).
+async fn refresh_opts(account: &Arc<Mutex<Account>>, ex: Exchange) {
+    if !trade::OPTION_VENUES.contains(&ex) { return; }
+    let Some(k) = account.lock().unwrap().keys.get(&ex).cloned() else { return };
+    let (o, p) = tokio::join!(trade::option_orders(ex, &k), trade::option_positions(ex, &k));
+    let mut a = account.lock().unwrap();
+    match o { Ok(o) => { a.opt_orders.retain(|x| x.ex != ex); a.opt_orders.extend(o); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} option orders: {e:#}\n")) }
+    if let Ok(p) = p { a.opts.retain(|x| x.ex != ex); a.opts.extend(p); }
 }
 
 /// REST snapshot of one venue's positions, open orders and balance (replaces that venue's rows).
 async fn refresh_venue(account: &Arc<Mutex<Account>>, ex: Exchange) {
     refresh_spot(account, ex).await;
     let Some(k) = account.lock().unwrap().keys.get(&ex).cloned() else { return };
-    let (p, o, b, op) = tokio::join!(trade::positions(ex, &k), trade::open_orders(ex, &k), trade::balance(ex, &k), trade::option_positions(ex, &k));
+    let (p, o, b, op, oo) = tokio::join!(trade::positions(ex, &k), trade::open_orders(ex, &k), trade::balance(ex, &k), trade::option_positions(ex, &k), trade::option_orders(ex, &k));
     // TP/SL snapshot (Binance: 40 weight for the account; snapshots only run on resync / 5 min)
     if matches!(ex, Exchange::Bybit | Exchange::Binance) {
         if let Ok(t) = trade::tpsl::list(ex, &k).await {
@@ -1316,6 +1385,7 @@ async fn refresh_venue(account: &Arc<Mutex<Account>>, ex: Exchange) {
     match o { Ok(o) => { a.orders.retain(|x| x.ex != ex); a.orders.extend(o); } Err(e) => err = err.or(Some(e)) }
     // an account without option trading answers with an error: keep it out of the venue's status
     if let Ok(op) = op { a.opts.retain(|x| x.ex != ex); a.opts.extend(op); }
+    if let Ok(oo) = oo { a.opt_orders.retain(|x| x.ex != ex); a.opt_orders.extend(oo); }
     match b { Ok(b) => { a.balances.insert(ex, b); } Err(e) => err = err.or(Some(e)) }
     match err {
         None => { a.errors.remove(&ex); }

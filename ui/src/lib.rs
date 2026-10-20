@@ -721,12 +721,13 @@ impl App {
                 }
                 self.order = op;
             }
-            if self.mode == Market::Spot && self.order_panel {
+            if matches!(self.mode, Market::Spot | Market::Margin | Market::Option) && self.order_panel {
                 egui::Panel::right("spot_order").show_separator_line(false).frame(Frame::new().fill(bg()).inner_margin(Margin::symmetric(4, 4))).resizable(false).exact_size(300.0)
                     .show(ui, |ui| egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
                         let g = agg.lock().unwrap();
                         let base = self.eng.base.clone();
-                        self.spot.show(ui, &g, &self.eng, &base);
+                        if self.mode == Market::Option { self.opt.ticket(ui, &g, &self.eng, &base, self.prefs.confirm); }
+                        else { self.spot.show(ui, &g, &self.eng, &base, self.mode, self.trade.fill, self.prefs.confirm); }
                     }));
             }
             self.account = ap;
@@ -857,7 +858,8 @@ impl App {
             // a running Hyperliquid L3 feed switches source now
             self.eng.wants_l3.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        if self.eng.wants_options.swap(false, std::sync::atomic::Ordering::Relaxed) { self.eng.ensure(Market::Option); }
+        // option panes on the chart need the chains too (ensure is a no-op once started)
+        if self.eng.wants_options.swap(false, std::sync::atomic::Ordering::Relaxed) || self.chart.wants_options { self.eng.ensure(Market::Option); }
         if self.eng.wants_l3.swap(false, std::sync::atomic::Ordering::Relaxed) { self.eng.ensure_l3(); }
     }
 }

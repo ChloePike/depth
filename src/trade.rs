@@ -685,13 +685,24 @@ pub fn sweep(asks: &[(f64, f64)], qty: f64) -> Option<(f64, f64, f64)> {
 /// Size rounded UP to the venue step (a hedge rounded down leaves part of the position bare).
 pub fn ceil_step(qty: f64, step: f64, min: f64) -> f64 { ((qty / step - 1e-9).ceil() * step).max(min) }
 
-pub async fn option_plan(ex: Exchange, symbol: &str, qty: f64) -> Result<OptBuy> {
+/// Tick, size step and minimum size of one option.
+pub async fn option_rules(ex: Exchange, symbol: &str) -> Result<Rules> {
     match ex {
         Exchange::Bybit => {
             let i = ws::get_json(&format!("{}/v5/market/instruments-info?category=option&symbol={symbol}", bybit_url())).await?;
             let i = &i["result"]["list"][0];
-            let (tick, step, min) = (n(&i["priceFilter"]["tickSize"]), n(&i["lotSizeFilter"]["qtyStep"]), n(&i["lotSizeFilter"]["minOrderQty"]));
-            if !(tick > 0.0 && step > 0.0) { bail!("{symbol}: no trading rules"); }
+            let r = Rules { tick: n(&i["priceFilter"]["tickSize"]), step: n(&i["lotSizeFilter"]["qtyStep"]), min_qty: n(&i["lotSizeFilter"]["minOrderQty"]), min_notional: 0.0 };
+            if !(r.tick > 0.0 && r.step > 0.0) { bail!("{symbol}: no trading rules"); }
+            Ok(r)
+        }
+        _ => bail!("{ex:?}: option orders not supported yet"),
+    }
+}
+
+pub async fn option_plan(ex: Exchange, symbol: &str, qty: f64) -> Result<OptBuy> {
+    match ex {
+        Exchange::Bybit => {
+            let Rules { tick, step, min_qty: min, .. } = option_rules(ex, symbol).await?;
             let b = ws::get_json(&format!("{}/v5/market/orderbook?category=option&symbol={symbol}&limit=25", bybit_url())).await?;
             let asks: Vec<(f64, f64)> = b["result"]["a"].as_array().into_iter().flatten().map(|l| (n(&l[0]), n(&l[1]))).filter(|(p, q)| *p > 0.0 && *q > 0.0).collect();
             let qty = ceil_step(qty, step, min);
@@ -736,14 +747,50 @@ pub async fn option_positions(ex: Exchange, k: &Keys) -> Result<Vec<OptPos>> {
 
 /// Buy the planned options: limit IOC at `p.limit`, so nothing rests and nothing fills above it.
 pub async fn buy_option(k: &Keys, p: &OptBuy) -> Result<String> {
-    match p.ex {
+    let r = Rules { tick: p.tick, step: p.step, min_qty: 0.0, min_notional: 0.0 };
+    option_order(k, p.ex, &p.symbol, Side::Buy, p.qty, p.limit, Tif::Ioc, false, &r).await
+}
+
+/// Bybit option order body: limit only (options take no market orders through this path).
+pub fn bybit_opt_body(symbol: &str, side: Side, qty: &str, px: &str, tif: Tif, reduce_only: bool) -> Value {
+    // orderLinkId is mandatory for Bybit options
+    json!({"category": "option", "symbol": symbol, "side": side_str(Exchange::Bybit, side), "orderType": "Limit",
+        "timeInForce": match tif { Tif::Gtc => "GTC", Tif::Ioc => "IOC", Tif::Fok => "FOK", Tif::PostOnly => "PostOnly" },
+        "qty": qty, "price": px, "reduceOnly": reduce_only, "orderLinkId": format!("t1opt{}", crate::now_ms())})
+}
+
+/// One option limit order; size floored and price rounded to the venue grid.
+#[allow(clippy::too_many_arguments)]
+pub async fn option_order(k: &Keys, ex: Exchange, symbol: &str, side: Side, qty: f64, price: f64, tif: Tif, reduce_only: bool, r: &Rules) -> Result<String> {
+    let q = fmt_step(qty, r.step, true);
+    if q.parse::<f64>().unwrap_or(0.0) < r.min_qty.max(1e-12) { bail!("size {qty} below minimum {}", r.min_qty); }
+    let px = fmt_step(price, r.tick, false);
+    if px.parse::<f64>().unwrap_or(0.0) <= 0.0 { bail!("invalid price {price}"); }
+    match ex {
+        Exchange::Bybit => Ok(bybit(k, false, "/v5/order/create", bybit_opt_body(symbol, side, &q, &px, tif, reduce_only)).await?["orderId"].as_str().unwrap_or_default().to_string()),
+        _ => bail!("{ex:?}: option orders not supported yet"),
+    }
+}
+
+pub async fn option_cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {
+    match ex {
+        Exchange::Bybit => { bybit(k, false, "/v5/order/cancel", json!({"category": "option", "symbol": symbol, "orderId": id})).await?; Ok(()) }
+        _ => bail!("{ex:?}: option orders not supported yet"),
+    }
+}
+
+/// Resting option orders (empty where option trading is not built).
+pub async fn option_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
+    match ex {
         Exchange::Bybit => {
-            // orderLinkId is mandatory for Bybit options
-            let body = json!({"category": "option", "symbol": p.symbol, "side": "Buy", "orderType": "Limit", "timeInForce": "IOC",
-                "qty": fmt_step(p.qty, p.step, true), "price": fmt_step(p.limit, p.tick, false), "orderLinkId": format!("t1ins{}", crate::now_ms())});
-            Ok(bybit(k, false, "/v5/order/create", body).await?["orderId"].as_str().unwrap_or_default().to_string())
+            let v = bybit(k, true, "/v5/order/realtime", json!({"category": "option", "limit": "50"})).await?;
+            Ok(v["list"].as_array().into_iter().flatten().map(|o| OpenOrder {
+                ex, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].as_str().unwrap_or_default().into(),
+                side: if o["side"] == "Sell" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["qty"]), filled: n(&o["cumExecQty"]),
+                kind: o["orderType"].as_str().unwrap_or("Limit").to_lowercase(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: n(&o["createdTime"]) as i64, pos: None,
+            }).collect())
         }
-        ex => bail!("{ex:?}: option orders not supported yet"),
+        _ => Ok(vec![]),
     }
 }
 
@@ -1660,6 +1707,15 @@ async fn bybit_usd_prices() -> Result<std::collections::HashMap<String, f64>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn option_order_body() {
+        use super::*;
+        let b = bybit_opt_body("BTC-25DEC26-100000-P-USDT", Side::Sell, "0.01", "1500", Tif::PostOnly, true);
+        assert_eq!((b["category"].as_str(), b["side"].as_str(), b["orderType"].as_str(), b["timeInForce"].as_str()), (Some("option"), Some("Sell"), Some("Limit"), Some("PostOnly")));
+        assert!(b["reduceOnly"] == true && b["orderLinkId"].as_str().is_some_and(|s| s.starts_with("t1opt")));
+        assert_eq!(spot::effect_str(spot::Effect::Borrow), "MARGIN_BUY");
+    }
+
     #[test]
     fn bybit_option_symbol() {
         assert_eq!(bybit_opt_parts("HYPE-30OCT26-72-P-USDT"), Some(("HYPE".into(), "30OCT26".into(), 72.0, false)));
