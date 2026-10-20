@@ -34,7 +34,7 @@ enum PosAct { Market(Value, f64), Limit(Value, f64, f64), Reverse(Value), CloseA
 enum Act { Op(Value), Goto(String), Copy(String), Confirm(PosAct), TpSl(Value), Share(Value), Prefill(Value), Transfer(String), Keys, Insure(Value) }
 
 /// PnL card options (what the copied text reveals).
-struct Share { p: Value, amount: bool, prices: bool, copied: bool }
+struct Share { p: Value, amount: bool, prices: bool, copied: bool, shot: Option<Rect> }
 
 /// Transfer sheet state (mirror of AccountTransferSheet).
 struct Xfer { ex: String, from: String, to: String, coin: String, amount: String, auto: (bool, f64, f64), auto_loaded: bool, err: Option<String> }
@@ -526,7 +526,7 @@ impl AccountPanel {
                 Act::Copy(t) => ctx.copy_text(t),
                 Act::Confirm(c) => self.confirm = Some(c),
                 Act::TpSl(p) => self.sheet = Some(TpSlSheet::new(s(&p["ex"]), s(&p["symbol"]), s(&p["side"]))),
-                Act::Share(p) => self.share = Some(Share { p, amount: true, prices: true, copied: false }),
+                Act::Share(p) => self.share = Some(Share { p, amount: true, prices: true, copied: false, shot: None }),
                 Act::Prefill(p) => {
                     // the order panel trades the current symbol on its venue: move both there first
                     let _ = call(json!({"op": "set_trade_venue", "ex": p["ex"]}));
@@ -801,8 +801,8 @@ impl AccountPanel {
         for v in ops { if let Err(e) = call(v) { self.error = Some(e); } }
     }
 
-    /// PnL card: the result in big type, options for what to reveal, copy as text.
-    // ponytail: text copy only; PNG export would need an image encoder path for the egui card
+    /// PnL card: the result in big type, options for what to reveal, copy as image (a window
+    /// screenshot cropped to the card) or text.
     fn share_modal(&mut self, ui: &mut Ui) {
         let Some(sh) = self.share.as_mut() else { return };
         let p = sh.p.clone();
@@ -810,12 +810,26 @@ impl AccountPanel {
         let roe = if margin > 0.0 { upnl / margin * 100.0 } else { 0.0 };
         let long = s(&p["side"]) == "long";
         let col = pnl_col(upnl);
+        // the screenshot asked for last frame: crop it to the card
+        if let Some(card) = sh.shot {
+            let img = ui.ctx().input(|i| i.events.iter().find_map(|e| if let egui::Event::Screenshot { image, .. } = e { Some(image.clone()) } else { None }));
+            if let Some(img) = img {
+                ui.ctx().copy_image(img.region(&card, Some(ui.ctx().pixels_per_point())));
+                sh.shot = None;
+                sh.copied = true;
+            }
+        }
         let mut close = false;
-        let m = egui::Modal::new(egui::Id::new("pnl_share")).show(ui.ctx(), |ui| {
+        let mut card = Rect::NOTHING;
+        let m = super::order::dialog("pnl_share").show(ui.ctx(), |ui| {
             ui.set_width(560.0);
             let (r, _) = ui.allocate_exact_size(egui::vec2(560.0, 300.0), egui::Sense::hover());
+            card = r;
+            // the card is always dark and opaque (it is shared as an image): no translucent veils
+            let was_light = light();
+            set_light(false);
             let pnt = ui.painter().with_clip_rect(r);
-            pnt.rect(r, 6, panel2(), egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside);
+            pnt.rect_filled(r, 6, Color32::from_rgb(0x0c, 0x0c, 0x0d));
             // soft glow in the result's color from the lower right
             for k in 0..6 { pnt.circle_filled(r.right_bottom() - egui::vec2(60.0, 50.0), 220.0 - k as f32 * 34.0, col.linear_multiply(0.035)); }
             let at = |dx: f32, dy: f32| r.min + egui::vec2(dx, dy);
@@ -838,6 +852,7 @@ impl AccountPanel {
                     pnt.text(at(x, 266.0), egui::Align2::LEFT_CENTER, v, mono_m(15.0), fg());
                 }
             }
+            set_light(was_light);
             ui.add_space(12.0);
             switch_row(ui, &mut sh.amount, l("Show PnL amount"));
             switch_row(ui, &mut sh.prices, l("Show entry and mark price"));
@@ -846,7 +861,13 @@ impl AccountPanel {
             ui.horizontal(|ui| {
                 if sh.copied { ui.label(RichText::new(format!("✓ {}", l("Copied"))).font(prop(12.0)).color(mu())); }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if kit::button(ui, l("Copy Text"), Look::Fill(accent()), H, Some(110.0), true).clicked() {
+                    if kit::button(ui, l("Copy Image"), Look::Fill(accent()), H, Some(110.0), true).clicked() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+                        ui.ctx().request_repaint();
+                        sh.shot = Some(card);
+                        sh.copied = false;
+                    }
+                    if kit::button(ui, l("Copy Text"), Look::Secondary, H, Some(110.0), true).clicked() {
                         let mut t = format!("{} {} {} {lev:.0}x  {}%", s(&p["symbol"]), l("Perp"), if long { l("Long") } else { l("Short") }, signed(roe));
                         if sh.amount { t += &format!(" ({} USDT)", signed(upnl)); }
                         if sh.prices { t += &format!("\n{} {} · {} {} · {}", l("Entry"), fmt_px(f(&p["entry"])), l("Mark"), fmt_px(f(&p["mark"])), s(&p["ex"])); }
