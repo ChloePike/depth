@@ -151,9 +151,15 @@ pub fn set_proxy(mode: ProxyMode, url: &str) -> bool {
     let mut n = NET.lock().unwrap();
     if n.mode == mode && n.url == url { return false; }
     let mode = if mode == ProxyMode::Custom && check_proxy(url).is_err() { ProxyMode::None } else { mode };
-    n.ws = match mode { ProxyMode::None => None, ProxyMode::System => system_socks(), ProxyMode::Custom => Some(url.to_string()) };
+    n.ws = match mode { ProxyMode::None => None, ProxyMode::System => system_socks(), ProxyMode::Custom => Some(url.to_string()) }.map(|u| remote_dns(&u));
     (n.mode, n.url, n.http) = (mode, url.to_string(), None);
     true
+}
+
+/// Hostnames are always resolved by the proxy: a local resolver behind a fake-ip TUN (Clash, sing-box)
+/// returns 198.18.x.x addresses that only mean something on this machine, and local lookups leak.
+fn remote_dns(url: &str) -> String {
+    url.strip_prefix("socks5://").map_or_else(|| url.to_string(), |r| format!("socks5h://{r}"))
 }
 
 fn ws_proxy() -> Option<String> { NET.lock().unwrap().ws.clone() }
@@ -181,7 +187,7 @@ pub fn http() -> reqwest::Client {
     let b = match n.mode {
         ProxyMode::None => b.no_proxy(),
         ProxyMode::System => b, // reqwest reads the OS settings and *_PROXY
-        ProxyMode::Custom => b.proxy(reqwest::Proxy::all(&n.url).unwrap()),
+        ProxyMode::Custom => b.proxy(reqwest::Proxy::all(remote_dns(&n.url)).unwrap()),
     };
     let c = b.build().unwrap();
     n.http = Some(c.clone());

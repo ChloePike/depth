@@ -233,8 +233,12 @@ impl App {
                 let old = (self.prefs.proxy, self.prefs.proxy_url.clone());
                 self.prefs = serde_json::from_value(v["prefs"].clone()).map_err(|e| e.to_string())?;
                 self.prefs.apply(ctx);
-                // market streams reconnect through the new route now; private streams on their next reconnect
-                if old != (self.prefs.proxy, self.prefs.proxy_url.clone()) { self.pending_restart = true; }
+                // every stream reconnects through the new route now; private ones re-snapshot
+                if old != (self.prefs.proxy, self.prefs.proxy_url.clone()) {
+                    self.pending_restart = true;
+                    let keys: Vec<_> = self.eng.account.lock().unwrap().keys.iter().map(|(e, k)| (*e, k.clone())).collect();
+                    for (e, k) in keys { self.eng.set_keys(e, Some(k)); }
+                }
             }
             "set_route" => { self.route = serde_json::from_value(v["route"].clone()).map_err(|e| e.to_string())?; }
             "tickers" => {
