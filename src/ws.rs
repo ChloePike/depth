@@ -1,7 +1,7 @@
 //! WebSocket session loop (reconnect, app-level ping, idle timeout) and REST polling.
 use anyhow::{bail, Result};
 use futures_util::{SinkExt, StreamExt};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::{interval, sleep, timeout};
 use yawc::{frame::{Frame as WsFrame, OpCode}, Options, WebSocket};
@@ -68,7 +68,9 @@ pub async fn once(spec: &Spec, mut handler: impl FnMut(Frame) -> bool + Send) ->
 
 async fn session(spec: &Spec, handler: &mut (impl FnMut(Frame) -> bool + Send)) -> Result<()> {
     let opts = Options::default().with_low_latency_compression().with_limits(64 << 20, 64 << 20);
-    let mut ws = timeout(Duration::from_secs(15), WebSocket::connect(spec.url.parse()?).with_options(opts)).await??;
+    let mut b = WebSocket::connect(spec.url.parse()?).with_options(opts);
+    if let Some(p) = ws_proxy() { b = b.with_proxy(yawc::Proxy::socks5(p.parse()?)?); }
+    let mut ws = timeout(Duration::from_secs(15), b).await??;
     let mut rest = &spec.subs[..];
     if spec.login_first && !rest.is_empty() {
         ws.send(WsFrame::text(rest[0].clone())).await?;
@@ -127,11 +129,63 @@ async fn session(spec: &Spec, handler: &mut (impl FnMut(Frame) -> bool + Send)) 
     }
 }
 
-pub fn http() -> &'static reqwest::Client {
-    static C: OnceLock<reqwest::Client> = OnceLock::new();
-    C.get_or_init(|| reqwest::Client::builder().timeout(Duration::from_secs(10))
+/// Outbound proxy for every REST call and WebSocket. WebSockets tunnel through SOCKS5 only (yawc),
+/// so a custom proxy must be `socks5://` / `socks5h://` (Clash / v2ray mixed ports speak it).
+#[derive(Clone, Copy, Default, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyMode { #[default] None, System, Custom }
+
+struct Net { mode: ProxyMode, url: String, ws: Option<String>, http: Option<reqwest::Client> }
+static NET: std::sync::Mutex<Net> = std::sync::Mutex::new(Net { mode: ProxyMode::None, url: String::new(), ws: None, http: None });
+
+/// Checks a custom proxy URL; `Err` is shown to the user.
+pub fn check_proxy(url: &str) -> Result<(), String> {
+    let s = url.split("://").next().unwrap_or("");
+    if !url.contains("://") || !matches!(s, "socks5" | "socks5h") { return Err("socks5://host:port".into()); }
+    reqwest::Proxy::all(url).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Takes effect for new requests and new WebSocket sessions; callers restart streams.
+/// An invalid custom URL falls back to no proxy.
+pub fn set_proxy(mode: ProxyMode, url: &str) -> bool {
+    let mut n = NET.lock().unwrap();
+    if n.mode == mode && n.url == url { return false; }
+    let mode = if mode == ProxyMode::Custom && check_proxy(url).is_err() { ProxyMode::None } else { mode };
+    n.ws = match mode { ProxyMode::None => None, ProxyMode::System => system_socks(), ProxyMode::Custom => Some(url.to_string()) };
+    (n.mode, n.url, n.http) = (mode, url.to_string(), None);
+    true
+}
+
+fn ws_proxy() -> Option<String> { NET.lock().unwrap().ws.clone() }
+
+/// The system SOCKS proxy: macOS network settings, else ALL_PROXY.
+/// ponytail: a system with only an HTTP proxy leaves WebSockets direct; add HTTP CONNECT if that matters.
+fn system_socks() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    if let Ok(o) = std::process::Command::new("scutil").arg("--proxy").output() {
+        let o = String::from_utf8_lossy(&o.stdout);
+        let get = |k: &str| o.lines().find_map(|l| l.trim().strip_prefix(k)?.trim_start().strip_prefix(':').map(|v| v.trim().to_string()));
+        if get("SOCKSEnable").as_deref() == Some("1") {
+            if let (Some(h), Some(p)) = (get("SOCKSProxy"), get("SOCKSPort")) { return Some(format!("socks5h://{h}:{p}")); }
+        }
+    }
+    ["ALL_PROXY", "all_proxy"].iter().filter_map(|k| std::env::var(k).ok()).find(|u| u.starts_with("socks5"))
+}
+
+pub fn http() -> reqwest::Client {
+    let mut n = NET.lock().unwrap();
+    if let Some(c) = &n.http { return c.clone(); }
+    let b = reqwest::Client::builder().timeout(Duration::from_secs(10))
         // proxies drop idle connections silently; reusing one stalls a request until timeout
-        .pool_idle_timeout(Duration::from_secs(30)).tcp_keepalive(Duration::from_secs(15)).user_agent("depth/0.1").build().unwrap())
+        .pool_idle_timeout(Duration::from_secs(30)).tcp_keepalive(Duration::from_secs(15)).user_agent("depth/0.1");
+    let b = match n.mode {
+        ProxyMode::None => b.no_proxy(),
+        ProxyMode::System => b, // reqwest reads the OS settings and *_PROXY
+        ProxyMode::Custom => b.proxy(reqwest::Proxy::all(&n.url).unwrap()),
+    };
+    let c = b.build().unwrap();
+    n.http = Some(c.clone());
+    c
 }
 
 /// Rate-limit pauses per host (epoch ms). While a host is paused no request leaves for it:

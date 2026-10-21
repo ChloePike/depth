@@ -3,7 +3,7 @@
 //! (`set_prefs` / `set_route` with the whole object, `set_lang`, `save_keys`, ...), so there is no Save.
 //! `Prefs` persist in settings.json; `apply` pushes them into the palette, zoom and style.
 use super::{kit, l, theme::*, tz_label};
-use depth::{route::Policy, trade, Exchange};
+use depth::{route::Policy, trade, ws::ProxyMode, Exchange};
 use eframe::egui::{self, Color32, RichText, Ui};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -30,11 +30,14 @@ pub struct Prefs {
     pub hl_flowscan: bool,
     /// the trades tape under the order book
     pub book_tape: bool,
+    /// outbound proxy for every connection; `proxy_url` is used in Custom mode
+    pub proxy: ProxyMode,
+    pub proxy_url: String,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 5, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true }
+        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 5, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, proxy: ProxyMode::None, proxy_url: String::new() }
     }
 }
 
@@ -74,6 +77,7 @@ impl Prefs {
             s.visuals.widgets.active.bg_stroke.color = Color32::from_rgb(r, g, b);
         });
         *FEES.lock().unwrap() = self.fees.clone();
+        depth::ws::set_proxy(self.proxy, &self.proxy_url);
     }
 
     /// Theme, accent, price colors, size and radius are all at their defaults.
@@ -102,6 +106,8 @@ pub struct SettingsView {
     /// venue waiting for the Remove confirmation
     removing: Option<String>,
     app_icon: Option<egui::TextureHandle>,
+    /// custom proxy URL being typed (committed on Enter / focus loss, so streams restart once)
+    proxy_url: Option<String>,
 }
 
 impl SettingsView {
@@ -200,6 +206,19 @@ impl SettingsView {
         });
         section(ui, l("Data sources"), l("Flowscan runs a Hyperliquid node and publishes its book with order counts about every 130 ms (the public feed: every few seconds), which makes the order-by-order estimate in the book much closer. It is a third-party, undocumented service and may stop working; when it fails Depth retries, and turning this off goes back to the public feed."), |ui| {
             row(ui, l("Hyperliquid orders via Flowscan"), |ui| { kit::switch(ui, &mut p.hl_flowscan); });
+        });
+        let draft = self.proxy_url.get_or_insert_with(|| p.proxy_url.clone());
+        let err = (p.proxy == ProxyMode::Custom).then(|| depth::ws::check_proxy(draft).err()).flatten();
+        section(ui, l("Network"), err.as_deref().unwrap_or(l("Market data, history and trading all go through this. WebSockets need a SOCKS5 proxy: System uses the system SOCKS proxy, Custom takes socks5://host:port. Changing it reconnects.")), |ui| {
+            row(ui, l("Proxy"), |ui| {
+                seg(ui, &mut p.proxy, &[(ProxyMode::None, l("No proxy")), (ProxyMode::System, l("System")), (ProxyMode::Custom, l("Custom"))]);
+            });
+            if p.proxy == ProxyMode::Custom {
+                row(ui, l("Address"), |ui| {
+                    let r = ui.add(egui::TextEdit::singleline(draft).hint_text("socks5://127.0.0.1:7890").font(mono_m(12.5)).desired_width(220.0).margin(egui::vec2(10.0, 7.0)));
+                    if r.lost_focus() && err.is_none() { p.proxy_url = draft.trim().to_string(); }
+                });
+            }
         });
         set_prefs(&before, &p, call);
         if self.cache.is_none() { self.cache = Some(call(json!({"op": "cache_size"})).ok().and_then(|v| v["bytes"].as_i64())); }

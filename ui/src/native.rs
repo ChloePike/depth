@@ -229,7 +229,13 @@ impl App {
             "cache_size" => return Ok(json!({"bytes": depth::sys::cache_bytes()})),
             "clear_cache" => return Ok(json!({"freed": depth::sys::clear_cache(), "bytes": depth::sys::cache_bytes()})),
             "set_lang" => super::set_lang(v["lang"].as_str().unwrap_or("en")),
-            "set_prefs" => { self.prefs = serde_json::from_value(v["prefs"].clone()).map_err(|e| e.to_string())?; self.prefs.apply(ctx); }
+            "set_prefs" => {
+                let old = (self.prefs.proxy, self.prefs.proxy_url.clone());
+                self.prefs = serde_json::from_value(v["prefs"].clone()).map_err(|e| e.to_string())?;
+                self.prefs.apply(ctx);
+                // market streams reconnect through the new route now; private streams on their next reconnect
+                if old != (self.prefs.proxy, self.prefs.proxy_url.clone()) { self.pending_restart = true; }
+            }
             "set_route" => { self.route = serde_json::from_value(v["route"].clone()).map_err(|e| e.to_string())?; }
             "tickers" => {
                 let t = self.eng.tickers.lock().unwrap();
