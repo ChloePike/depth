@@ -355,3 +355,6 @@ pos.qty = tamanho
 pos.risk = Risco por operação
 pos.use = Usar a entrada como preço
 chart.delta = Delta
+tray.last_hour = Última hora
+tray.open = Abrir Depth
+tray.quit = Sair

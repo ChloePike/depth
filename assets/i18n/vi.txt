@@ -355,3 +355,6 @@ pos.qty = khối lượng
 pos.risk = Rủi ro mỗi lệnh
 pos.use = Dùng giá vào làm giá lệnh
 chart.delta = Delta
+tray.last_hour = Giờ qua
+tray.open = Mở Depth
+tray.quit = Thoát

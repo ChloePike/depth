@@ -355,3 +355,6 @@ pos.qty = 수량
 pos.risk = 거래당 위험
 pos.use = 진입가를 주문에 입력
 chart.delta = 델타
+tray.last_hour = 최근 1시간
+tray.open = Depth 열기
+tray.quit = 종료

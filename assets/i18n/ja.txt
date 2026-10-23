@@ -355,3 +355,6 @@ pos.qty = 数量
 pos.risk = 1回のリスク
 pos.use = エントリー価格を注文へ
 chart.delta = デルタ
+tray.last_hour = 直近1時間
+tray.open = Depthを開く
+tray.quit = 終了

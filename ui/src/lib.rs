@@ -17,6 +17,7 @@ mod settings;
 mod hotkeys;
 mod command;
 mod kbd;
+mod tray;
 mod native;
 
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Ui};
@@ -118,6 +119,9 @@ pub fn t(key: &'static str) -> &'static str {
 /// Local "M/D" for a timestamp (history tables).
 pub fn chart_date(ms: i64) -> String { chart::local_date(ms) }
 
+/// A price for the menu bar: about five significant digits (81,730 · 4,125.5 · 78.52 · 0.4512).
+fn tray_px(v: f64) -> String { let a = v.abs(); if a >= 10_000.0 { fmt_dp(v, 0) } else if a >= 1_000.0 { fmt_dp(v, 1) } else if a >= 1.0 { fmt_dp(v, 2) } else { format!("{v:.4}") } }
+
 pub fn fmt_px(v: f64) -> String {
     let a = v.abs();
     fmt_dp(v, if a >= 10_000.0 { 1 } else if a >= 100.0 { 2 } else if a >= 1.0 { 4 } else { 6 })
@@ -202,6 +206,10 @@ pub struct App {
     help: bool,
     /// status for a Depth keyboard's lights (raw HID thread)
     kbd: kbd::Kbd,
+    /// menu bar / notification area item (Settings > General)
+    tray: Option<tray::Tray>,
+    /// the tray popover while open: where (points), whether it has had focus (losing it closes it)
+    pop: Option<(egui::Pos2, bool)>,
     /// last settings JSON written, and when it was last checked
     saved: (String, Instant),
     /// own window's position and size [x, y, w, h] (not hosted; kept while maximized / full screen)
@@ -308,7 +316,7 @@ impl App {
         if let Some(tf) = env("T1_TF").and_then(|s| s.parse().ok()) { chart.tf = tf; }
         let layout = env("T1_LAYOUT").or(st.layout).unwrap_or_else(|| "1".into());
         App {
-            eng, prefs, settings: Default::default(), command: Default::default(), back: None, help: false, kbd: kbd::Kbd::start(), saved: (saved, Instant::now()), window: st.window, mode, chart, book, opt: Default::default(), picker, trade, spot: Default::default(),
+            eng, prefs, settings: Default::default(), command: Default::default(), back: None, help: false, kbd: kbd::Kbd::start(), tray: None, pop: None, saved: (saved, Instant::now()), window: st.window, mode, chart, book, opt: Default::default(), picker, trade, spot: Default::default(),
             rate: (Instant::now(), 0, 0.0),
             shot: env("T1_SHOT").map(|p| (p, env("T1_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(30.0))),
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
@@ -420,6 +428,155 @@ impl App {
                 _ => self.hot_trade.push(a),
             }
         }
+    }
+
+    /// The menu bar / tray item: created when the setting is on (not in screenshot runs or inside a
+    /// native host), fed the title and the position lines, and its clicks handled.
+    fn tray_tick(&mut self, ctx: &egui::Context, a: &depth::agg::Agg) {
+        // screenshot runs leave the menu bar alone unless T1_TRAY is set (to check the item itself)
+        let want = self.prefs.tray && !self.hosted && (std::env::var_os("T1_SHOT").is_none() || std::env::var_os("T1_TRAY").is_some());
+        if !want { self.tray = None; return; }
+        if self.tray.is_none() {
+            self.tray = tray::Tray::new();
+            if std::env::var_os("T1_TRAY").is_some() { eprintln!("[tray] created: {}", self.tray.is_some()); }
+        }
+        let Some(item) = self.tray.as_mut() else { return };
+        let m = match self.mode { Market::Margin | Market::Option => Market::Spot, m => m };
+        let chg = self.eng.tickers.lock().unwrap().iter().find(|t| t.base == self.eng.base).map(|t| t.chg_pct);
+        let sym = depth::trade::symbol(&self.eng.base);
+        let acc = self.eng.account.lock().unwrap();
+        let here: f64 = acc.positions.iter().filter(|p| p.symbol == sym).map(|p| p.upnl).sum();
+        // short: a crowded menu bar pushes long items over the app menus. The change and the exact
+        // figures are in the popover and the tooltip.
+        let mut title = vec![(format!("{} {}", self.eng.base, a.mid(m).map(tray_px).unwrap_or("–".into())), None)];
+        if acc.positions.iter().any(|p| p.symbol == sym) { title.push((format!(" {}{}", if here < 0.0 { "−" } else { "+" }, chart::fmt_usd_short(here.abs())), Some(if here < 0.0 { dn() } else { up() }))); }
+        let mut lines: Vec<String> = acc.positions.iter().map(|p| {
+            let roe = if p.margin > 0.0 { format!(" ({:+.1}%)", p.upnl / p.margin * 100.0) } else { String::new() };
+            format!("{} {} {} · {}{roe}", p.symbol.trim_end_matches("USDT"), if p.side == depth::Side::Buy { t("tr.long_s") } else { t("tr.short_s") }, fmt_qty(p.qty), order::signed(p.upnl))
+        }).collect();
+        if acc.positions.len() > 1 { lines.push(format!("uPnL {}", order::signed(acc.positions.iter().map(|p| p.upnl).sum()))); }
+        drop(acc);
+        if let Some(c) = chg { lines.insert(0, format!("{} {} {c:+.2}%", self.eng.base, a.mid(m).map(fmt_px).unwrap_or("–".into()))); }
+        item.update(title.clone(), lines);
+        let act = item.poll();
+        // the popover's content: the coin, its last hour, every position
+        let spark: Vec<f64> = a.series.get(&(None, m)).map(|s| s.bars.iter().rev().take(60).map(|b| b.c).collect::<Vec<_>>().into_iter().rev().collect()).unwrap_or_default();
+        let acc = self.eng.account.lock().unwrap();
+        let rows: Vec<(String, bool, f64, f64, Option<f64>)> = acc.positions.iter()
+            .map(|p| (p.symbol.trim_end_matches("USDT").to_string(), p.side == depth::Side::Buy, p.qty, p.upnl, (p.margin > 0.0).then(|| p.upnl / p.margin * 100.0))).collect();
+        drop(acc);
+        const PW: f32 = 320.0;
+        let ph = 212.0 + rows.len().min(6) as f32 * 40.0 + if rows.is_empty() { 0.0 } else { 34.0 };
+        match act {
+            Some(tray::TrayAct::Open) => self.raise(ctx),
+            Some(tray::TrayAct::Quit) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Some(tray::TrayAct::Popover { x, y, w, h }) => {
+                if self.pop.take().is_none() {
+                    // under the menu bar item on macOS, over the taskbar icon on Windows
+                    let ppp = ctx.native_pixels_per_point().unwrap_or(1.0) as f64;
+                    let cx = ((x + w / 2.0) / ppp) as f32;
+                    let top = if cfg!(target_os = "macos") { ((y + h) / ppp) as f32 + 6.0 } else { (y / ppp) as f32 - 6.0 - ph };
+                    self.pop = Some((egui::pos2(cx - PW / 2.0, top), false));
+                }
+            }
+            None => {}
+        }
+        // T1_POPOVER=x,y: open the popover there once, without taking focus (screenshot runs)
+        let test = std::env::var("T1_POPOVER").ok().and_then(|v| v.split_once(',').and_then(|(x, y)| Some(egui::pos2(x.parse().ok()?, y.parse().ok()?))));
+        if let (Some(p), None) = (test, self.pop) { self.pop = Some((p, false)); }
+        let Some((pos, had_focus)) = self.pop else { return };
+        let vb = egui::ViewportBuilder::default().with_title("Depth").with_position(pos).with_inner_size([PW, ph])
+            .with_resizable(false).with_always_on_top().with_taskbar(false).with_active(test.is_none())
+            // macOS: a real window with its titlebar hidden keeps the system's rounded corners and shadow
+            .with_decorations(cfg!(target_os = "macos")).with_titlebar_shown(false).with_title_shown(false)
+            .with_titlebar_buttons_shown(false).with_fullsize_content_view(true);
+        let base = self.eng.base.clone();
+        let (price, mkt) = (a.mid(m), self.mode);
+        let mut out: Option<bool> = None; // Some(true): open Depth, Some(false): just close
+        let mut focused = had_focus;
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("tray_popover"), vb, |root, _| {
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(popup_bg()).inner_margin(egui::Margin::symmetric(16, 14))).show(root, |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{base}/USDT")).font(prop_s(13.5)).color(fg_strong()));
+                    ui.label(RichText::new(t(MODES.iter().find(|x| x.0 == mkt).map_or("mode.perp", |x| x.1))).font(prop(12.0)).color(mu()));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(c) = chg { kit::chip(ui, &format!("{c:+.2}%"), if c >= 0.0 { kit::Tone::Up } else { kit::Tone::Down }); }
+                    });
+                });
+                let col = match chg { Some(c) if c < 0.0 => dn(), Some(_) => up(), None => fg_strong() };
+                ui.label(RichText::new(price.map(fmt_px).unwrap_or("–".into())).font(display_s(28.0)).color(col));
+                // the last hour as a line with a soft fill, coloured by its own direction
+                let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 46.0), egui::Sense::hover());
+                if spark.len() > 1 {
+                    let (lo, hi) = spark.iter().fold((f64::MAX, f64::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
+                    let span = (hi - lo).max(hi.abs() * 1e-9).max(1e-12);
+                    let pts: Vec<egui::Pos2> = spark.iter().enumerate().map(|(i, v)| egui::pos2(r.left() + r.width() * i as f32 / (spark.len() - 1) as f32, r.bottom() - 2.0 - (r.height() - 4.0) * ((v - lo) / span) as f32)).collect();
+                    let c = if spark.last() >= spark.first() { up() } else { dn() };
+                    let mut fill = pts.clone();
+                    fill.push(egui::pos2(r.right(), r.bottom()));
+                    fill.push(egui::pos2(r.left(), r.bottom()));
+                    let mesh: Vec<egui::Shape> = pts.windows(2).map(|w| egui::Shape::convex_polygon(vec![w[0], w[1], egui::pos2(w[1].x, r.bottom()), egui::pos2(w[0].x, r.bottom())], c.gamma_multiply(0.10), egui::Stroke::NONE)).collect();
+                    ui.painter().extend(mesh);
+                    ui.painter().add(egui::Shape::line(pts, egui::Stroke::new(1.5, c)));
+                }
+                ui.label(RichText::new(t("tray.last_hour")).font(prop(10.5)).color(dim()));
+                if !rows.is_empty() {
+                    ui.add_space(4.0);
+                    ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), egui::Stroke::new(1.0, line()));
+                    ui.add_space(6.0);
+                    for (sym, long, qty, upnl, roe) in rows.iter().take(6) {
+                        let pc = if *upnl >= 0.0 { up() } else { dn() };
+                        ui.horizontal(|ui| {
+                            ui.set_min_height(34.0);
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 1.0;
+                                ui.label(RichText::new(sym).font(prop_s(13.0)).color(fg_strong()));
+                                ui.label(RichText::new(format!("{} {}", if *long { t("tr.long_s") } else { t("tr.short_s") }, fmt_qty(*qty))).font(mono(11.0)).color(if *long { up() } else { dn() }));
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 1.0;
+                                    ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                                        ui.label(RichText::new(order::signed(*upnl)).font(mono_s(13.0)).color(pc));
+                                        if let Some(r) = roe { ui.label(RichText::new(format!("{r:+.2}%")).font(mono(11.0)).color(pc)); }
+                                    });
+                                });
+                            });
+                        });
+                    }
+                    let total: f64 = rows.iter().map(|r| r.3).sum();
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("uPnL").font(prop(12.0)).color(mu()));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(order::signed(total)).font(mono_s(13.5)).color(if total >= 0.0 { up() } else { dn() }));
+                        });
+                    });
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    let w = (ui.available_width() - 8.0) / 2.0;
+                    if kit::button(ui, t("tray.open"), kit::Look::Fill(accent()), kit::H, Some(w), true).clicked() { out = Some(true); }
+                    if kit::button(ui, t("tray.quit"), kit::Look::Secondary, kit::H, Some(w), true).clicked() { ui.ctx().send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close); }
+                });
+            });
+            let (esc, close, f) = root.ctx().input(|i| (i.key_pressed(egui::Key::Escape), i.viewport().close_requested(), i.viewport().focused));
+            if esc || close { out = Some(false); }
+            // like a popover: a click elsewhere (focus lost after it had it) closes it
+            match f { Some(true) => focused = true, Some(false) if focused => { out.get_or_insert(false); } _ => {} }
+        });
+        match out {
+            Some(open) => { self.pop = None; if open { self.raise(ctx); } }
+            None => self.pop = Some((pos, focused)),
+        }
+    }
+
+    /// Bring the main window up (from the tray).
+    fn raise(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     /// What a Depth keyboard's lights show: live (messages arriving), a position in the current
@@ -892,6 +1049,7 @@ impl App {
                 self.chart.amends = depth::trade::can_amend(self.trade.ex);
             }
             self.alerts_tick(&a);
+            self.tray_tick(&ctx, &a);
             egui::CentralPanel::default().frame(card(10)).show(ui, |ui| {
                 if self.mode == Market::Option { self.opt.show(ui, &a) } else { self.charts(ui, &a) }
             });

@@ -31,6 +31,8 @@ pub struct Prefs {
     pub hl_flowscan: bool,
     /// the trades tape under the order book
     pub book_tape: bool,
+    /// price and PnL in the menu bar (macOS) / notification area (Windows)
+    pub tray: bool,
     /// outbound proxy for every connection; `proxy_url` is used in Custom mode
     pub proxy: ProxyMode,
     pub proxy_url: String,
@@ -47,7 +49,7 @@ pub struct Prefs {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false }
+        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false }
     }
 }
 
@@ -222,6 +224,10 @@ impl SettingsView {
                     for m in TZS { ui.selectable_value(&mut p.tz_min, Some(m), tz_label(m.into())); }
                 });
             });
+        });
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        section(ui, "", l("The current coin's price and your positions' PnL, readable without switching to Depth."), |ui| {
+            row(ui, l(if cfg!(target_os = "macos") { "Show in the menu bar" } else { "Show in the notification area" }), |ui| { kit::switch(ui, &mut p.tray); });
         });
         section(ui, l("Order book"), "", |ui| {
             row(ui, l("Trades under the book"), |ui| { kit::switch(ui, &mut p.book_tape); });

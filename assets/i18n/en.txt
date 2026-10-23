@@ -442,3 +442,6 @@ opt.venue_soon = Option orders work on Bybit only for now; this venue is view on
 opt.positions = Option positions
 opt.avg = Avg
 opt.close_hint = Click to load a closing order
+tray.last_hour = Last hour
+tray.open = Open Depth
+tray.quit = Quit

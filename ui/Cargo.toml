@@ -27,3 +27,13 @@ hotpatch = ["dep:subsecond", "dep:dioxus-devtools"]
 [[bin]]
 name = "depth"
 path = "src/main.rs"
+
+# menu bar (macOS) / notification area (Windows) item; Linux trays need GTK, left out
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+tray-icon = "0.26.1"
+
+# coloured menu bar title (the NSStatusItem button's attributed title); same versions as tray-icon's
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", features = ["NSAttributedString", "NSString", "NSDictionary", "NSArray"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSWindow", "NSView", "NSControl", "NSButton", "NSColor", "NSFont", "NSFontDescriptor", "NSAttributedString", "NSResponder"] }

@@ -430,3 +430,6 @@ opt.venue_soon = 期權下單目前只支援 Bybit，這家交易所只能看。
 opt.positions = 期權持倉
 opt.avg = 均價
 opt.close_hint = 點擊填入平倉單
+tray.last_hour = 最近一小時
+tray.open = 打開 Depth
+tray.quit = 結束

@@ -355,3 +355,6 @@ pos.qty = Größe
 pos.risk = Risiko pro Trade
 pos.use = Einstieg ins Orderfeld
 chart.delta = Delta
+tray.last_hour = Letzte Stunde
+tray.open = Depth öffnen
+tray.quit = Beenden

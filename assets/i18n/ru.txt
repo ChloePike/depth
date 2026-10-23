@@ -355,3 +355,6 @@ pos.qty = объём
 pos.risk = Риск на сделку
 pos.use = Вход в цену ордера
 chart.delta = Дельта
+tray.last_hour = Последний час
+tray.open = Открыть Depth
+tray.quit = Выход
