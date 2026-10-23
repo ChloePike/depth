@@ -310,31 +310,30 @@ fn pair_row(ui: &mut Ui, cells: [(&str, String, Color32); 2], big: bool) {
     }
 }
 
-/// The two sides' facts under the buy / sell buttons: (label, buy-side value, sell-side value)
-/// rows; the buy column flush left, the sell column flush right, label grey right before its value.
+/// The two sides' facts under the buy / sell buttons: (label, buy-side value, sell-side value, tip).
+/// One "label .... value" row each; when the sides differ the value is "buy / sell", each in its
+/// button's colour. Only if that cannot fit beside the label do the values drop to a second line,
+/// still right-aligned, so the column never breaks into a stagger.
 fn side_facts(ui: &mut Ui, rows: &[(&str, String, String, &str)]) {
     for (k, a, b, tip) in rows {
-        // the same on both sides (margin, max open): one "label .... value" row
-        if a == b {
-            let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 17.0), Sense::hover());
-            if !tip.is_empty() { resp.on_hover_text(*tip); }
-            ui.painter().text(r.left_center(), Align2::LEFT_CENTER, *k, prop(11.5), mu());
-            ui.painter().text(r.right_center(), Align2::RIGHT_CENTER, a, mono_m(11.5), fg());
-            continue;
+        let font = mono_m(11.5);
+        let mut job = egui::text::LayoutJob::default();
+        let fmt = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
+        if a == b { job.append(a, 0.0, fmt(fg())); } else {
+            job.append(a, 0.0, fmt(up()));
+            job.append("  /  ", 0.0, fmt(dim()));
+            job.append(b, 0.0, fmt(dn()));
         }
-        // the two sides share a row; when they would touch (long values in a narrow column) they
-        // take a row each, the sell side right-aligned
-        let w = |t: &str, f: egui::FontId| ui.painter().layout_no_wrap(t.to_string(), f, fg()).size().x;
-        let need = 2.0 * w(k, prop(11.5)) + w(a, mono_m(11.5)) + w(b, mono_m(11.5)) + 22.0;
-        let two = need > ui.available_width();
-        let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), if two { 34.0 } else { 17.0 }), Sense::hover());
+        let g = ui.painter().layout_job(job);
+        let kw = ui.painter().layout_no_wrap(k.to_string(), prop(11.5), mu()).size().x;
+        let two = kw + g.size().x + 12.0 > ui.available_width();
+        let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), if two { 32.0 } else { 17.0 }), Sense::hover());
         if !tip.is_empty() { resp.on_hover_text(*tip); }
         let p = ui.painter();
-        let (y0, y1) = if two { (r.top() + 8.5, r.top() + 25.5) } else { (r.center().y, r.center().y) };
-        let kw = p.text(egui::pos2(r.left(), y0), Align2::LEFT_CENTER, *k, prop(11.5), mu()).width();
-        p.text(egui::pos2(r.left() + kw + 5.0, y0), Align2::LEFT_CENTER, a, mono_m(11.5), fg());
-        let vw = p.text(egui::pos2(r.right(), y1), Align2::RIGHT_CENTER, b, mono_m(11.5), fg()).width();
-        p.text(egui::pos2(r.right() - vw - 5.0, y1), Align2::RIGHT_CENTER, *k, prop(11.5), mu());
+        let y0 = if two { r.top() + 8.0 } else { r.center().y };
+        let y1 = if two { r.bottom() - 8.0 } else { r.center().y };
+        p.text(egui::pos2(r.left(), y0), Align2::LEFT_CENTER, *k, prop(11.5), mu());
+        p.galley(egui::pos2(r.right() - g.size().x, y1 - g.size().y / 2.0), g, fg());
     }
 }
 
@@ -520,18 +519,18 @@ impl OrderPanel {
                 let acct_wide = bal.is_some_and(|b| !b["uni_mmr"].is_null() || !b["mm_rate"].is_null());
                 let (l0, s0) = (held("long"), held("short"));
                 let liq = |long: bool| {
-                    if qty_v <= 0.0 || ref_px <= 0.0 { return "-- USDT".into(); }
+                    if qty_v <= 0.0 || ref_px <= 0.0 { return "--".into(); }
                     let px = if let Some(b) = bal.filter(|_| acct_wide) {
                         // Binance PM liquidates at uniMMR 1.05, Bybit unified at a 100 % margin rate
                         let k = if b["uni_mmr"].is_null() { 1.0 } else { 1.05 };
-                        let (Some(a0), Some(mm0)) = (f(&b["adj_equity"]), f(&b["maint_margin"])) else { return "-- USDT".into() };
+                        let (Some(a0), Some(mm0)) = (f(&b["adj_equity"]), f(&b["maint_margin"])) else { return "--".into() };
                         let (l1, s1) = if long { (l0 + qty_v, s0) } else { (l0, s0 + qty_v) };
                         uni_liq(a0, mm0, l0 + s0, l1 - s1, l1 + s1, ref_px, 0.005, k)
                     } else {
                         let m = 1.0 / lev - 0.005;
                         Some(ref_px * if long { 1.0 - m } else { 1.0 + m })
                     };
-                    px.map_or_else(|| "-- USDT".into(), |p| format!("≈{} USDT", fmt_px(p)))
+                    px.map_or_else(|| "--".into(), |p| format!("≈{}", fmt_px(p)))
                 };
                 let liq_tip = if acct_wide { l("Unified account: the price at which the whole account would be liquidated after this order, other positions unchanged; estimated with a 0.5% maintenance rate.") }
                     else { l("Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ.") };
@@ -539,7 +538,8 @@ impl OrderPanel {
                 // max open is an estimate: compact (14.5K), the exact figure on hover
                 let can = format!("{} USDT", super::chart::fmt_usd_short(max_qty * ref_px));
                 let exact = format!("{} USDT", usd(max_qty * ref_px));
-                side_facts(ui, &[(l("Est. liq. price"), liq(true), liq(false), liq_tip), (l("Margin"), cost.clone(), cost, ""), (l("Max open"), can.clone(), can, &exact)]);
+                let liq_tip = format!("{} / {} · {liq_tip}", l("Long"), l("Short"));
+                side_facts(ui, &[(l("Est. liq. price"), liq(true), liq(false), &liq_tip), (l("Margin"), cost.clone(), cost, ""), (l("Max open"), can.clone(), can, &exact)]);
             }
             ui.spacing_mut().item_spacing.y = 6.0;
             if read_only { kit::note(ui, l("This API key is read-only: trading is disabled. Allow trading for the key on the exchange to place orders."), WARN); }
