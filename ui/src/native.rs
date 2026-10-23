@@ -8,7 +8,7 @@ use std::time::Instant;
 use depth::trade::{self, Kind, OrderReq, Tif};
 use depth::{now_ms, route, Exchange, Market, Side};
 
-fn ex_name(e: Exchange) -> String { format!("{e:?}") }
+pub(crate) fn ex_name(e: Exchange) -> String { format!("{e:?}") }
 fn parse_ex(v: &Value) -> Option<Exchange> { Exchange::parse(v.as_str()?) }
 fn side_name(s: Side) -> &'static str { if s == Side::Buy { "long" } else { "short" } }
 

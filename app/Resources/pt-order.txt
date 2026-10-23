@@ -226,3 +226,6 @@ Unified account: liquidation is decided on the whole account (UniMMR / margin ra
 Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ. = Estimativa isolada com esta alavancagem e 0,5% de manutenção; o valor da corretora pode diferir.
 Unified account: the price at which the whole account would be liquidated after this order, other positions unchanged; estimated with a 0.5% maintenance rate. = Conta unificada: preço em que toda a conta seria liquidada após esta ordem, com as outras posições inalteradas; estimado com margem de manutenção de 0,5%.
 My fills (B / S) = Minhas execuções (B / S)
+A buy stop must trigger above the ask = Um stop de compra deve disparar acima do ask
+A sell stop must trigger below the bid = Um stop de venda deve disparar abaixo do bid
+The limit price crosses the book: the order fills at once as a taker. = O preço limite cruza o livro: a ordem executa na hora como taker.

@@ -14,6 +14,7 @@ pub mod theme;
 mod trade;
 mod spot;
 mod settings;
+mod hotkeys;
 mod native;
 
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Ui};
@@ -230,6 +231,8 @@ pub struct App {
     /// egui ports of the native panels: their state document (when built, stale) and the order panel
     st: (std::sync::Arc<serde_json::Value>, Instant, bool),
     order: order::OrderPanel,
+    /// trading hotkeys pressed this frame, run by the perp order panel
+    hot_trade: Vec<hotkeys::Act>,
     /// a venue switched in the status bar, applied once the agg lock is free: (venue, on)
     venue_toggle: Option<(Exchange, bool)>,
     /// order panel shown (Perp; Cmd-Opt-I or the header button), persisted
@@ -302,7 +305,7 @@ impl App {
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
             route: st.route.clone().unwrap_or_default(), pending_base: None, pending_mode: None, pending_restart: false, book_w: 0.0,
             layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(), fills_key: Default::default(),
-            st: (Default::default(), Instant::now(), true), order: Default::default(), venue_toggle: None, order_panel: st.order_panel.unwrap_or(true), top: Default::default(), venue_pages: Default::default(),
+            st: (Default::default(), Instant::now(), true), order: Default::default(), hot_trade: vec![], venue_toggle: None, order_panel: st.order_panel.unwrap_or(true), top: Default::default(), venue_pages: Default::default(),
             account: Default::default(),
         }
     }
@@ -360,23 +363,34 @@ impl App {
         let w = ui.ctx().content_rect().x_range();
         ui.painter().hline(w, ui.min_rect().bottom() + 0.5, egui::Stroke::new(1.0, line().gamma_multiply(0.7)));
     }
-    /// Keyboard shortcuts of the SwiftUI menus (App.swift): Cmd-, settings, Cmd-Opt-I order panel,
-    /// Cmd-K pair, Cmd-[ / Cmd-] favorites, Cmd-D star, Cmd-1..4 market, Ctrl-1..6 interval.
-    /// Never while a text field has focus or a dialog is open.
+    /// Keyboard shortcuts (Settings > Hotkeys; defaults are the SwiftUI menus' keys). Never while a
+    /// text field has focus or a dialog (settings, order confirmation, ...) is open.
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() { return; }
-        use egui::{Key, Modifiers as M};
-        let k = |m: M, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
-        if k(M::COMMAND, Key::Comma) { self.settings.open = true; }
-        if self.settings.open { return; }
-        if k(M::COMMAND | M::ALT, Key::I) { self.order_panel = !self.order_panel; }
-        // Cmd-K, Cmd-[ / Cmd-], Cmd-D are the pair picker's own (picker.rs)
-        const NUM: [Key; 6] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6];
-        for (i, (m, _)) in MODES.iter().enumerate() {
-            if k(M::COMMAND, NUM[i]) && self.mode != *m { self.pending_mode = Some(*m); }
-        }
-        for (i, tf) in [1, 5, 15, 60, 240, 1440].into_iter().enumerate() {
-            if k(M::CTRL, NUM[i]) { self.chart.tf = tf; }
+        use hotkeys::Act;
+        let binds = hotkeys::complete(&self.prefs.hotkeys);
+        let key = |a: Act| binds.iter().find(|b| b.act == a).and_then(|b| b.key.as_ref()).map_or(String::new(), |c| c.label());
+        self.picker.keys = [key(Act::Picker), key(Act::PrevFav), key(Act::NextFav), key(Act::Star)];
+        if ctx.egui_wants_keyboard_input() || ctx.memory(|m| m.top_modal_layer().is_some()) { return; }
+        for a in hotkeys::pressed(ctx, &binds) {
+            match a {
+                Act::Settings => self.settings.open = true,
+                Act::OrderPanel => self.order_panel = !self.order_panel,
+                Act::Picker | Act::PrevFav | Act::NextFav | Act::Star => self.picker.hot.push(a),
+                Act::Spot | Act::Margin | Act::Perp | Act::Option => {
+                    let m = match a { Act::Spot => Market::Spot, Act::Margin => Market::Margin, Act::Perp => Market::Perp, _ => Market::Option };
+                    if self.mode != m { self.pending_mode = Some(m); }
+                }
+                Act::Tf1m => self.chart.tf = 1, Act::Tf5m => self.chart.tf = 5, Act::Tf15m => self.chart.tf = 15,
+                Act::Tf1h => self.chart.tf = 60, Act::Tf4h => self.chart.tf = 240, Act::Tf1d => self.chart.tf = 1440,
+                Act::PrevVenue | Act::NextVenue => {
+                    let all = depth::trade::TRADABLE;
+                    let i = all.iter().position(|e| *e == self.trade.ex).unwrap_or(0);
+                    let n = all.len();
+                    let e = all[(i + if a == Act::NextVenue { 1 } else { n - 1 }) % n];
+                    let _ = self.call(ctx, &serde_json::json!({"op": "set_trade_venue", "ex": native::ex_name(e)}));
+                }
+                _ => self.hot_trade.push(a),
+            }
         }
     }
 
@@ -576,6 +590,7 @@ impl App {
                     let o = self.eng.account.lock().unwrap().orders.iter().find(|o| o.ex == ex && o.id == id).cloned();
                     if let Some(o) = o { self.eng.replace_order(&o, px, ctx); }
                 }
+                chart::ChartAct::Move(chart::LineAct::Preview(field), px) => self.order.set_preview(field, px),
                 chart::ChartAct::Move(chart::LineAct::TpSl(ex, id), px) => {
                     let mut acc = self.eng.account.lock().unwrap();
                     let Some(tp) = acc.tpsl.iter().find(|x| x.ex == ex && x.id == id).cloned() else { continue };
@@ -706,6 +721,8 @@ impl App {
                 egui::Panel::right("order").show_separator_line(false).frame(Frame::new().fill(bg()).inner_margin(Margin::symmetric(4, 4))).resizable(false).exact_size(300.0)
                     .show(ui, |ui| egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
                         op.show(ui, &st, &mut |v| { let r = self.call(&ctx, &v); self.st.2 = true; r });
+                        let usdt = self.prefs.hot_usdt;
+                        for a in std::mem::take(&mut self.hot_trade) { op.hotkey(a, usdt, &st, &mut |v| { let r = self.call(&ctx, &v); self.st.2 = true; r }); }
                         ui.add_space(8.0);
                         let g = agg.lock().unwrap();
                         let base = self.eng.base.clone();
@@ -803,6 +820,12 @@ impl App {
                     sub: x.qty.map(fmt_qty).unwrap_or_else(|| t("tr.whole").to_string()),
                     act: Some(chart::LineAct::TpSl(x.ex, x.id.clone())),
                 }));
+                // the order being typed in the panel (perp), draggable to change its price
+                if self.mode == Market::Perp && self.order_panel {
+                    lines.extend(self.order.preview.iter().map(|(px, field, tag, sub, col)| chart::ChartLine {
+                        price: *px, col: *col, tag: tag.to_string(), sub: sub.clone(), act: Some(chart::LineAct::Preview(field)),
+                    }));
+                }
                 self.chart.lines = lines;
                 self.chart.confirm = self.prefs.confirm;
                 self.chart.trading = acc.keys.contains_key(&self.trade.ex) && acc.can_trade.get(&self.trade.ex) != Some(&false);

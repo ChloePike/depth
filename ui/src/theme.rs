@@ -477,7 +477,8 @@ fn style(base: &egui::Style, light: bool) -> egui::Style {
     style.spacing.item_spacing = egui::vec2(6.0, 4.0);
     style.spacing.button_padding = egui::vec2(10.0, 4.0);
     style.spacing.interact_size.y = 24.0;
-    style.spacing.menu_margin = egui::Margin::same(6);
+    // menus: outer radius = margin + item radius, so the highlighted item's corners run parallel to the menu's
+    style.spacing.menu_margin = egui::Margin::same(4);
     // thin scrollbars that float over content instead of eating a gutter
     style.spacing.scroll = egui::style::ScrollStyle::floating();
     style.animation_time = 0.12;
@@ -496,7 +497,7 @@ fn style(base: &egui::Style, light: bool) -> egui::Style {
         w.expansion = 0.0;
     }
     v.window_corner_radius = 6.into();
-    v.menu_corner_radius = 6.into();
+    v.menu_corner_radius = 8.into();
     // soft, wide shadows: popups and dialogs read as layers, not boxes
     v.window_shadow = egui::Shadow { offset: [0, 8], blur: 28, spread: 0, color: Color32::from_black_alpha(if light { 40 } else { 140 }) };
     v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(if light { 32 } else { 120 }) };

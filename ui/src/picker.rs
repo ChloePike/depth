@@ -1,10 +1,11 @@
 //! Pair picker: a port of the SwiftUI host's SymbolPicker. USDT perpetuals (engine tickers),
 //! search ranked exact > prefix > contains, sortable columns, favorites and recently opened pairs
 //! (favorites.txt / recent.txt under ~/Library/Application Support/Depth). Click picks; arrows move
-//! the selection, Enter picks it (or the first match), Escape closes. ⌘K opens, ⌘[ ⌘] step through
-//! favorites, ⌘D stars the current pair.
+//! the selection, Enter picks it (or the first match), Escape closes. Hotkeys (default ⌘K, ⌘[ ⌘], ⌘D)
+//! open it, step through favorites and star the current pair.
 use super::{fmt_px, kit, l, theme::*, top, top::big};
 use crate::engine::Ticker;
+use crate::hotkeys::Act;
 use eframe::egui::{self, pos2, vec2, Align2, Key, Modifiers, Rect, RichText, Sense, Ui};
 use std::path::PathBuf;
 
@@ -15,7 +16,7 @@ pub struct Picker {
     pub open: bool,
     query: String,
     favs_only: bool,
-    /// in the order they were starred (⌘[ ⌘] step through them in that order)
+    /// in the order they were starred (the favorite hotkeys step through them in that order)
     favs: Vec<String>,
     /// most recent first, at most 10
     recent: Vec<String>,
@@ -27,6 +28,10 @@ pub struct Picker {
     view: (f32, f32),
     scroll_to: Option<usize>,
     was_open: bool,
+    /// picker hotkeys pressed this frame (App::shortcuts)
+    pub hot: Vec<Act>,
+    /// current key of each picker action, for the hints ("" = unbound)
+    pub keys: [String; 4],
 }
 
 const ROW_H: f32 = 28.0;
@@ -50,7 +55,7 @@ fn store(name: &str, v: &[String]) {
 impl Default for Picker {
     fn default() -> Self {
         let favs = load("favorites.txt").unwrap_or_else(|| ["BTC", "ETH", "SOL"].into_iter().map(String::from).collect());
-        Picker { open: false, query: String::new(), favs_only: false, favs, recent: load("recent.txt").unwrap_or_default(),
+        Picker { hot: vec![], keys: Default::default(), open: false, query: String::new(), favs_only: false, favs, recent: load("recent.txt").unwrap_or_default(),
             sort: (Col::Vol, false), sel: None, seen_query: String::new(), view: (0.0, 0.0), scroll_to: None, was_open: false }
     }
 }
@@ -91,9 +96,10 @@ impl Picker {
     /// Button showing the current pair (and the global shortcuts); returns a newly chosen base asset.
     pub fn show(&mut self, ui: &mut Ui, base: &str, tickers: &[Ticker]) -> Option<String> {
         let mut chosen: Option<String> = None;
-        // shortcuts: ⌘K picker, ⌘[ / ⌘] previous / next favorite, ⌘D star the current pair
-        let (k, prev, next, star) = ui.input_mut(|i| (i.consume_key(Modifiers::COMMAND, Key::K), i.consume_key(Modifiers::COMMAND, Key::OpenBracket),
-            i.consume_key(Modifiers::COMMAND, Key::CloseBracket), i.consume_key(Modifiers::COMMAND, Key::D)));
+        // hotkeys (App::shortcuts): picker, previous / next favorite, star the current pair
+        let hot = std::mem::take(&mut self.hot);
+        let has = |a: Act| hot.contains(&a);
+        let (k, prev, next, star) = (has(Act::Picker), has(Act::PrevFav), has(Act::NextFav), has(Act::Star));
         if star { self.toggle_fav(base); }
         if (prev || next) && !self.favs.is_empty() {
             let n = self.favs.len();
@@ -101,9 +107,9 @@ impl Picker {
             chosen = Some(self.favs[i].clone());
         }
 
-        let btn = pair_button(ui, base, self.open).on_hover_text(format!("{} (⌘K)", l("Choose pair")));
+        let btn = pair_button(ui, base, self.open).on_hover_text(if self.keys[0].is_empty() { l("Choose pair").to_string() } else { format!("{} ({})", l("Choose pair"), self.keys[0]) });
         if btn.clicked() || k { self.open = !self.open; }
-        // opened by the button, ⌘K or T1_PICK
+        // opened by the button, the hotkey or T1_PICK
         let just_opened = self.open && !self.was_open;
         self.was_open = self.open;
         if just_opened {
@@ -145,7 +151,8 @@ impl Picker {
                         if let Some(j) = top::pills(ui, "pick_favs", &[l("Favorites"), l("All")], i, 22.0, 12.0) { self.favs_only = j == 0; }
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(format!("⌘[ ⌘]  {}  ·  ⌘D  {}", l("favorites"), l("star"))).font(prop(11.0)).color(dim()));
+                        let [_, p, n, d] = &self.keys;
+                        ui.label(RichText::new(format!("{p} {n}  {}  ·  {d}  {}", l("favorites"), l("star"))).font(prop(11.0)).color(dim()));
                     });
                 });
 

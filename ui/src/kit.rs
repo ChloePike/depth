@@ -1,7 +1,7 @@
 //! The component kit: every panel draws its controls through these, so sizes, weights, colors
 //! and motion are the same everywhere (design: "Depth UI design" canvas, TradingView-style
 //! neutral black). Sizes: compact controls 24 px, default 28 px, primary actions 36 px; radius
-//! 4 on controls and panels, 6 on popups; one hairline (`line()`); hover / selection fade in
+//! 4 on controls and panels, 6 on dialogs, 8 on menus; one hairline (`line()`); hover / selection fade in
 //! 100-160 ms. Text: labels 12 regular grey, values 12.5 medium, titles 13.5 semibold.
 use super::theme::*;
 use eframe::egui::{self, Align2, Color32, Rect, Response, Sense, Stroke, Ui};

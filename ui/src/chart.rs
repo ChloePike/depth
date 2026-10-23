@@ -133,9 +133,10 @@ impl Default for Ind { fn default() -> Self { Ind { rsi: 14, macd: [12, 26, 9], 
 #[derive(Clone)]
 pub struct ChartLine { pub price: f64, pub tag: String, pub sub: String, pub col: Color32, pub act: Option<LineAct> }
 
-/// What dragging an account line changes: a resting limit order, or a TP / SL trigger (venue, id).
+/// What dragging an account line changes: a resting limit order, a TP / SL trigger (venue, id), or a
+/// field of the order being typed in the panel.
 #[derive(Clone, PartialEq, Debug)]
-pub enum LineAct { Order(Exchange, String), TpSl(Exchange, String) }
+pub enum LineAct { Order(Exchange, String), TpSl(Exchange, String), Preview(&'static str) }
 
 /// Requests from the chart to the app: move an order / trigger, or put a price into the order panel.
 #[derive(Clone, Debug)]
@@ -202,7 +203,7 @@ const FIB: [f64; 7] = [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0];
 
 /// Simple moving average of `vals` over `n` (None until n values are in).
 /// 1.2K / 3.4M / 1.1B for wall sizes.
-fn fmt_usd_short(v: f64) -> String {
+pub(crate) fn fmt_usd_short(v: f64) -> String {
     let a = v.abs();
     if a >= 1e9 { format!("{:.2}B", v / 1e9) } else if a >= 1e6 { format!("{:.2}M", v / 1e6) } else if a >= 1e3 { format!("{:.1}K", v / 1e3) } else { format!("{v:.0}") }
 }
@@ -1538,7 +1539,7 @@ impl Chart {
                     if resp.drag_stopped() {
                         if (y(np) - y(l.price)).abs() > 2.0 {
                             let act = l.act.clone().unwrap();
-                            if self.confirm { self.pending_move = Some((act, l.tag.clone(), l.price, np, p)); } else { self.actions.push(ChartAct::Move(act, np)); }
+                            if self.confirm && !matches!(act, LineAct::Preview(_)) { self.pending_move = Some((act, l.tag.clone(), l.price, np, p)); } else { self.actions.push(ChartAct::Move(act, np)); }
                         }
                         self.line_drag = None;
                     }

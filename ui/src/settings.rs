@@ -2,6 +2,7 @@
 //! Like the order panel it reads the JSON state document and writes through the native ops
 //! (`set_prefs` / `set_route` with the whole object, `set_lang`, `save_keys`, ...), so there is no Save.
 //! `Prefs` persist in settings.json; `apply` pushes them into the palette, zoom and style.
+use super::hotkeys::{self, Act, Rec};
 use super::{kit, l, theme::*, tz_label};
 use depth::{route::Policy, trade, ws::ProxyMode, Exchange};
 use eframe::egui::{self, Color32, RichText, Ui};
@@ -33,11 +34,15 @@ pub struct Prefs {
     /// outbound proxy for every connection; `proxy_url` is used in Custom mode
     pub proxy: ProxyMode,
     pub proxy_url: String,
+    /// keyboard shortcuts (hotkeys::complete fills in actions added later)
+    pub hotkeys: Vec<super::hotkeys::Binding>,
+    /// order size of the trading hotkeys, USDT notional (0 = trading hotkeys off)
+    pub hot_usdt: f64,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 5, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, proxy: ProxyMode::None, proxy_url: String::new() }
+        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 5, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0 }
     }
 }
 
@@ -88,7 +93,7 @@ impl Prefs {
 }
 
 /// Sidebar panes (painted monochrome glyphs, design: neutral sidebar).
-const PANES: [&str; 5] = ["General", "Appearance", "Trading", "API Keys", "About"];
+const PANES: [&str; 6] = ["General", "Appearance", "Trading", "API Keys", "Hotkeys", "About"];
 const W: f32 = 800.0;
 const H: f32 = 580.0;
 const SIDE: f32 = 196.0;
@@ -108,16 +113,19 @@ pub struct SettingsView {
     app_icon: Option<egui::TextureHandle>,
     /// custom proxy URL being typed (committed on Enter / focus loss, so streams restart once)
     proxy_url: Option<String>,
+    /// hotkey being recorded (the next key press becomes its binding)
+    recording: Option<Act>,
 }
 
 impl SettingsView {
-    pub fn open_tab(&mut self, tab: u8) { self.open = true; self.tab = tab.min(4); self.cache = None; }
+    pub fn open_tab(&mut self, tab: u8) { self.open = true; self.tab = tab.min(5); self.cache = None; }
 
     pub fn show(&mut self, ctx: &egui::Context, st: &Value, call: &mut Call) {
         if !self.open { return; }
         // design: a popup surface (radius 6, hairline, soft wide shadow)
         let frame = egui::Frame::new().fill(panel_c()).corner_radius(6).stroke(egui::Stroke::new(1.0, line())).inner_margin(0)
             .shadow(egui::Shadow { offset: [0, 12], blur: 40, spread: 0, color: Color32::from_black_alpha(if light() { 50 } else { 150 }) });
+        let was_recording = self.recording.is_some();
         let m = egui::Modal::new(egui::Id::new("settings")).frame(frame).show(ctx, |ui| {
             ui.set_width(W);
             ui.set_height(H);
@@ -142,6 +150,7 @@ impl SettingsView {
                                 1 => appearance(ui, st, call),
                                 2 => trading(ui, st, call),
                                 3 => self.api_keys(ui, st, call),
+                                4 => self.hotkeys(ui, st, call),
                                 _ => self.about(ui),
                             }
                         });
@@ -149,7 +158,8 @@ impl SettingsView {
                 });
             });
         });
-        if m.should_close() && self.removing.is_none() { self.open = false; }
+        // Escape while recording a hotkey cancels the recording, not the dialog
+        if m.should_close() && self.removing.is_none() && !was_recording { self.open = false; }
         self.confirm_remove(ctx, call);
     }
 
@@ -229,6 +239,52 @@ impl SettingsView {
                 ui.label(RichText::new(s).font(mono_m(12.5)).color(mu()));
             });
         });
+    }
+
+    // ------------------------------------------------------------------ Hotkeys
+
+    /// Every action with its key: click a key, press the new combination (Escape cancels, Delete
+    /// clears). A combination already used moves to the new action.
+    fn hotkeys(&mut self, ui: &mut Ui, st: &Value, call: &mut Call) {
+        let mut p = prefs(st);
+        let before = p.clone();
+        let mut binds = hotkeys::complete(&p.hotkeys);
+        if let Some(a) = self.recording {
+            match hotkeys::record(ui.ctx()) {
+                None => {}
+                Some(r) => {
+                    let key = match r { Rec::Cancel => binds.iter().find(|b| b.act == a).and_then(|b| b.key.clone()), Rec::Clear => None, Rec::Set(c) => Some(c) };
+                    for b in binds.iter_mut() {
+                        if b.act == a { b.key = key.clone(); } else if key.is_some() && b.key == key { b.key = None; }
+                    }
+                    self.recording = None;
+                }
+            }
+        }
+        let mut rec = self.recording;
+        let mut rows = |ui: &mut Ui, trading: bool| {
+            for (i, b) in binds.iter().filter(|b| b.act.trading() == trading).enumerate() {
+                if i > 0 { row_sep(ui); }
+                row(ui, l(b.act.name()), |ui| {
+                    let on = rec == Some(b.act);
+                    let text = if on { l("Press keys…").to_string() } else { b.key.as_ref().map_or("—".into(), |c| c.label()) };
+                    let r = kit::button(ui, &text, kit::Look::Secondary, kit::H_SM, Some(120.0), true);
+                    if on { ui.painter().rect_stroke(r.rect, kit::R, egui::Stroke::new(1.0, accent()), egui::StrokeKind::Inside); }
+                    if r.clicked() { rec = if on { None } else { Some(b.act) }; }
+                });
+            }
+        };
+        section(ui, l("Trading"), l("Perp order panel, on its trading venue. Buy / sell send the size below at the venue's own bid / ask (a limit that joins the queue) or at market, through the same confirmation as the buttons; TP/SL is not attached. Cancel-all and close-all act only on the trading venue, never on positions or orders held on other venues; close-all asks first when order confirmation is on."), |ui| {
+            number(ui, l("Order size"), &mut p.hot_usdt, 0, "USDT");
+            row_sep(ui);
+            rows(ui, true);
+        });
+        section(ui, l("Navigation"), l("Keys work while no text field has focus. Click a key, then press the new combination: Escape cancels, Delete clears."), |ui| rows(ui, false));
+        ui.add_space(12.0);
+        if kit::button(ui, l("Restore defaults"), kit::Look::Secondary, kit::H, None, true).clicked() { binds = hotkeys::defaults(); rec = None; }
+        self.recording = rec;
+        p.hotkeys = binds;
+        set_prefs(&before, &p, call);
     }
 
     // ------------------------------------------------------------------ API keys
@@ -648,6 +704,12 @@ fn pane_icon(p: &egui::Painter, r: egui::Rect, i: usize, col: Color32) {
             p.line_segment([c + v(-0.1, 0.0), c + v(7.0, 0.0)], s);
             p.line_segment([c + v(4.5, 0.0), c + v(4.5, 3.0)], s);
             p.line_segment([c + v(6.8, 0.0), c + v(6.8, 2.5)], s);
+        }
+        4 => {
+            // keyboard: outline, two rows of keys, space bar
+            p.rect_stroke(egui::Rect::from_center_size(c, v(15.0, 10.0)), 2, s, egui::StrokeKind::Middle);
+            for k in 0..4 { p.circle_filled(c + v(-4.5 + k as f32 * 3.0, -2.2), 0.9, col); }
+            p.line_segment([c + v(-3.5, 2.3), c + v(3.5, 2.3)], s);
         }
         _ => {
             p.circle_stroke(c, 6.8, s);

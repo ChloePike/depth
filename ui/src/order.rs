@@ -5,6 +5,7 @@
 use super::kit::{self, Look, Tone, H, H_LG, H_SM};
 use super::{fmt_dp, fmt_px, fmt_qty, l, lf, theme::*};
 use eframe::egui::{self, Align2, Color32, Rect, Response, RichText, Sense, Stroke, Ui};
+use crate::hotkeys::Act;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
@@ -92,6 +93,15 @@ pub struct OrderPanel {
     pub open_settings: Option<u8>,
     /// set when the panel wants the transfer dialog for this venue
     pub open_transfer: Option<String>,
+    /// the order being typed, for the chart: (price, field it came from, tag, sub, colour); `tick` formats a dragged price
+    pub(crate) preview: Vec<(f64, &'static str, &'static str, String, Color32)>,
+    tick: Option<f64>,
+    /// positions waiting for the flatten hotkey's confirmation
+    flatten: Option<Vec<Value>>,
+    /// size typed in USDT (notional) instead of the base coin
+    qty_usdt: bool,
+    /// when this panel last sent something: order-log entries since then show under the buttons
+    sent_ms: i64,
 }
 
 impl Default for OrderPanel {
@@ -102,7 +112,7 @@ impl Default for OrderPanel {
             trigger: String::new(), trigger_last: false, stop_limit: false, callback: "1.0".into(), activation: String::new(),
             scaled_from: String::new(), scaled_to: String::new(), scaled_count: 5, scaled_skew: 0.0, scaled_post: true,
             twap_minutes: "15".into(), twap_slices: "10".into(), twap_slip: "10".into(), twap_limit: String::new(), twap_native: true, twap_random: false,
-            lev: None, waiting: vec![], sheet: None, seen: Default::default(), open_settings: None, open_transfer: None,
+            lev: None, waiting: vec![], sheet: None, seen: Default::default(), open_settings: None, open_transfer: None, preview: vec![], tick: None, flatten: None, qty_usdt: false, sent_ms: 0,
         }
     }
 }
@@ -144,6 +154,13 @@ pub(crate) fn usd(v: f64) -> String { fmt_dp(v, 2) }
 pub(crate) fn signed(v: f64) -> String { format!("{}{}", if v >= 0.0 { "+" } else { "" }, fmt_dp(v, 2)) }
 fn f(v: &Value) -> Option<f64> { v.as_f64() }
 fn s(v: &Value) -> &str { v.as_str().unwrap_or_default() }
+
+/// Market-closes each position (the venue's own reduce-only close); the last error is kept.
+fn flatten(ps: &[Value], call: &mut Call, err: &mut Option<String>) {
+    for p in ps {
+        if let Err(e) = call(json!({"op": "close_position", "ex": p["ex"], "symbol": p["symbol"], "side": p["side"]})) { *err = Some(e); }
+    }
+}
 
 /// TP above / SL below the reference for longs, the reverse for shorts.
 fn tpsl_check(long: bool, r: f64, ref_name: &str, tp: Option<f64>, sl: Option<f64>) -> Option<String> {
@@ -297,6 +314,14 @@ fn pair_row(ui: &mut Ui, cells: [(&str, String, Color32); 2], big: bool) {
 /// rows; the buy column flush left, the sell column flush right, label grey right before its value.
 fn side_facts(ui: &mut Ui, rows: &[(&str, String, String, &str)]) {
     for (k, a, b, tip) in rows {
+        // the same on both sides (margin, max open): one "label .... value" row
+        if a == b {
+            let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 17.0), Sense::hover());
+            if !tip.is_empty() { resp.on_hover_text(*tip); }
+            ui.painter().text(r.left_center(), Align2::LEFT_CENTER, *k, prop(11.5), mu());
+            ui.painter().text(r.right_center(), Align2::RIGHT_CENTER, a, mono_m(11.5), fg());
+            continue;
+        }
         // the two sides share a row; when they would touch (long values in a narrow column) they
         // take a row each, the sell side right-aligned
         let w = |t: &str, f: egui::FontId| ui.painter().layout_no_wrap(t.to_string(), f, fg()).size().x;
@@ -347,6 +372,8 @@ impl OrderPanel {
     /// The whole order column. `st` is the app's state document, `call` sends ops.
     pub fn show(&mut self, ui: &mut Ui, st: &Value, call: &mut Call) {
         let t = &st["trade"];
+        // a ticket opened by Enter in a field this frame must not be confirmed by that same Enter
+        let had_ticket = self.ticket.is_some();
         let (venue, symbol, base) = (s(&t["venue"]).to_string(), s(&t["symbol"]).to_string(), s(&st["base"]).to_string());
         let (tick, step) = (f(&t["tick"]), f(&t["step"]));
         let (bid, ask) = (f(&t["bid"]), f(&t["ask"]));
@@ -362,7 +389,7 @@ impl OrderPanel {
         let click = st["book_click"].as_object().map(|c| (s(&c["ex"]).to_string(), c["px"].as_f64().unwrap_or(0.0)));
         if self.seen.0 != symbol {
             self.price = bid.map(|b| px_str(b, tick)).unwrap_or_default();
-            (self.qty, self.pct, self.tp, self.sl, self.error) = (String::new(), 0.0, String::new(), String::new(), None);
+            (self.qty, self.pct, self.tp, self.sl, self.error, self.last_pos) = (String::new(), 0.0, String::new(), String::new(), None, None);
         }
         if self.seen.1 != venue && ((self.kind == Kind::Stop && caps["stop"] != true) || (self.kind == Kind::Trailing && caps["trailing"] != true)) { self.kind = Kind::Limit; }
         if click != self.seen.2 {
@@ -382,14 +409,32 @@ impl OrderPanel {
             _ => (if typed_price { parse(&self.price) } else { None }).or(mid).unwrap_or(0.0),
         };
         let lev = f(&t["lev"]).unwrap_or(1.0).max(1.0);
-        let qty_v = parse(&self.qty).unwrap_or(0.0);
+        let qty_v = self.base_qty(ref_px, step);
         let positions: Vec<&Value> = st["positions"].as_array().map(|a| a.iter().filter(|p| s(&p["symbol"]) == symbol && (smart || s(&p["ex"]) == venue)).collect()).unwrap_or_default();
         let held = |side: &str| positions.iter().filter(|p| s(&p["side"]) == side).map(|p| f(&p["qty"]).unwrap_or(0.0)).sum::<f64>();
         let max_qty = if self.close { held("long").max(held("short")) } else if ref_px > 0.0 { f(&t["available"]).unwrap_or(0.0) * lev / ref_px } else { 0.0 };
 
+        // preview lines: the prices this order would rest / trigger at, with the size and the distance from the touch
+        self.tick = tick;
+        let away = |p: f64| mid.map(|m| format!("{:+.2}%", (p / m - 1.0) * 100.0)).unwrap_or_default();
+        let sub = |p: f64| if qty_v > 0.0 { format!("{} {base} · {}", fmt_qty(qty_v), away(p)) } else { away(p) };
+        let mut pv = vec![];
+        let mut add = |field: &'static str, tag: &'static str, v: &str, col: Color32| if let Some(p) = parse(v).filter(|p| *p > 0.0) { pv.push((p, field, tag, sub(p), col)); };
+        match self.kind {
+            Kind::Limit if !use_bbo => add("price", l("Limit"), &self.price, accent()),
+            Kind::Stop => {
+                add("trigger", l("Stop"), &self.trigger, accent());
+                if self.stop_limit { add("price", l("Limit"), &self.price, accent()); }
+            }
+            Kind::Scaled => { add("from", l("Scaled"), &self.scaled_from, accent()); add("to", l("Scaled"), &self.scaled_to, accent()); }
+            _ => {}
+        }
+        if self.tpsl_on && !self.close && matches!(self.kind, Kind::Limit | Kind::Market) { add("tp", "TP", &self.tp, up()); add("sl", "SL", &self.sl, dn()); }
+        self.preview = pv;
+
         let mut enter = false;
         card(ui, |ui| {
-            self.header(ui, t, &venue, smart, has_key, call);
+            self.header(ui, st, &venue, smart, has_key, call);
             // the venue's own touch on its own row: bid left, spread centre, ask right; a click
             // puts that price in the limit field
             if let (Some(b), Some(k)) = (bid, ask) {
@@ -413,7 +458,7 @@ impl OrderPanel {
                 let mid = (b + k) / 2.0;
                 if mid > 0.0 { ui.painter().text(r.center(), Align2::CENTER_CENTER, format!("{:.1}bp", (k - b) / mid * 1e4), mono(11.0), dim()); }
             }
-            if kit::segments(ui, &mut self.close, &[(false, l("Open")), (true, l("Close"))], 28.0) { (self.pct, self.qty, self.error) = (0.0, String::new(), None); }
+            if kit::segments(ui, &mut self.close, &[(false, l("Open")), (true, l("Close"))], 28.0) { (self.pct, self.qty, self.error, self.last_pos) = (0.0, String::new(), None, None); }
             self.type_tabs(ui, caps);
             // available margin, with the transfer shortcut
             ui.horizontal(|ui| {
@@ -426,12 +471,22 @@ impl OrderPanel {
                 });
             });
             enter |= self.kind_fields(ui, t, &venue, &bbo_levels, use_bbo, tick);
-            let (r, e) = kit::field(ui, l("Size"), &mut self.qty, &base, "qty", false);
-            enter |= e;
-            if r.changed() { self.pct = if max_qty > 0.0 { (parse(&self.qty).unwrap_or(0.0) / max_qty).min(1.0) as f32 } else { 0.0 }; }
+            // size in the coin or in USDT: the unit button switches and converts what is typed
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let (r, e) = ui.allocate_ui(egui::vec2(ui.available_width() - 60.0, H), |ui| kit::field(ui, l("Size"), &mut self.qty, "", "qty", false)).inner;
+                enter |= e;
+                if r.changed() { self.pct = if max_qty > 0.0 { (self.base_qty(ref_px, step) / max_qty).min(1.0) as f32 } else { 0.0 }; }
+                let unit = if self.qty_usdt { "USDT".to_string() } else { base.clone() };
+                if kit::button(ui, &format!("{unit} ⇄"), Look::Secondary, H, Some(f32::INFINITY), true).on_hover_text(l("Size in the coin or in USDT")).clicked() {
+                    let b = self.base_qty(ref_px, step);
+                    self.qty_usdt = !self.qty_usdt;
+                    self.qty = if b > 0.0 { self.qty_text(b, ref_px, step) } else { String::new() };
+                }
+            });
             let pct = format!("{:.0}%", self.pct * 100.0);
             ui.scope(|ui| {
-                if slider(ui, &mut self.pct, &pct) { self.qty = if self.pct > 0.0 { qty_str(max_qty * self.pct as f64, step) } else { String::new() }; }
+                if slider(ui, &mut self.pct, &pct) { self.qty = if self.pct > 0.0 { self.qty_text(max_qty * self.pct as f64, ref_px, step) } else { String::new() }; }
             }).response.on_hover_text(if self.close { l("Share of the position") } else { l("Share of available margin × leverage") });
             if !self.close && matches!(self.kind, Kind::Limit | Kind::Market) { enter |= self.tpsl_section(ui); }
             self.algo_jobs(ui, st, call);
@@ -439,12 +494,18 @@ impl OrderPanel {
             let (l1, l2) = if self.close { (l("Close Short"), l("Close Long")) } else { (l("Open Long"), l("Open Short")) };
             let (p1, p2) = if self.close { ("short", "long") } else { ("long", "short") };
             let mut go = None;
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                let w = (ui.available_width() - 8.0) / 2.0;
-                if kit::button(ui, l1, Look::Fill(up()), 32.0, Some(w), can_trade).clicked() { go = Some(p1); }
-                if kit::button(ui, l2, Look::Fill(dn()), 32.0, Some(w), can_trade).clicked() { go = Some(p2); }
-            });
+            if !has_key && !smart {
+                // no key: the way forward instead of two dead buttons
+                if kit::button(ui, l("Add API keys"), Look::Fill(accent()), 32.0, Some(f32::INFINITY), true).clicked() { self.open_settings = Some(3); }
+            } else {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    let w = (ui.available_width() - 8.0) / 2.0;
+                    if kit::button(ui, l1, Look::Fill(up()), 32.0, Some(w), can_trade).clicked() { go = Some(p1); }
+                    if kit::button(ui, l2, Look::Fill(dn()), 32.0, Some(w), can_trade).clicked() { go = Some(p2); }
+                });
+            }
+            self.results(ui, st);
             // per side, Binance-style: "label value" pairs, the buy side flush left, the sell side
             // flush right; est. liquidation (isolated estimate), margin, and what can be opened
             ui.spacing_mut().item_spacing.y = 3.0;
@@ -475,8 +536,10 @@ impl OrderPanel {
                 let liq_tip = if acct_wide { l("Unified account: the price at which the whole account would be liquidated after this order, other positions unchanged; estimated with a 0.5% maintenance rate.") }
                     else { l("Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ.") };
                 let cost = format!("{} USDT", usd(qty_v * ref_px / lev));
-                let can = format!("{} USDT", usd(max_qty * ref_px));
-                side_facts(ui, &[(l("Est. liq. price"), liq(true), liq(false), liq_tip), (l("Margin"), cost.clone(), cost, ""), (l("Max open"), can.clone(), can, "")]);
+                // max open is an estimate: compact (14.5K), the exact figure on hover
+                let can = format!("{} USDT", super::chart::fmt_usd_short(max_qty * ref_px));
+                let exact = format!("{} USDT", usd(max_qty * ref_px));
+                side_facts(ui, &[(l("Est. liq. price"), liq(true), liq(false), liq_tip), (l("Margin"), cost.clone(), cost, ""), (l("Max open"), can.clone(), can, &exact)]);
             }
             ui.spacing_mut().item_spacing.y = 6.0;
             if read_only { kit::note(ui, l("This API key is read-only: trading is disabled. Allow trading for the key on the exchange to place orders."), WARN); }
@@ -506,14 +569,18 @@ impl OrderPanel {
                 None => self.error = Some(l("Press Buy or Sell once; Enter then repeats that side.").into()),
             }
         }
-        self.confirm_modal(ui, st, call);
+        self.confirm_modal(ui, st, call, had_ticket);
         self.algo_modal(ui, t, call);
         self.leverage_modal(ui, t, call);
+        self.flatten_modal(ui, call);
         tpsl_modal(&mut self.sheet, ui, st, call);
     }
 
     /// Position mode, leverage (opens the sheet), untested warning, routing / venue menu.
-    fn header(&mut self, ui: &mut Ui, t: &Value, venue: &str, smart: bool, has_key: bool, call: &mut Call) {
+    fn header(&mut self, ui: &mut Ui, st: &Value, venue: &str, smart: bool, has_key: bool, call: &mut Call) {
+        let t = &st["trade"];
+        let st_keys = st["keys"].as_array().cloned().unwrap_or_default();
+        let tradable: Vec<String> = st["tradable"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.set_min_height(H_SM);
@@ -540,6 +607,14 @@ impl OrderPanel {
                 let r = kit::button(ui, &name, Look::Link, H_SM, None, true)
                     .on_hover_text(format!("{} {} · {} {}", l("Push"), ms(f(&t["push_ms"])), l("RTT"), ms(f(&t["rtt_ms"]))));
                 egui::Popup::menu(&r).show(|ui| {
+                    // the venue itself, one click (the preferred venue when routing is smart)
+                    kit::overline(ui, if smart { l("Preferred venue") } else { l("Trading venue") });
+                    let keyed: Vec<&str> = st_keys.iter().filter(|k| k["configured"] == true).filter_map(|k| k["ex"].as_str()).collect();
+                    for ex in tradable {
+                        let label = if keyed.contains(&ex.as_str()) { ex.clone() } else { format!("{ex}  · {}", l("no key")) };
+                        if ui.selectable_label(ex == venue, label).clicked() { let _ = call(json!({"op": "set_trade_venue", "ex": ex})); ui.close(); }
+                    }
+                    ui.separator();
                     if ui.button(l("Order routing…")).clicked() { self.open_settings = Some(2); ui.close(); }
                     if ui.button(l("API keys…")).clicked() { self.open_settings = Some(3); ui.close(); }
                 });
@@ -556,16 +631,22 @@ impl OrderPanel {
         more.extend([(Kind::Scaled, l("Scaled")), (Kind::Twap, l("TWAP"))]);
         let in_more = more.iter().any(|m| m.0 == self.kind);
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let w = ui.available_width() - 82.0;
-            ui.allocate_ui(egui::vec2(w, 28.0), |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            // the More button fits its label ("Trailing Stop ▾" is wider than "More ▾"); the segments get the rest
+            let label = format!("{} ▾", if in_more { more.iter().find(|m| m.0 == self.kind).map_or(l("More"), |m| m.1) } else { l("More") });
+            let mw = ui.painter().layout_no_wrap(label.clone(), prop_s(12.5), fg()).size().x + 20.0;
+            ui.allocate_ui(egui::vec2(ui.available_width() - mw - 4.0, 28.0), |ui| {
                 // a More type selected: no segment is lit; clicking one switches back
                 let mut k = (!in_more).then_some(self.kind);
                 let items: Vec<(Option<Kind>, &str)> = main.iter().map(|(k, n)| (Some(*k), *n)).collect();
                 if kit::segments(ui, &mut k, &items, 28.0) { if let Some(k) = k { self.kind = k; } }
             });
-            let label = if in_more { more.iter().find(|m| m.0 == self.kind).map_or(l("More"), |m| m.1) } else { l("More") };
-            let r = secondary(ui, &format!("{label} ▾"), 28.0, Some(f32::INFINITY), in_more, true);
+            let r = kit::button(ui, &label, Look::Secondary, 28.0, Some(mw), true);
+            // selected: drawn like a lit segment, not an outlined (focus-looking) button
+            if in_more {
+                ui.painter().rect_filled(r.rect, kit::R, hl());
+                ui.painter().text(r.rect.center(), Align2::CENTER_CENTER, &label, prop_s(12.5), fg_strong());
+            }
             egui::Popup::menu(&r).show(|ui| {
                 for (k, name) in &more { if ui.selectable_label(self.kind == *k, *name).clicked() { self.kind = *k; ui.close(); } }
             });
@@ -772,14 +853,119 @@ impl OrderPanel {
         else if let Some(m) = f(&t["min_notional"]).filter(|m| notional > 0.0 && notional < *m) { kit::note(ui, &format!("{} {} USDT", l("Below the minimum order value"), usd(m)), WARN); }
     }
 
+    /// A trading hotkey. Buy / sell `usdt` notional at the venue's own touch (a limit joining the
+    /// queue) or at market, through the same preview and confirmation as the buttons, TP/SL off;
+    /// cancel every order of the symbol on that venue; close every position of the symbol on that venue at market.
+    pub(crate) fn hotkey(&mut self, a: Act, usdt: f64, st: &Value, call: &mut Call) {
+        if self.ticket.is_some() || self.algo.is_some() || self.flatten.is_some() { return; }
+        let t = &st["trade"];
+        let symbol = s(&t["symbol"]).to_string();
+        // only the panel's trading venue: a hedge held on another venue is never touched
+        let venue = s(&t["venue"]).to_string();
+        let here = |x: &&Value| s(&x["symbol"]) == symbol && s(&x["ex"]) == venue;
+        self.error = None;
+        match a {
+            Act::CancelAll => {
+                self.sent_ms = depth::now_ms();
+                for o in st["orders"].as_array().into_iter().flatten().filter(here).filter(|o| o["spot"] != true) {
+                    if let Err(e) = call(json!({"op": "cancel", "ex": o["ex"], "id": o["id"]})) { self.error = Some(e); }
+                }
+            }
+            Act::Flatten => {
+                let ps: Vec<Value> = st["positions"].as_array().into_iter().flatten().filter(here).cloned().collect();
+                if ps.is_empty() { self.error = Some(l("No position in this symbol").into()); }
+                else if st["prefs"]["confirm"].as_bool().unwrap_or(true) { self.flatten = Some(ps); }
+                else { self.sent_ms = depth::now_ms(); flatten(&ps, call, &mut self.error); }
+            }
+            _ => {
+                if usdt <= 0.0 { self.error = Some(l("Set the hotkey order size in Settings > Hotkeys first.").into()); return; }
+                let buy = matches!(a, Act::BuyBid | Act::BuyMarket);
+                let market = matches!(a, Act::BuyMarket | Act::SellMarket);
+                let (bid, ask) = (f(&t["bid"]), f(&t["ask"]));
+                let px = if market { bid.zip(ask).map(|(b, k)| (b + k) / 2.0) } else if buy { bid } else { ask };
+                let Some(px) = px.filter(|p| *p > 0.0) else { self.error = Some(l("No price from this venue yet").into()); return };
+                (self.close, self.kind, self.bbo_on, self.tpsl_on, self.pct) = (false, if market { Kind::Market } else { Kind::Limit }, false, false, 0.0);
+                if !market { self.price = px_str(px, f(&t["tick"])); }
+                (self.qty_usdt, self.qty) = (false, qty_str(usdt / px, f(&t["step"])));
+                self.submit(if buy { "long" } else { "short" }, st, px, false, !market, call);
+            }
+        }
+    }
+
+    fn flatten_modal(&mut self, ui: &mut Ui, call: &mut Call) {
+        let Some(ps) = &self.flatten else { return };
+        let mut done = None;
+        dialog("flatten_confirm").show(ui.ctx(), |ui| {
+            ui.set_width(380.0);
+            ui.spacing_mut().item_spacing.y = 10.0;
+            dialog_title(ui, l("Close all positions of this symbol on the trading venue at market?"), "", None);
+            for p in ps {
+                let long = s(&p["side"]) == "long";
+                kit::kv(ui, &format!("{} · {}", s(&p["ex"]), if long { l("Long") } else { l("Short") }), fmt_qty(f(&p["qty"]).unwrap_or(0.0)), if long { up() } else { dn() });
+            }
+            let (c, o) = dialog_buttons(ui, l("Cancel"), l("Close at market"), dn(), true);
+            if c || ui.input(|i| i.key_pressed(egui::Key::Escape)) { done = Some(false); }
+            if o { done = Some(true); }
+        });
+        if let Some(go) = done {
+            let ps = self.flatten.take().unwrap();
+            if go { self.sent_ms = depth::now_ms(); flatten(&ps, call, &mut self.error); }
+        }
+    }
+
+    /// The size field in base units: a USDT size is divided by the order's reference price and
+    /// floored to the venue's step.
+    fn base_qty(&self, ref_px: f64, step: Option<f64>) -> f64 {
+        let v = parse(&self.qty).unwrap_or(0.0);
+        if !self.qty_usdt { return v; }
+        if ref_px <= 0.0 { return 0.0; }
+        parse(&qty_str(v / ref_px, step)).unwrap_or(0.0)
+    }
+
+    /// The size field's text for `base` units, in the field's unit.
+    fn qty_text(&self, base: f64, ref_px: f64, step: Option<f64>) -> String {
+        if self.qty_usdt { format!("{:.2}", base * ref_px) } else { qty_str(base, step) }
+    }
+
+    /// A preview line dragged on the chart: that field takes the new price.
+    pub(crate) fn set_preview(&mut self, field: &str, px: f64) {
+        let v = px_str(px, self.tick);
+        match field { "price" => self.price = v, "trigger" => self.trigger = v, "from" => self.scaled_from = v, "to" => self.scaled_to = v, "tp" => self.tp = v, "sl" => self.sl = v, _ => {} }
+    }
+
     /// Limit close of a position in the form: close tab, limit at the venue's own touch on the
     /// passive side, the whole size, and Enter repeats that side.
     pub(crate) fn prefill_close(&mut self, p: &Value, st: &Value) {
         let t = &st["trade"];
         (self.close, self.kind, self.bbo_on) = (true, Kind::Limit, false);
         if let Some(px) = f(&t[if s(&p["side"]) == "long" { "ask" } else { "bid" }]) { self.price = px_str(px, f(&t["tick"])); }
-        self.qty = qty_str(f(&p["qty"]).unwrap_or(0.0), f(&t["step"]));
+        (self.qty_usdt, self.qty) = (false, qty_str(f(&p["qty"]).unwrap_or(0.0), f(&t["step"])));
         self.last_pos = Some(s(&p["side"]).into());
+    }
+
+    /// What the venues answered since this panel last sent something (the order log), for 20 s
+    /// after the last answer (a minute for a rejection): accepted in green, the venue's error in red.
+    fn results(&self, ui: &mut Ui, st: &Value) {
+        if self.sent_ms == 0 { return; }
+        let now = depth::now_ms();
+        let new: Vec<&Value> = st["log"].as_array().map(|a| a.iter().filter(|x| x["ts"].as_i64().unwrap_or(0) >= self.sent_ms).collect()).unwrap_or_default();
+        let fail = new.iter().any(|x| x["ok"] != true);
+        let last = new.iter().filter_map(|x| x["ts"].as_i64()).max().unwrap_or(self.sent_ms);
+        if now - last > if fail { 60_000 } else { 20_000 } { return; }
+        if new.is_empty() { kit::note(ui, l("Sent, waiting for the venue…"), mu()); return; }
+        for x in new.iter().take(4).rev() {
+            let m = s(&x["msg"]);
+            if x["ok"] == true {
+                // "OK Bybit BTCUSDT open long 0.01 limit 81900 id 123 (45 ms)" -> "Bybit BTCUSDT open long 0.01 limit 81900 · 45 ms"
+                let body = m.strip_prefix("OK ").unwrap_or(m);
+                let (what, rest) = body.split_once(" id ").unwrap_or((body, ""));
+                let ms = rest.rsplit_once('(').map(|(_, t)| t.trim_end_matches(')')).unwrap_or("");
+                kit::note(ui, &format!("✓ {what}{}", if ms.is_empty() { String::new() } else { format!(" · {ms}") }), up());
+            } else {
+                let (what, err) = m.strip_prefix("FAIL ").unwrap_or(m).split_once(": ").unwrap_or((m, ""));
+                ui.add(egui::Label::new(RichText::new(format!("✗ {err}")).font(prop(11.5)).color(dn())).wrap()).on_hover_text(what);
+            }
+        }
     }
 
     /// The trade venue's account: margin health, equity, uPnL, keys shortcut.
@@ -789,7 +975,7 @@ impl OrderPanel {
         card(ui, |ui| {
             let Some(b) = b else {
                 kit::title(ui, l("No API key for this venue"));
-                if kit::button(ui, l("Add API keys"), Look::Secondary, H, None, true).clicked() { self.open_settings = Some(3); }
+                kit::note(ui, l("Market data works without keys. A key with trade permission enables the order panel; a read-only key shows the account."), mu());
                 return;
             };
             ui.horizontal(|ui| {
@@ -830,7 +1016,7 @@ impl OrderPanel {
         let t = &st["trade"];
         self.error = None;
         self.last_pos = Some(pos.into());
-        let qty = parse(&self.qty).unwrap_or(0.0);
+        let qty = self.base_qty(ref_px, f(&t["step"]));
         if qty <= 0.0 { self.error = Some(l("Enter a size").into()); return; }
         let mut args = json!({"pos": pos, "close": self.close, "kind": if use_bbo { "bbo" } else { self.kind.arg() }, "qty": qty, "tif": self.tif});
         let side_word = |buy: &'static str, long: &'static str, sell: &'static str, short: &'static str| if pos == "long" { if self.close { l(buy) } else { l(long) } } else if self.close { l(sell) } else { l(short) };
@@ -861,6 +1047,12 @@ impl OrderPanel {
             }
             Kind::Stop => {
                 let Some(tr) = parse(&self.trigger).filter(|v| *v > 0.0) else { self.error = Some(l("Enter a trigger price").into()); return };
+                // a stop on the wrong side of the market triggers at once (venues reject it)
+                let buy = (pos == "long") != self.close;
+                if let (Some(b), Some(a)) = (f(&t["bid"]), f(&t["ask"])) {
+                    if buy && tr <= a { self.error = Some(format!("{} ({})", l("A buy stop must trigger above the ask"), fmt_px(a))); return; }
+                    if !buy && tr >= b { self.error = Some(format!("{} ({})", l("A sell stop must trigger below the bid"), fmt_px(b))); return; }
+                }
                 (args["trigger"], args["trigger_by"]) = (tr.into(), (if self.trigger_last { "last" } else { "mark" }).into());
             }
             Kind::Trailing => {
@@ -876,7 +1068,8 @@ impl OrderPanel {
         }
         if use_bbo { (args["bbo_queue"], args["bbo_level"]) = (self.bbo_queue.into(), self.bbo_level.into()); }
         let (mut tp, mut sl) = (None, None);
-        if self.tpsl_on && !self.close {
+        // the section is only shown for limit / market: a switch left on under another kind is ignored
+        if self.tpsl_on && !self.close && matches!(self.kind, Kind::Limit | Kind::Market) {
             (tp, sl) = (parse(&self.tp), parse(&self.sl));
             if tp.is_none() && sl.is_none() { self.error = Some(l("Enter a take-profit or stop-loss price, or turn TP/SL off").into()); return; }
             if let Some(e) = tpsl_check(pos == "long", ref_px, l("the order price"), tp, sl) { self.error = Some(e); return; }
@@ -901,6 +1094,7 @@ impl OrderPanel {
         args["op"] = "place".into();
         args["expect"] = tk.plan["legs"].as_array().map(|a| a.iter().map(|l| json!({"ex": l["ex"], "qty": l["qty"]})).collect::<Vec<_>>()).unwrap_or_default().into();
         let plan = call(args)?;
+        self.sent_ms = depth::now_ms();
         if tk.tp.is_some() || tk.sl.is_some() {
             let symbol = s(&st["trade"]["symbol"]).to_string();
             let mut exs: Vec<String> = plan["legs"].as_array().map(|a| a.iter().map(|l| s(&l["ex"]).to_string()).collect()).unwrap_or_default();
@@ -930,7 +1124,7 @@ impl OrderPanel {
         });
     }
 
-    fn confirm_modal(&mut self, ui: &mut Ui, st: &Value, call: &mut Call) {
+    fn confirm_modal(&mut self, ui: &mut Ui, st: &Value, call: &mut Call, enter_ok: bool) {
         let Some(tk) = &self.ticket else { return };
         let base = s(&st["base"]).to_string();
         let col = if tk.buy() { up() } else { dn() };
@@ -986,6 +1180,11 @@ impl OrderPanel {
             if let Some(c) = f(&tk.plan["clamped_from"]) {
                 kit::note(ui, &format!("{} {} {} {} {base} ({})", l("Size reduced from"), fmt_qty(c), l("to"), fmt_qty(total), if tk.close { l("position size") } else { l("margin limit") }), WARN);
             }
+            let crosses = f(&tk.args["price"]).filter(|_| tk.args["kind"] == "limit").is_some_and(|p| {
+                let t = &st["trade"];
+                if tk.buy() { f(&t["ask"]).is_some_and(|a| p >= a) } else { f(&t["bid"]).is_some_and(|b| p <= b) }
+            });
+            if crosses { kit::note(ui, l("The limit price crosses the book: the order fills at once as a taker."), WARN); }
             if tk.tp.is_some() || tk.sl.is_some() { kit::note(ui, &format!("TP / SL: {}", l("set for the whole position once the order has filled and the position exists.")), mu()); }
             let unverified = legs.iter().any(|lg| st["keys"].as_array().is_some_and(|k| k.iter().any(|k| k["ex"] == lg["ex"] && k["verified"] == false)));
             if unverified { kit::note(ui, l("Order placement on this venue is not yet verified on a live account: start with the minimum size."), WARN); }
@@ -993,7 +1192,7 @@ impl OrderPanel {
             if let Some(e) = &tk.err { kit::note(ui, e, dn()); }
             let (c, o) = dialog_buttons(ui, l("Cancel"), &format!("{} {}", l("Confirm"), tk.title()), col, true);
             if c || ui.input(|i| i.key_pressed(egui::Key::Escape)) { done = Some(false); }
-            if o || ui.input(|i| i.key_pressed(egui::Key::Enter)) { done = Some(true); }
+            if o || (enter_ok && ui.input(|i| i.key_pressed(egui::Key::Enter))) { done = Some(true); }
         });
         if m.should_close() && done.is_none() { done = Some(false); }
         match done {

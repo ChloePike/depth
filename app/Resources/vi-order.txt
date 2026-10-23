@@ -226,3 +226,6 @@ Unified account: liquidation is decided on the whole account (UniMMR / margin ra
 Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ. = Ước tính ký quỹ riêng ở đòn bẩy này với tỷ lệ duy trì 0,5%; số của sàn có thể khác.
 Unified account: the price at which the whole account would be liquidated after this order, other positions unchanged; estimated with a 0.5% maintenance rate. = Tài khoản hợp nhất: giá mà toàn bộ tài khoản bị thanh lý sau lệnh này, các vị thế khác giữ nguyên; ước tính với tỷ lệ ký quỹ duy trì 0,5%.
 My fills (B / S) = Lệnh khớp của tôi (B / S)
+A buy stop must trigger above the ask = Lệnh dừng mua phải kích hoạt trên giá ask
+A sell stop must trigger below the bid = Lệnh dừng bán phải kích hoạt dưới giá bid
+The limit price crosses the book: the order fills at once as a taker. = Giá giới hạn vượt qua sổ lệnh: lệnh khớp ngay như taker.

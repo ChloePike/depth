@@ -226,3 +226,10 @@ Unified account: liquidation is decided on the whole account (UniMMR / margin ra
 Estimate for an isolated position at this leverage with a 0.5% maintenance rate; the venue's own figure can differ. = 按逐仓、当前杠杆、0.5% 维持保证金率估算；交易所的实际数值可能不同。
 Unified account: the price at which the whole account would be liquidated after this order, other positions unchanged; estimated with a 0.5% maintenance rate. = 统一账户：下单后、其他持仓不变时整个账户被强平的价格；按 0.5% 维持保证金率估算。
 My fills (B / S) = 我的成交 (B / S)
+A buy stop must trigger above the ask = 买入条件单的触发价须高于卖一价
+A sell stop must trigger below the bid = 卖出条件单的触发价须低于买一价
+The limit price crosses the book: the order fills at once as a taker. = 限价穿过盘口：订单会立即以吃单成交。
+Size in the coin or in USDT = 数量按币或按 USDT
+Sent, waiting for the venue… = 已发送，等待交易所回应…
+Market data works without keys. A key with trade permission enables the order panel; a read-only key shows the account. = 行情无需 API key。有交易权限的 key 才能下单；只读 key 只显示账户。
+no key = 无 key
