@@ -18,6 +18,7 @@ serde_json = "1.0.151"
 subsecond = { version = "0.7.10", optional = true }
 dioxus-devtools = { version = "0.7.10", optional = true }
 tokio = { version = "1.53.2", features = ["full"] }
+hidapi = "2.6.7"
 
 [features]
 # Live code patching: `dx serve --hotpatch -p t1-ui --features hotpatch --bin depth`

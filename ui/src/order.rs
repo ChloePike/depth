@@ -100,6 +100,9 @@ pub struct OrderPanel {
     flatten: Option<Vec<Value>>,
     /// size typed in USDT (notional) instead of the base coin
     qty_usdt: bool,
+    /// the keyboard dial: moves the limit price (else the size), and a size step waiting for the panel
+    dial_price: bool,
+    dial_size: bool,
     /// when this panel last sent something: order-log entries since then show under the buttons
     sent_ms: i64,
 }
@@ -112,7 +115,7 @@ impl Default for OrderPanel {
             trigger: String::new(), trigger_last: false, stop_limit: false, callback: "1.0".into(), activation: String::new(),
             scaled_from: String::new(), scaled_to: String::new(), scaled_count: 5, scaled_skew: 0.0, scaled_post: true,
             twap_minutes: "15".into(), twap_slices: "10".into(), twap_slip: "10".into(), twap_limit: String::new(), twap_native: true, twap_random: false,
-            lev: None, waiting: vec![], sheet: None, seen: Default::default(), open_settings: None, open_transfer: None, preview: vec![], tick: None, flatten: None, qty_usdt: false, sent_ms: 0,
+            lev: None, waiting: vec![], sheet: None, seen: Default::default(), open_settings: None, open_transfer: None, preview: vec![], tick: None, flatten: None, qty_usdt: false, dial_price: false, dial_size: false, sent_ms: 0,
         }
     }
 }
@@ -507,6 +510,7 @@ impl OrderPanel {
                     self.qty = if b > 0.0 { self.qty_text(b, ref_px, step) } else { String::new() };
                 }
             });
+            if std::mem::take(&mut self.dial_size) { self.qty = if self.pct > 0.0 { self.qty_text(max_qty * self.pct as f64, ref_px, step) } else { String::new() }; }
             let pct = format!("{:.0}%", self.pct * 100.0);
             ui.scope(|ui| {
                 if slider(ui, &mut self.pct, &pct) { self.qty = if self.pct > 0.0 { self.qty_text(max_qty * self.pct as f64, ref_px, step) } else { String::new() }; }
@@ -891,6 +895,21 @@ impl OrderPanel {
         let here = |x: &&Value| s(&x["symbol"]) == symbol && s(&x["ex"]) == venue;
         self.error = None;
         match a {
+            Act::OpenClose => { self.close = !self.close; (self.pct, self.qty, self.last_pos) = (0.0, String::new(), None); }
+            Act::DialMode => self.dial_price = !self.dial_price,
+            Act::DialUp | Act::DialDown => {
+                let up = a == Act::DialUp;
+                if self.dial_price {
+                    // one tick of the venue per detent, from the price shown (or the touch)
+                    let tick = f(&t["tick"]).filter(|x| *x > 0.0).unwrap_or(0.01);
+                    let p = parse(&self.price).or(f(&t["bid"])).unwrap_or(0.0);
+                    if p > 0.0 { (self.kind, self.bbo_on) = (if self.kind == Kind::Market { Kind::Limit } else { self.kind }, false); self.price = px_str((p + if up { tick } else { -tick }).max(tick), f(&t["tick"])); }
+                } else {
+                    // 5 % of what can be opened / closed per detent; the panel turns it into a size next frame
+                    self.pct = (self.pct + if up { 0.05 } else { -0.05 }).clamp(0.0, 1.0);
+                    self.dial_size = true;
+                }
+            }
             Act::CancelAll => {
                 self.sent_ms = depth::now_ms();
                 for o in st["orders"].as_array().into_iter().flatten().filter(here).filter(|o| o["spot"] != true) {
@@ -1004,6 +1023,10 @@ impl OrderPanel {
     fn qty_text(&self, base: f64, ref_px: f64, step: Option<f64>) -> String {
         if self.qty_usdt { format!("{:.2}", base * ref_px) } else { qty_str(base, step) }
     }
+
+    /// For the keyboard lights: an order / flatten confirmation is on screen; the Close tab is chosen.
+    pub(crate) fn waiting_confirm(&self) -> bool { self.ticket.is_some() || self.algo.is_some() || self.flatten.is_some() }
+    pub(crate) fn closing(&self) -> bool { self.close }
 
     /// A preview line dragged on the chart: that field takes the new price.
     pub(crate) fn set_preview(&mut self, field: &str, px: f64) {

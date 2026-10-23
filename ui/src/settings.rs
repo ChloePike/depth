@@ -298,7 +298,12 @@ impl SettingsView {
         });
         section(ui, l("Navigation"), l("Keys work while no text field has focus. Click a key, then press the new combination: Escape cancels, Delete clears."), |ui| rows(ui, false));
         ui.add_space(12.0);
-        if kit::button(ui, l("Restore defaults"), kit::Look::Secondary, kit::H, None, true).clicked() { binds = hotkeys::defaults(); rec = None; }
+        ui.horizontal(|ui| {
+            if kit::button(ui, l("Restore defaults"), kit::Look::Secondary, kit::H, None, true).clicked() { binds = hotkeys::defaults(); rec = None; }
+            // the repainted keys of the Depth keyboard (hardware/keyboard): what its firmware sends
+            if kit::button(ui, l("Depth keyboard layout"), kit::Look::Secondary, kit::H, None, true)
+                .on_hover_text(l("Binds every key of the Depth keyboard (or a keyboard mapped to its codes). Trading keys still need an order size.")).clicked() { binds = hotkeys::with_keyboard(&binds); rec = None; }
+        });
         self.recording = rec;
         p.hotkeys = binds;
         set_prefs(&before, &p, call);

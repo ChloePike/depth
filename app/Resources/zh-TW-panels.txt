@@ -186,3 +186,13 @@ Terminal: pure black, panels joined by hairlines instead of gaps, square corners
 Command bar = 命令欄
 Unknown = 無法識別
 A coin, a market (perp, spot, margin, opt), an interval (1m … 1d), a venue, or keys / hotkeys / settings. Enter applies, Escape closes. = 幣種、市場（perp、spot、margin、opt）、週期（1m … 1d）、交易所，或 keys / hotkeys / settings。Enter 執行，Esc 關閉。
+Help: keys and commands = 說明：按鍵與命令
+Back to the previous coin / market = 返回上一個幣種 / 市場
+Order panel: Open / Close tab = 下單面板：開倉 / 平倉頁籤
+Dial up (size, or price after a push) = 旋鈕加（數量，按下後為價格）
+Dial down = 旋鈕減
+Dial: switch between size and price = 旋鈕：在數量和價格之間切換
+Keys and commands = 按鍵與命令
+Depth keyboard layout = Depth 鍵盤鍵位
+Binds every key of the Depth keyboard (or a keyboard mapped to its codes). Trading keys still need an order size. = 綁定 Depth 鍵盤（或按其鍵碼改過鍵的鍵盤）的全部按鍵。交易鍵仍需先設定下單金額。
+Type a coin and press GO (Enter) or a market key: eth PERP. A line can also carry a market, an interval (1m … 1d), a venue, or keys / hotkeys / settings. Escape closes. = 輸入幣種後按 GO（Enter）或市場鍵：eth PERP。一行裡也可以寫市場、週期（1m … 1d）、交易所，或 keys / hotkeys / settings。Esc 關閉。

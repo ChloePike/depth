@@ -2,6 +2,7 @@
 //! on Enter: a coin ("eth", "ethusdt"), a market ("perp", "spot", "margin", "opt"), an interval
 //! ("1m" .. "1d"), a trading venue ("bybit"), or a page ("keys", "hotkeys", "settings").
 //! Live preview under the line; an unknown word keeps the bar open and is named.
+use super::hotkeys::{self, Act, Binding};
 use super::{kit, l, theme::*};
 use depth::{Exchange, Market};
 use eframe::egui::{self, RichText};
@@ -47,10 +48,13 @@ impl CommandBar {
     /// Opens the bar with `text` typed (T1_COMMAND screenshots).
     pub fn open_with(&mut self, text: &str) { self.open = true; self.text = text.to_string(); }
 
-    /// The bar while open; the commands once Enter is pressed on a line that parses.
-    pub fn show(&mut self, ctx: &egui::Context, bases: &[String]) -> Option<Vec<Cmd>> {
+    /// The bar while open; the commands once Enter (GO) or a market key is pressed on a line that
+    /// parses. A market key finishes the line like Bloomberg's yellow sector keys: `eth` + PERP.
+    pub fn show(&mut self, ctx: &egui::Context, bases: &[String], binds: &[Binding]) -> Option<Vec<Cmd>> {
         if !self.open { return None; }
         let mut out = None;
+        let markets: Vec<Binding> = binds.iter().filter(|b| matches!(b.act, Act::Spot | Act::Margin | Act::Perp | Act::Option)).cloned().collect();
+        let market = hotkeys::pressed(ctx, &markets).first().map(|a| match a { Act::Spot => Market::Spot, Act::Margin => Market::Margin, Act::Perp => Market::Perp, _ => Market::Option });
         let m = egui::Modal::new(egui::Id::new("command_bar")).show(ctx, |ui| {
             ui.set_width(460.0);
             ui.spacing_mut().item_spacing.y = 8.0;
@@ -64,13 +68,38 @@ impl CommandBar {
                 Ok(cs) => kit::note(ui, &cs.iter().map(Cmd::label).collect::<Vec<_>>().join("  ·  "), accent()),
                 Err(w) => kit::note(ui, &format!("{}: {w}", l("Unknown")), dn()),
             }
-            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if let (Some(m), Ok(mut cs)) = (market, parsed.clone()) {
+                cs.retain(|c| !matches!(c, Cmd::Mode(_)));
+                cs.push(Cmd::Mode(m));
+                out = Some(cs);
+            } else if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 if let Ok(cs) = parsed { if !cs.is_empty() { out = Some(cs); } }
             }
         });
         if out.is_some() || m.should_close() { self.open = false; self.text.clear(); }
         out
     }
+}
+
+/// HELP: every key binding and the command words, in one sheet.
+pub fn help(ctx: &egui::Context, open: &mut bool, binds: &[Binding]) {
+    if !*open { return; }
+    let m = egui::Modal::new(egui::Id::new("help_sheet")).show(ctx, |ui| {
+        ui.set_width(560.0);
+        ui.spacing_mut().item_spacing.y = 6.0;
+        kit::title(ui, l("Keys and commands"));
+        kit::note(ui, l("Type a coin and press GO (Enter) or a market key: eth PERP. A line can also carry a market, an interval (1m … 1d), a venue, or keys / hotkeys / settings. Escape closes."), mu());
+        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+            egui::Grid::new("help_grid").num_columns(2).spacing([24.0, 6.0]).striped(false).show(ui, |ui| {
+                for b in binds.iter().filter(|b| b.key.is_some()) {
+                    ui.label(RichText::new(l(b.act.name())).font(prop(12.5)).color(fg()));
+                    ui.label(RichText::new(b.key.as_ref().map_or(String::new(), |c| c.label())).font(mono_m(12.5)).color(accent()));
+                    ui.end_row();
+                }
+            });
+        });
+    });
+    if m.should_close() { *open = false; }
 }
 
 #[cfg(test)]

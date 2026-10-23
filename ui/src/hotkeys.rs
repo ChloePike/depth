@@ -12,15 +12,19 @@ pub enum Act {
     Spot, Margin, Perp, Option,
     Tf1m, Tf5m, Tf15m, Tf1h, Tf4h, Tf1d,
     OrderPanel, Settings, Command,
+    // Depth keyboard: help, back to the previous coin / market, the perp panel's Open / Close tab,
+    // and the dial (size, or the limit price after a push)
+    Help, Back, OpenClose, DialUp, DialDown, DialMode,
 }
 
 impl Act {
-    pub const ALL: [Act; 25] = [Act::Command, Act::BuyBid, Act::SellAsk, Act::BuyMarket, Act::SellMarket, Act::CancelAll, Act::Flatten,
-        Act::Picker, Act::PrevFav, Act::NextFav, Act::Star, Act::PrevVenue, Act::NextVenue,
+    pub const ALL: [Act; 31] = [
+        Act::BuyBid, Act::SellAsk, Act::BuyMarket, Act::SellMarket, Act::CancelAll, Act::Flatten, Act::OpenClose, Act::DialUp, Act::DialDown, Act::DialMode,
+        Act::Command, Act::Help, Act::Back, Act::Picker, Act::PrevFav, Act::NextFav, Act::Star, Act::PrevVenue, Act::NextVenue,
         Act::Spot, Act::Margin, Act::Perp, Act::Option, Act::Tf1m, Act::Tf5m, Act::Tf15m, Act::Tf1h, Act::Tf4h, Act::Tf1d,
         Act::OrderPanel, Act::Settings];
 
-    pub fn trading(self) -> bool { matches!(self, Act::BuyBid | Act::SellAsk | Act::BuyMarket | Act::SellMarket | Act::CancelAll | Act::Flatten) }
+    pub fn trading(self) -> bool { matches!(self, Act::BuyBid | Act::SellAsk | Act::BuyMarket | Act::SellMarket | Act::CancelAll | Act::Flatten | Act::OpenClose | Act::DialUp | Act::DialDown | Act::DialMode) }
 
     /// English label (translated with `l`).
     pub fn name(self) -> &'static str {
@@ -33,6 +37,8 @@ impl Act {
             Act::Spot => "Spot mode", Act::Margin => "Margin mode", Act::Perp => "Perp mode", Act::Option => "Options mode",
             Act::Tf1m => "1 minute", Act::Tf5m => "5 minutes", Act::Tf15m => "15 minutes", Act::Tf1h => "1 hour", Act::Tf4h => "4 hours", Act::Tf1d => "1 day",
             Act::OrderPanel => "Show / hide the order panel", Act::Settings => "Settings", Act::Command => "Command bar",
+            Act::Help => "Help: keys and commands", Act::Back => "Back to the previous coin / market", Act::OpenClose => "Order panel: Open / Close tab",
+            Act::DialUp => "Dial up (size, or price after a push)", Act::DialDown => "Dial down", Act::DialMode => "Dial: switch between size and price",
         }
     }
 }
@@ -78,6 +84,31 @@ pub fn defaults() -> Vec<Binding> {
         Act::OrderPanel => k(c | Modifiers::ALT, Key::I), Act::Settings => k(c, Key::Comma), Act::Command => k(Modifiers::NONE, Key::Slash),
         _ => None,
     } }).collect()
+}
+
+/// The Depth keyboard (hardware/keyboard): what each repainted key sends. F13-F20 under Ctrl+Alt,
+/// Ctrl+Alt+Shift or Ctrl+Shift, so no OS or app default uses them (plain F14 / F15 dim the screen
+/// on macOS). The QMK keymap (hardware/keyboard/qmk/keymap.c) sends exactly these; a test keeps the
+/// two in step. Esc (CANCEL), Enter (GO) and / (CMD) stay what they are.
+pub const KEYBOARD: [(Act, &str, &str); 24] = [
+    (Act::Help, "CA", "F13"), (Act::Spot, "CA", "F14"), (Act::Margin, "CA", "F15"), (Act::Perp, "CA", "F16"),
+    (Act::Option, "CA", "F17"), (Act::Tf1m, "CA", "F18"), (Act::Tf5m, "CA", "F19"), (Act::Tf15m, "CA", "F20"),
+    (Act::Tf1h, "CAS", "F13"), (Act::Tf4h, "CAS", "F14"), (Act::Tf1d, "CAS", "F15"), (Act::Back, "CAS", "F16"),
+    (Act::OpenClose, "CAS", "F17"), (Act::CancelAll, "CAS", "F18"), (Act::Flatten, "CAS", "F19"), (Act::BuyBid, "CAS", "F20"),
+    (Act::BuyMarket, "CS", "F13"), (Act::PrevFav, "CS", "F14"), (Act::SellAsk, "CS", "F15"), (Act::SellMarket, "CS", "F16"),
+    (Act::NextFav, "CS", "F17"), (Act::DialUp, "CS", "F18"), (Act::DialDown, "CS", "F19"), (Act::DialMode, "CS", "F20"),
+];
+
+/// `binds` with every Depth keyboard action on its key (a combination another action held moves).
+pub fn with_keyboard(binds: &[Binding]) -> Vec<Binding> {
+    let mut out = complete(binds);
+    for (act, mods, key) in KEYBOARD {
+        let m = Modifiers { ctrl: mods.contains('C'), alt: mods.contains('A'), shift: mods.contains('S'), ..Default::default() };
+        let c = Combo::new(m, Key::from_name(key).expect("F13-F20"));
+        for b in out.iter_mut() { if b.key.as_ref() == Some(&c) { b.key = None; } }
+        if let Some(b) = out.iter_mut().find(|b| b.act == act) { b.key = Some(c); }
+    }
+    out
 }
 
 /// Bindings as saved, completed with any action added since (at its default).
@@ -131,6 +162,23 @@ mod tests {
         let keys: Vec<&Combo> = d.iter().filter_map(|b| b.key.as_ref()).collect();
         for (i, k) in keys.iter().enumerate() { assert!(!keys[i + 1..].contains(k), "duplicate default {}", k.label()); }
         assert!(d.iter().filter(|b| b.act.trading()).all(|b| b.key.is_none()), "trading keys start unbound");
+    }
+
+    #[test]
+    fn keyboard_preset_matches_the_qmk_keymap() {
+        // every Depth keyboard code is unique, and the keymap defines each one (`#define DK_.. C(A(KC_F13)) /* Help */`)
+        let src = include_str!("../../hardware/keyboard/qmk/users/depth/depth.h");
+        let b = with_keyboard(&defaults());
+        for (act, mods, key) in KEYBOARD {
+            let mut code = format!("KC_{key}");
+            if mods.contains('S') { code = format!("S({code})"); }
+            if mods.contains('A') { code = format!("A({code})"); }
+            if mods.contains('C') { code = format!("C({code})"); }
+            assert!(src.contains(&format!("{code} /* {act:?} */")), "keymap lacks {code} for {act:?}");
+            assert!(b.iter().find(|x| x.act == act).unwrap().key.is_some());
+        }
+        let keys: Vec<&Combo> = b.iter().filter_map(|x| x.key.as_ref()).collect();
+        for (i, k) in keys.iter().enumerate() { assert!(!keys[i + 1..].contains(k), "duplicate {}", k.label()); }
     }
 
     #[test]

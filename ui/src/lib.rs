@@ -16,6 +16,7 @@ mod spot;
 mod settings;
 mod hotkeys;
 mod command;
+mod kbd;
 mod native;
 
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Ui};
@@ -195,6 +196,12 @@ pub struct App {
     prefs: settings::Prefs,
     settings: settings::SettingsView,
     command: command::CommandBar,
+    /// coin and market before the last switch (BACK goes there, and BACK again comes back)
+    back: Option<(String, Market)>,
+    /// the keys and commands sheet (HELP)
+    help: bool,
+    /// status for a Depth keyboard's lights (raw HID thread)
+    kbd: kbd::Kbd,
     /// last settings JSON written, and when it was last checked
     saved: (String, Instant),
     /// own window's position and size [x, y, w, h] (not hosted; kept while maximized / full screen)
@@ -301,7 +308,7 @@ impl App {
         if let Some(tf) = env("T1_TF").and_then(|s| s.parse().ok()) { chart.tf = tf; }
         let layout = env("T1_LAYOUT").or(st.layout).unwrap_or_else(|| "1".into());
         App {
-            eng, prefs, settings: Default::default(), command: Default::default(), saved: (saved, Instant::now()), window: st.window, mode, chart, book, opt: Default::default(), picker, trade, spot: Default::default(),
+            eng, prefs, settings: Default::default(), command: Default::default(), back: None, help: false, kbd: kbd::Kbd::start(), saved: (saved, Instant::now()), window: st.window, mode, chart, book, opt: Default::default(), picker, trade, spot: Default::default(),
             rate: (Instant::now(), 0, 0.0),
             shot: env("T1_SHOT").map(|p| (p, env("T1_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(30.0))),
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
@@ -375,10 +382,26 @@ impl App {
         let key = |a: Act| binds.iter().find(|b| b.act == a).and_then(|b| b.key.as_ref()).map_or(String::new(), |c| c.label());
         self.picker.keys = [key(Act::Picker), key(Act::PrevFav), key(Act::NextFav), key(Act::Star)];
         if ctx.egui_wants_keyboard_input() || ctx.memory(|m| m.top_modal_layer().is_some()) { return; }
-        for a in hotkeys::pressed(ctx, &binds) {
+        let acts = hotkeys::pressed(ctx, &binds);
+        if acts.contains(&Act::Command) { ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_)))); }
+        // Bloomberg: typing anywhere starts the command line (letters and digits; the key's text is kept)
+        else if !self.command.open {
+            let typed = ctx.input_mut(|i| {
+                let t = i.events.iter().find_map(|e| match e { egui::Event::Text(t) if t.chars().all(|c| c.is_ascii_alphanumeric()) => Some(t.clone()), _ => None });
+                if t.is_some() { i.events.retain(|e| !matches!(e, egui::Event::Text(_))); }
+                t
+            });
+            if let Some(t) = typed { self.command.open_with(&t); }
+        }
+        for a in acts {
             match a {
                 Act::Settings => self.settings.open = true,
                 Act::Command => self.command.open = true,
+                Act::Help => self.help = true,
+                Act::Back => if let Some((b, m)) = self.back.clone() {
+                    if b != self.eng.base { self.pending_base = Some(b); }
+                    if m != self.mode { self.pending_mode = Some(m); }
+                },
                 Act::OrderPanel => self.order_panel = !self.order_panel,
                 Act::Picker | Act::PrevFav | Act::NextFav | Act::Star => self.picker.hot.push(a),
                 Act::Spot | Act::Margin | Act::Perp | Act::Option => {
@@ -397,6 +420,29 @@ impl App {
                 _ => self.hot_trade.push(a),
             }
         }
+    }
+
+    /// What a Depth keyboard's lights show: live (messages arriving), a position in the current
+    /// symbol (blinking past -10 % ROE), resting orders, a confirmation waiting or an order rejected
+    /// in the last 10 s, the order panel's Close tab, the market and the chart interval.
+    fn kbd_state(&self) -> kbd::State {
+        let sym = depth::trade::symbol(&self.eng.base);
+        let mut f = 0;
+        if self.rate.2 > 0.0 && self.rate.0.elapsed() < Duration::from_secs(3) { f |= kbd::LIVE; }
+        {
+            let acc = self.eng.account.lock().unwrap();
+            let ps: Vec<_> = acc.positions.iter().filter(|p| p.symbol == sym).collect();
+            if !ps.is_empty() { f |= kbd::POS; }
+            let (u, m) = ps.iter().fold((0.0, 0.0), |a, p| (a.0 + p.upnl, a.1 + p.margin));
+            if m > 0.0 && u / m < -0.10 { f |= kbd::LOSS; }
+            if acc.orders.iter().any(|o| o.symbol == sym) { f |= kbd::ORDERS; }
+            if acc.log.back().is_some_and(|(ts, _, ok)| !ok && now_ms() - ts < 10_000) { f |= kbd::ATTN; }
+        }
+        if self.order.waiting_confirm() { f |= kbd::ATTN; }
+        if self.order.closing() { f |= kbd::CLOSE; }
+        let market = MODES.iter().position(|(m, _)| *m == self.mode).unwrap_or(0) as u8;
+        let tf = [1, 5, 15, 60, 240, 1440].iter().position(|t| *t == self.chart.tf).map_or(0xFF, |i| i as u8);
+        kbd::State { flags: f, market, tf }
     }
 
     /// Borderless window: let the pointer resize from any edge or corner.
@@ -683,6 +729,7 @@ impl App {
             if let (Some(o), Some(r), false, false) = (outer, inner, max == Some(true), full == Some(true)) { self.window = Some([o.min.x, o.min.y, r.width(), r.height()]); }
         }
         self.save_settings();
+        self.kbd.set(self.kbd_state());
         if !self.hosted { self.resize_edges(ui); self.shortcuts(&ctx); }
         let (mut new_base, mut new_mode, mut restart) = (None, None, false);
         // T1_CYCLE=<s>: switch base every <s> seconds (diagnostics for resubscription leaks)
@@ -852,6 +899,7 @@ impl App {
         }
         if let Some(b) = self.pending_base.take() { new_base = Some(b); }
         if let Some(m) = self.pending_mode.take() { new_mode = Some(m); }
+        if new_base.as_ref().is_some_and(|b| *b != self.eng.base) || new_mode.is_some_and(|m| m != self.mode) { self.back = Some((self.eng.base.clone(), self.mode)); }
         restart |= std::mem::take(&mut self.pending_restart);
         if let Some((e, on)) = self.venue_toggle.take() {
             self.eng.set_venue(e, on, &ctx);
@@ -878,9 +926,11 @@ impl App {
         if let Some(n) = std::env::var("T1_SETTINGS").ok().and_then(|s| s.parse().ok()) { if !self.shot_sent && self.started.elapsed().as_secs() < 2 { self.settings.open_tab(n); } }
         // T1_COMMAND=<text>: open the command bar with that text once (screenshots)
         if let Ok(t) = std::env::var("T1_COMMAND") { if !self.shot_sent && self.started.elapsed().as_secs() < 2 && !self.command.open { self.command.open_with(&t); } }
+        if !self.hosted { command::help(&ctx, &mut self.help, &hotkeys::complete(&self.prefs.hotkeys)); }
         if !self.hosted && self.command.open {
             let bases: Vec<String> = self.eng.tickers.lock().unwrap().iter().map(|t| t.base.clone()).collect();
-            for c in self.command.show(&ctx, &bases).unwrap_or_default() {
+            let binds = hotkeys::complete(&self.prefs.hotkeys);
+            for c in self.command.show(&ctx, &bases, &binds).unwrap_or_default() {
                 match c {
                     command::Cmd::Base(b) => if b != self.eng.base { self.pending_base = Some(b) },
                     command::Cmd::Mode(m) => if m != self.mode { self.pending_mode = Some(m) },
