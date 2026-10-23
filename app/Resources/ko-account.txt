@@ -61,6 +61,7 @@ Fees (your tier) = 수수료(내 등급)
 Fill the order panel with a limit close at the mark price = 마크 가격으로 지정가 청산을 주문 패널에 입력
 Filled = 체결
 Filled / Amount = 체결 / 수량
+Filled / Size = 체결 / 수량
 Fixed venue = 고정 거래소
 free = 가용
 From = 출금 계정

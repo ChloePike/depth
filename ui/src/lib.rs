@@ -247,6 +247,8 @@ pub struct App {
     fills_key: (String, u64),
     /// time of the newest trade log entry already toasted
     log_seen: i64,
+    /// account.fill_seq already sounded
+    fill_seen: u64,
     /// egui ports of the native panels: their state document (when built, stale) and the order panel
     st: (std::sync::Arc<serde_json::Value>, Instant, bool),
     order: order::OrderPanel,
@@ -323,7 +325,7 @@ impl App {
             shot: env("T1_SHOT").map(|p| (p, env("T1_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(30.0))),
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
             route: st.route.clone().unwrap_or_default(), pending_base: None, pending_mode: None, pending_restart: false, book_w: 0.0,
-            layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(), fills_key: Default::default(), log_seen: now_ms(),
+            layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(), fills_key: Default::default(), log_seen: now_ms(), fill_seen: 0,
             st: (Default::default(), Instant::now(), true), order: Default::default(), hot_trade: vec![], venue_toggle: None, order_panel: st.order_panel.unwrap_or(true), top: Default::default(), venue_pages: Default::default(),
             account: Default::default(),
         }
@@ -1024,9 +1026,20 @@ impl App {
                     self.chart.fills = depth::db::fills(&sym, now_ms() - 30 * 86_400_000);
                 }
                 let acc = self.eng.account.lock().unwrap();
-                // failed orders / cancels / moves: toast on the chart (the full line stays in Account > Log)
-                if let Some((ts, m, _)) = acc.log.iter().rev().take_while(|(ts, ..)| *ts > self.log_seen).find(|(_, _, ok)| !ok) { self.chart.toast(m.trim_start_matches("FAIL ").to_string(), true); self.log_seen = *ts; }
+                // venue answers (orders, cancels, moves) toast on the chart, a failure before a success;
+                // the full line stays in Account > Order Log. A live fill plays a sound and toasts too.
+                let fresh: Vec<_> = acc.log.iter().rev().take_while(|(ts, ..)| *ts > self.log_seen).collect();
+                if let Some((_, m, ok)) = fresh.iter().find(|x| !x.2).or(fresh.first()) { self.chart.toast(order::log_toast(m, *ok), if *ok { up() } else { dn() }); }
                 if let Some((ts, ..)) = acc.log.back() { self.log_seen = self.log_seen.max(*ts); }
+                // fill_seq counts live pushes only (REST back-fills bypass it): every bump is a new fill
+                if acc.fill_seq != self.fill_seen {
+                    if let Some(f) = &acc.last_fill {
+                        chart::play_sound("depth:bell");
+                        let buy = f.side == depth::Side::Buy;
+                        self.chart.toast(format!("{:?} {} {} {}@{}", f.ex, f.symbol, if buy { t("tr.buy") } else { t("tr.sell") }, fmt_qty(f.qty), fmt_px(f.price)), if buy { up() } else { dn() });
+                    }
+                    self.fill_seen = acc.fill_seq;
+                }
                 let mut lines: Vec<chart::ChartLine> = acc.positions.iter().filter(|p| p.symbol == sym).map(|p| chart::ChartLine {
                     price: p.entry, ex: Some(p.ex), col: if p.side == depth::Side::Buy { up() } else { dn() },
                     tag: if p.side == depth::Side::Buy { t("tr.long_s") } else { t("tr.short_s") }.to_string(),
@@ -1038,7 +1051,7 @@ impl App {
                     ex: Some(o.ex), tag: if o.kind.eq_ignore_ascii_case("limit") { String::new() } else { o.kind.clone() },
                     sub: format!("{}{}@{}", if o.side == depth::Side::Buy { "+" } else { "-" }, fmt_qty(o.qty - o.filled), fmt_px(o.price)),
                     // only plain limit orders are dragged: a stop or post-only order would come back as something else
-                    act: o.kind.eq_ignore_ascii_case("limit").then(|| chart::LineAct::Order(o.ex, o.id.clone())),
+                    act: (o.kind.eq_ignore_ascii_case("limit") && matches!(o.tif.to_ascii_lowercase().as_str(), "" | "gtc" | "goodtillcancel")).then(|| chart::LineAct::Order(o.ex, o.id.clone())),
                 }));
                 // liquidation price of each position (none on Binance Portfolio Margin: account-level uniMMR)
                 lines.extend(acc.positions.iter().filter(|p| p.symbol == sym).filter_map(|p| p.liq.filter(|l| *l > 0.0).map(|l| chart::ChartLine {

@@ -61,6 +61,7 @@ Fees (your tier) = Taxas (seu nível)
 Fill the order panel with a limit close at the mark price = Preenche o painel de ordens com um fechamento limite ao preço de referência
 Filled = Executada
 Filled / Amount = Executada / Quantidade
+Filled / Size = Executada / Quantidade
 Fixed venue = Corretora fixa
 free = livre
 From = De

@@ -61,6 +61,7 @@ Fees (your tier) = 手续费（你的等级）
 Fill the order panel with a limit close at the mark price = 在下单面板填入以标记价格限价平仓
 Filled = 已成交
 Filled / Amount = 已成交 / 数量
+Filled / Size = 已成交 / 数量
 Fixed venue = 固定交易所
 free = 可用
 From = 从

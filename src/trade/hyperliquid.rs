@@ -295,7 +295,7 @@ fn open_order(o: &Value) -> OpenOrder {
         ex: Exchange::Hyperliquid, symbol: unified(o["coin"].as_str().unwrap_or_default()), id: o["oid"].to_string(),
         side: if o["side"] == "A" { Side::Sell } else { Side::Buy }, price: f(&o["limitPx"]), qty: orig, filled: (orig - left).max(0.0),
         // WS order updates document fewer fields than frontendOpenOrders; read them when present
-        kind: o["orderType"].as_str().unwrap_or("Limit").into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false),
+        tif: o["tif"].as_str().unwrap_or_default().into(), kind: o["orderType"].as_str().unwrap_or("Limit").into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false),
         ts: o["timestamp"].as_i64().unwrap_or(0), pos: None,
     }
 }

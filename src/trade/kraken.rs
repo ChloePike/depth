@@ -146,7 +146,7 @@ fn rest_order(o: &Value) -> Option<OpenOrder> {
     let filled = n(&o["filledSize"]);
     Some(OpenOrder { ex: Exchange::Kraken, symbol, id: o["order_id"].as_str()?.into(), side: if o["side"] == "sell" { Side::Sell } else { Side::Buy },
         price: crate::opt_num(&o["limitPrice"]).unwrap_or(0.0), qty: crate::opt_num(&o["unfilledSize"]).unwrap_or(0.0) + filled, filled,
-        kind: o["orderType"].as_str().unwrap_or_default().into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false),
+        tif: String::new(), kind: o["orderType"].as_str().unwrap_or_default().into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false),
         ts: o["receivedTime"].as_str().map(crate::iso_ms).unwrap_or(0), pos: None })
 }
 
@@ -188,7 +188,7 @@ fn ws_order(o: &Value) -> Option<OpenOrder> {
     let filled = n(&o["filled"]);
     Some(OpenOrder { ex: Exchange::Kraken, symbol, id: o["order_id"].as_str()?.into(), side: if o["direction"] == 1 { Side::Sell } else { Side::Buy },
         price: crate::opt_num(&o["limit_price"]).unwrap_or(0.0), qty: n(&o["qty"]) + filled, filled,
-        kind: o["type"].as_str().unwrap_or_default().into(), reduce_only: o["reduce_only"].as_bool().unwrap_or(false), ts: o["time"].as_i64().unwrap_or(0), pos: None })
+        tif: String::new(), kind: o["type"].as_str().unwrap_or_default().into(), reduce_only: o["reduce_only"].as_bool().unwrap_or(false), ts: o["time"].as_i64().unwrap_or(0), pos: None })
 }
 
 /// Maps one private-feed message. `held` = unified symbols with an open position from the last

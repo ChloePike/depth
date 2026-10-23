@@ -61,6 +61,7 @@ Fees (your tier) = Frais (votre niveau)
 Fill the order panel with a limit close at the mark price = Remplit le panneau d'ordres avec une clôture limite au prix de référence
 Filled = Exécuté
 Filled / Amount = Exécuté / Montant
+Filled / Size = Exécuté / Montant
 Fixed venue = Plateforme fixe
 free = libre
 From = De

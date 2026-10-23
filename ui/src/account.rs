@@ -3,7 +3,7 @@
 //! transfer sheet). It reads the same state document (`App::state_json`) and sends the same ops
 //! (`App::call`) as the native panels, so both hosts act identically.
 use super::kit::{self, Look, H, H_LG, H_SM};
-use super::order::{leak, parse, tpsl_modal, usd, Call, TpSlSheet};
+use super::order::{dialog, dialog_buttons, dialog_title, leak, parse, tpsl_modal, usd, Call, TpSlSheet};
 use super::{fmt_dp, fmt_px, hms, l, theme::*};
 use depth::Exchange;
 use eframe::egui::{self, Color32, Rect, RichText, Ui};
@@ -54,6 +54,8 @@ pub struct AccountPanel {
     sel_tpsl: Vec<String>,
     /// per-position inline limit close price, only once edited (else it follows the mark)
     close_px: HashMap<String, String>,
+    /// open order prices being edited in the table, by row key
+    order_px: HashMap<String, String>,
     confirm: Option<PosAct>,
     share: Option<Share>,
     sheet: Option<TpSlSheet>,
@@ -75,7 +77,7 @@ impl Default for AccountPanel {
             // T1_ACC_TAB=<n>: open the strip on tab n (screenshots)
             tab: std::env::var("T1_ACC_TAB").ok().and_then(|s| s.parse::<usize>().ok()).and_then(|n| TABS.get(n).copied()).unwrap_or(Tab::Positions), hide_others: false, hist_requested: false,
             sort_orders: (0, true), sort_tpsl: (0, false), sort_oh: (0, true), sort_fills: (0, true), sort_closed: (0, true),
-            sel_orders: vec![], sel_tpsl: vec![], close_px: HashMap::new(),
+            sel_orders: vec![], sel_tpsl: vec![], close_px: HashMap::new(), order_px: HashMap::new(),
             confirm: None, share: None, sheet: None, xfer: None, wallets_requested: vec![], error: None, xfer_shot: false,
             open_settings: None, prefill: None, insure: None,
         }
@@ -107,6 +109,24 @@ fn pos_key(p: &Value) -> String { format!("{}|{}|{}", s(&p["ex"]), s(&p["symbol"
 fn row_key(v: &Value) -> String { format!("{}|{}", s(&v["ex"]), s(&v["id"])) }
 fn side_name(side: &str) -> &'static str {
     match side { "buy" => l("Buy"), "sell" => l("Sell"), "long" => l("Long"), _ => l("Short") }
+}
+/// Order type as one label: "Limit · GTC", "Limit · Post-only", "Market". Venues spell the time in
+/// force their own way, some inside the type itself (OKX post_only, Binance spot LIMIT_MAKER).
+fn order_type(kind: &str, tif: &str) -> String {
+    let k = kind.to_ascii_lowercase().replace(['_', '-', ' '], "");
+    let tif_of = |t: &str| match t.to_ascii_lowercase().replace(['_', '-', ' '], "").as_str() {
+        "gtc" | "goodtillcancel" | "goodtilltime" | "gtt" => Some("GTC"),
+        "ioc" | "immediateorcancel" | "optimallimitioc" => Some("IOC"),
+        "fok" | "fillorkill" => Some("FOK"),
+        "gtx" | "postonly" | "poc" | "alo" | "post" | "limitmaker" | "mmp" => Some("Post-only"),
+        _ => None,
+    };
+    let (name, in_kind) = match k.as_str() {
+        "market" | "mkt" => (l("Market"), None),
+        "limit" | "lmt" | "" => (l("Limit"), None),
+        _ => match tif_of(&k) { Some(t) => (l("Limit"), Some(t)), None => return kind.to_string() },
+    };
+    match in_kind.or(tif_of(tif)) { Some(t) if name == l("Limit") => format!("{name} · {t}"), _ => name.to_string() }
 }
 fn wallet_name(id: &str) -> String {
     match id {
@@ -302,8 +322,10 @@ fn cell_field(ui: &mut Ui, r: Rect, text: &mut String, id: impl std::hash::Hash 
     let f = ui.ctx().animate_bool_with_time(eid.with("f"), focused, 0.12);
     if f > 0.0 { ui.painter().rect_filled(r.expand(2.0 * f), kit::rad() + 2, accent().gamma_multiply(0.14 * f)); }
     ui.painter().rect(r, kit::rad(), well(), egui::Stroke::new(1.0, lerp(line(), accent(), f)), egui::StrokeKind::Inside);
-    ui.put(r.shrink2(egui::vec2(8.0, 2.0)), egui::TextEdit::singleline(text).id(eid).frame(egui::Frame::NONE).font(mono_m(12.5)).text_color(fg_strong())
-        .horizontal_align(egui::Align::RIGHT).vertical_align(egui::Align::Center))
+    let resp = ui.put(r.shrink2(egui::vec2(8.0, 2.0)), egui::TextEdit::singleline(text).id(eid).frame(egui::Frame::NONE).font(mono_m(12.5)).text_color(fg_strong())
+        .horizontal_align(egui::Align::RIGHT).vertical_align(egui::Align::Center));
+    if resp.changed() && !text.is_ascii() { *text = kit::ascii_num(text); }
+    resp
 }
 
 /// Centered empty state: title, description, optional button.
@@ -765,28 +787,48 @@ impl AccountPanel {
     fn confirm_modal(&mut self, ui: &mut Ui, call: &mut Call) {
         let Some(a) = &self.confirm else { return };
         let ls = |p: &Value| if s(&p["side"]) == "long" { l("Long") } else { l("Short") };
-        let (title, button_t, message) = match a {
-            PosAct::Market(p, q) => (l("Close position at market?"), l("Close at Market"),
-                format!("{} {} {} {} {} ≈ {} USDT\n{}", s(&p["ex"]), s(&p["symbol"]), ls(p), qty(*q), base_of(s(&p["symbol"])), fmt_dp(q * f(&p["mark"]), 0), l("A market order fills against the book; slippage applies."))),
-            PosAct::Limit(p, x, q) => (l("Place limit close?"), l("Place Limit Close"), format!("{} {} {} {} {} @ {}", s(&p["ex"]), s(&p["symbol"]), ls(p), qty(*q), base_of(s(&p["symbol"])), fmt_px(*x))),
+        let side_col = |p: &Value| if s(&p["side"]) == "long" { up() } else { dn() };
+        let unit = |p: &Value, q: f64| format!("{} {}", qty(q), base_of(s(&p["symbol"])));
+        // title, primary button, the one position it acts on (venue + symbol in the header), fact rows, warning
+        let (title, button_t, head, rows, warn): (&str, &str, Option<&Value>, Vec<(String, String, Color32)>, &str) = match a {
+            PosAct::Market(p, q) => (l("Close position at market?"), l("Close at Market"), Some(p), vec![
+                (l("Side").into(), ls(p).into(), side_col(p)), (l("Size").into(), unit(p, *q), fg_strong()),
+                (l("Mark").into(), fmt_px(f(&p["mark"])), fg()), (l("Value").into(), format!("≈ {} USDT", fmt_dp(q * f(&p["mark"]), 0)), fg()),
+                (l("Unrealized PnL").into(), format!("{:+.2} USDT", f(&p["upnl"]) * q / f(&p["qty"]).max(1e-12)), if f(&p["upnl"]) >= 0.0 { up() } else { dn() }),
+            ], l("A market order fills against the book; slippage applies.")),
+            PosAct::Limit(p, x, q) => (l("Place limit close?"), l("Place Limit Close"), Some(p), vec![
+                (l("Side").into(), ls(p).into(), side_col(p)), (l("Size").into(), unit(p, *q), fg_strong()),
+                (l("Price").into(), fmt_px(*x), fg_strong()), (l("Value").into(), format!("≈ {} USDT", fmt_dp(q * x, 0)), fg()),
+            ], ""),
             PosAct::Reverse(p) => {
-                let (b, q) = (base_of(s(&p["symbol"])), qty(f(&p["qty"])));
                 let other = if s(&p["side"]) == "long" { l("Short") } else { l("Long") };
-                (l("Reverse position?"), l("Reverse"), format!("{} {}: {} {} {q} {b}, {} {other} {q} {b}\n{}", s(&p["ex"]), s(&p["symbol"]), l("close"), ls(p), l("then open"), l("Two market orders; if the second fails you are left flat.")))
+                (l("Reverse position?"), l("Reverse"), Some(p), vec![
+                    (l("close").into(), format!("{} {}", ls(p), unit(p, f(&p["qty"]))), side_col(p)),
+                    (l("then open").into(), format!("{other} {}", unit(p, f(&p["qty"]))), if s(&p["side"]) == "long" { dn() } else { up() }),
+                ], l("Two market orders; if the second fails you are left flat."))
             }
-            PosAct::CloseAll(ps) => (l("Close all positions at market?"), l("Close All"), ps.iter().map(|p| format!("{} {} {} {}", s(&p["ex"]), s(&p["symbol"]), ls(p), qty(f(&p["qty"])))).collect::<Vec<_>>().join("\n")),
+            PosAct::CloseAll(ps) => (l("Close all positions at market?"), l("Close All"), None,
+                ps.iter().map(|p| (format!("{} {} {}", s(&p["ex"]), s(&p["symbol"]), ls(p)), unit(p, f(&p["qty"])), side_col(p))).collect(),
+                l("A market order fills against the book; slippage applies.")),
         };
         let mut done = None;
-        let m = egui::Modal::new(egui::Id::new("pos_confirm")).show(ui.ctx(), |ui| {
-            ui.set_width(380.0);
-            ui.label(RichText::new(title).font(prop_s(15.0)).color(fg_strong()));
-            ui.add_space(2.0);
-            kit::note(ui, &message, mu());
+        let m = dialog("pos_confirm").show(ui.ctx(), |ui| {
+            ui.set_width(360.0);
+            dialog_title(ui, title, "", None);
+            if let Some(p) = head {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if let Some(e) = Exchange::parse(s(&p["ex"])) { icon_label(ui, e, RichText::new(s(&p["ex"])).font(prop(12.5)).color(mu()), false); }
+                    ui.label(RichText::new(s(&p["symbol"])).font(prop_s(12.5)).color(fg_strong()));
+                });
+            }
+            ui.add_space(10.0);
+            for (k, v, c) in rows { kit::kv(ui, &k, v, c); }
+            if !warn.is_empty() { ui.add_space(8.0); kit::note(ui, warn, mu()); }
             ui.add_space(12.0);
-            ui.columns(2, |c| {
-                if kit::button(&mut c[0], l("Cancel"), Look::Secondary, H_LG, Some(f32::INFINITY), true).clicked() || c[0].input(|i| i.key_pressed(egui::Key::Escape)) { done = Some(false); }
-                if kit::button(&mut c[1], button_t, Look::Fill(dn()), H_LG, Some(f32::INFINITY), true).clicked() { done = Some(true); }
-            });
+            let (c, o) = dialog_buttons(ui, l("Cancel"), button_t, dn(), true);
+            if c || ui.input(|i| i.key_pressed(egui::Key::Escape)) { done = Some(false); }
+            if o { done = Some(true); }
         });
         if m.should_close() && done.is_none() { done = Some(false); }
         let Some(go) = done else { return };
@@ -889,7 +931,7 @@ impl AccountPanel {
         rows.sort_by(|a, b| (b["ts"].as_i64(), s(&b["id"])).cmp(&(a["ts"].as_i64(), s(&a["id"]))));
         let cols = [
             col(l("Time"), 116.0, false, Key::F("ts")), col(l("Symbol"), 150.0, false, Key::S("symbol")), col(l("Side"), 90.0, false, Key::S("side")),
-            col(l("Type"), 100.0, false, Key::S("kind")), col(l("Price"), 90.0, true, Key::F("price")), col(l("Amount"), 80.0, true, Key::F("qty")),
+            col(l("Type"), 230.0, false, Key::S("kind")), col(l("Price"), 110.0, true, Key::F("price")), col(l("Size"), 80.0, true, Key::F("qty")),
             col(l("Filled"), 100.0, true, Key::F("filled")), col(l("Value"), 90.0, true, Key::G(|o| f(&o["price"]) * f(&o["qty"]))), Col { name: "", w: 80.0, right: true, grow: false, key: Key::No },
         ];
         if self.sel_orders.len() > 1 {
@@ -901,19 +943,43 @@ impl AccountPanel {
                 if kit::button(ui, l("Cancel Selected Orders"), Look::Link, H_SM, None, true).clicked() { for o in &picked { acts.push(Act::Op(json!({"op": "cancel", "ex": o["ex"], "id": o["id"], "spot": o["spot"]}))); } }
             });
         }
+        let px_map = &mut self.order_px;
         table(ui, "orders", &cols, rows, 36.0, l("No open orders"), Some(&mut self.sort_orders), Some(&mut self.sel_orders), &mut |ui, part| match part {
             Part::Cell(i, r, o) => match i {
                 0 => { txt(ui, r, time(o["ts"].as_i64().unwrap_or(0)), mono(12.0), mu(), false); }
-                1 => { symbol_cell(ui, r, s(&o["ex"]), s(&o["symbol"]), &row_key(o), acts); }
+                1 => {
+                    let x = symbol_cell(ui, r, s(&o["ex"]), s(&o["symbol"]), &row_key(o), acts);
+                    ui.painter().text(egui::pos2(x + 6.0, r.center().y), egui::Align2::LEFT_CENTER, s(&o["ex"]), prop(11.5), mu());
+                }
                 2 => {
                     let buy = s(&o["side"]) == "buy";
                     let pos = o["pos"].as_str().map(|p| format!(" · {}", side_name(p))).unwrap_or_default();
                     chip_at(ui, r.left(), r.center().y, &format!("{}{pos}", side_name(s(&o["side"]))), side_tone(buy));
                 }
                 3 => {
-                    let tr = txt(ui, r, s(&o["kind"]), prop(12.5), fg(), false);
-                    if o["reduce_only"] == true { chip_at(ui, tr.right() + 6.0, r.center().y, l("Reduce"), kit::Tone::Neutral); }
-                    if o["spot"] == true { chip_at(ui, tr.right() + 6.0, r.center().y, super::t("spot.tag"), kit::Tone::Neutral); }
+                    // type · time in force, then the market and (perp) whether it opens or closes
+                    let tr = txt(ui, r, order_type(s(&o["kind"]), s(&o["tif"])), prop(12.5), fg(), false);
+                    let market = match s(&o["market"]) { "spot" => l("Spot"), "margin" => l("Margin"), _ => l("Perp") };
+                    let x = chip_at(ui, tr.right() + 6.0, r.center().y, market, kit::Tone::Neutral).right();
+                    if o["market"] == "perp" {
+                        // hedge mode: a sell on the long (buy on the short) closes it
+                        let closes = o["reduce_only"] == true || o["pos"].as_str().is_some_and(|p| (p == "long") != (s(&o["side"]) == "buy"));
+                        chip_at(ui, x + 4.0, r.center().y, if closes { l("Close") } else { l("Open") }, if closes { kit::Tone::Warn } else { kit::Tone::Outline });
+                    }
+                }
+                // perp GTC limits: the price is a field, Enter moves the order (same rule as dragging its chart line)
+                4 if o["market"] == "perp" && s(&o["kind"]).eq_ignore_ascii_case("limit") && matches!(s(&o["tif"]).to_ascii_lowercase().as_str(), "" | "gtc" | "goodtillcancel") => {
+                    let key = row_key(o);
+                    let mut t = px_map.get(&key).cloned().unwrap_or_else(|| fmt_px(f(&o["price"])));
+                    let fr = cell_field(ui, Rect::from_min_size(egui::pos2(r.right() - 96.0, r.center().y - 13.0), egui::vec2(96.0, 26.0)), &mut t, ("opx", &key))
+                        .on_hover_text(l("Type a new price, Enter to move the order"));
+                    if fr.changed() { px_map.insert(key.clone(), t.clone()); }
+                    if fr.lost_focus() {
+                        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            if let Some(x) = parse(&t).filter(|x| *x > 0.0 && (x - f(&o["price"])).abs() > 1e-12) { acts.push(Act::Op(json!({"op": "move_order", "ex": o["ex"], "id": o["id"], "price": x}))); }
+                        }
+                        px_map.remove(&key);
+                    }
                 }
                 4 => { txt(ui, r, fmt_px(f(&o["price"])), mono_m(12.5), fg(), true); }
                 5 => { txt(ui, r, qty(f(&o["qty"])), mono(12.5), fg(), true); }
@@ -942,7 +1008,7 @@ impl AccountPanel {
         rows.sort_by(|a, b| (s(&a["symbol"]), s(&a["ex"]), s(&a["id"])).cmp(&(s(&b["symbol"]), s(&b["ex"]), s(&b["id"]))));
         let cols = [
             col(l("Symbol"), 170.0, false, Key::S("symbol")), col(l("Position"), 80.0, false, Key::S("pos")), col(l("Type"), 100.0, false, Key::No),
-            col(l("Trigger Price"), 100.0, true, Key::F("trigger_px")), col(l("Trigger"), 90.0, false, Key::No), col(l("Amount"), 100.0, true, Key::No),
+            col(l("Trigger Price"), 100.0, true, Key::F("trigger_px")), col(l("Trigger"), 90.0, false, Key::No), col(l("Size"), 100.0, true, Key::No),
             Col { name: "", w: 80.0, right: true, grow: false, key: Key::No },
         ];
         let cancel = |t: &Value| Act::Op(json!({"op": "cancel_tpsl", "ex": t["ex"], "id": t["id"]}));
@@ -994,7 +1060,7 @@ impl AccountPanel {
                 let cols = [
                     col(l("Time"), 116.0, false, Key::F("ts")), col(l("Symbol"), 150.0, false, Key::S("symbol")), col(l("Side"), 60.0, false, Key::S("side")),
                     col(l("Type"), 80.0, false, Key::S("kind")), col(l("Price"), 90.0, true, Key::F("price")), col(l("Avg. Price"), 90.0, true, Key::F("avg")),
-                    col(l("Filled / Amount"), 130.0, true, Key::F("filled")), col(l("Status"), 100.0, true, Key::S("status")),
+                    col(l("Filled / Size"), 130.0, true, Key::F("filled")), col(l("Status"), 100.0, true, Key::S("status")),
                 ];
                 table(ui, "order_hist", &cols, list("orders"), 36.0, l("No orders in the last 7 days"), Some(&mut self.sort_oh), None, &mut |ui, part| if let Part::Cell(i, r, o) = part {
                     match i {
@@ -1017,7 +1083,7 @@ impl AccountPanel {
             Tab::TradeHist => {
                 let cols = [
                     col(l("Time"), 116.0, false, Key::F("ts")), col(l("Symbol"), 150.0, false, Key::S("symbol")), col(l("Side"), 60.0, false, Key::S("side")),
-                    col(l("Price"), 90.0, true, Key::F("price")), col(l("Amount"), 80.0, true, Key::F("qty")), col(l("Value"), 100.0, true, Key::G(|x| f(&x["price"]) * f(&x["qty"]))),
+                    col(l("Price"), 90.0, true, Key::F("price")), col(l("Size"), 80.0, true, Key::F("qty")), col(l("Value"), 100.0, true, Key::G(|x| f(&x["price"]) * f(&x["qty"]))),
                     col(l("Fee"), 80.0, true, Key::F("fee")), col(l("Realized PnL"), 100.0, true, Key::F("realized")),
                 ];
                 table(ui, "fills", &cols, list("fills"), 36.0, l("No trades in the last 7 days"), Some(&mut self.sort_fills), None, &mut |ui, part| if let Part::Cell(i, r, x) = part {
@@ -1037,7 +1103,7 @@ impl AccountPanel {
                 let cols = [
                     col(l("Closed"), 116.0, false, Key::F("ts")), col(l("Symbol"), 150.0, false, Key::S("symbol")),
                     col(l("Side"), 60.0, false, Key::G(|c| match c["long"].as_bool() { Some(true) => 1.0, Some(false) => 2.0, None => 0.0 })),
-                    col(l("Amount"), 90.0, true, Key::F("qty")), col(l("Entry"), 90.0, true, Key::No), col(l("Exit"), 90.0, true, Key::No), col(l("Realized PnL"), 110.0, true, Key::F("pnl")),
+                    col(l("Size"), 90.0, true, Key::F("qty")), col(l("Entry"), 90.0, true, Key::No), col(l("Exit"), 90.0, true, Key::No), col(l("Realized PnL"), 110.0, true, Key::F("pnl")),
                 ];
                 table(ui, "closed", &cols, list("closed"), 36.0, l("No closed positions in the last 7 days"), Some(&mut self.sort_closed), None, &mut |ui, part| if let Part::Cell(i, r, c) = part {
                     match i {

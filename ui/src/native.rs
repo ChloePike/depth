@@ -105,11 +105,12 @@ impl App {
                 "funding_paid": paid.map(|x| x.amount), "funding_since": paid.map(|x| x.since).filter(|t| *t > 0), "funding_since_lower": paid.map(|x| x.lower),
             })
         }).collect();
-        let order_json = |o: &trade::OpenOrder, spot: bool| json!({
+        let order_json = |o: &trade::OpenOrder, market: &str| json!({
             "ex": ex_name(o.ex), "symbol": o.symbol, "id": o.id, "side": if o.side == Side::Buy { "buy" } else { "sell" }, "price": o.price, "qty": o.qty,
-            "filled": o.filled, "kind": o.kind, "reduce_only": o.reduce_only, "ts": o.ts, "pos": o.pos.map(side_name), "spot": spot,
+            "filled": o.filled, "kind": o.kind, "tif": o.tif, "reduce_only": o.reduce_only, "ts": o.ts, "pos": o.pos.map(side_name), "spot": market != "perp", "market": market,
         });
-        let orders: Vec<Value> = acc.orders.iter().map(|o| order_json(o, false)).chain(acc.spot_orders.iter().chain(&acc.margin_orders).map(|o| order_json(o, true))).collect();
+        let orders: Vec<Value> = acc.orders.iter().map(|o| order_json(o, "perp")).chain(acc.spot_orders.iter().map(|o| order_json(o, "spot")))
+            .chain(acc.margin_orders.iter().map(|o| order_json(o, "margin"))).collect();
         let tpsl: Vec<Value> = acc.tpsl.iter().map(|t| json!({
             "ex": ex_name(t.ex), "id": t.id, "symbol": t.symbol, "pos": side_name(t.pos), "take_profit": t.take_profit, "trigger_px": t.trigger_px,
             "qty": t.qty, "trigger": if matches!(t.trigger, trade::tpsl::Trigger::Last) { "last" } else { "mark" },
@@ -272,6 +273,11 @@ impl App {
                 let (e, id) = (exv()?, s("id"));
                 let o = self.eng.account.lock().unwrap().orders.iter().find(|o| o.ex == e && o.id == id).cloned().ok_or("order not found")?;
                 self.eng.cancel(&o, ctx);
+            }
+            "move_order" => {
+                let (e, id) = (exv()?, s("id"));
+                let o = self.eng.account.lock().unwrap().orders.iter().find(|o| o.ex == e && o.id == id).cloned().ok_or("order not found")?;
+                self.eng.replace_order(&o, f("price").filter(|p| *p > 0.0).ok_or("no price")?, ctx);
             }
             "close_position" => {
                 let (e, symbol) = (exv()?, s("symbol"));

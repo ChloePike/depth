@@ -64,6 +64,9 @@ pub struct Account {
     /// bumped when own fills were stored (the chart re-reads them from the db); (venue, symbol)
     /// pairs already back-filled over REST this session
     pub fills_ver: u64,
+    /// live fill pushes (fill sound + toast) and the newest one
+    pub fill_seq: u64,
+    pub last_fill: Option<trade::Fill>,
     pub fills_done: std::collections::HashSet<(Exchange, String)>,
     pub transferring: bool,
     /// auto top-up rules per venue (persisted in settings.json) and the last time one fired
@@ -1504,7 +1507,7 @@ fn apply(a: &mut Account, ex: Exchange, ev: trade::AccEvent) -> bool {
         }
         E::TpSl(t) => { a.tpsl.retain(|x| !(x.ex == ex && x.id == t.id)); a.tpsl.push(t); true }
         E::TpSlDone { id } => { a.tpsl.retain(|x| !(x.ex == ex && x.id == id)); true }
-        E::Fill(f) => { depth::db::fills_put(&[f]); a.fills_ver += 1; true }
+        E::Fill(f) => { depth::db::fills_put(std::slice::from_ref(&f)); a.fills_ver += 1; a.fill_seq += 1; a.last_fill = Some(f); true }
         E::OptPos(p) => {
             a.opts.retain(|x| !(x.ex == ex && x.symbol == p.symbol));
             if p.qty > 0.0 { a.opts.push(p); }
@@ -1587,7 +1590,7 @@ mod tests {
         apply(&mut a, ex, E::Position { p: pos(Side::Sell, 0.0), one_way: true });
         assert!(a.positions.is_empty());
         // orders upsert by id and leave on done
-        let o = OpenOrder { ex, symbol: "BTCUSDT".into(), id: "7".into(), side: Side::Buy, price: 99.0, qty: 1.0, filled: 0.0, kind: "LIMIT".into(), reduce_only: false, ts: 0, pos: None };
+        let o = OpenOrder { ex, symbol: "BTCUSDT".into(), id: "7".into(), side: Side::Buy, price: 99.0, qty: 1.0, filled: 0.0, kind: "LIMIT".into(), tif: String::new(), reduce_only: false, ts: 0, pos: None };
         apply(&mut a, ex, E::Order(o.clone()));
         apply(&mut a, ex, E::Order(OpenOrder { filled: 0.5, ..o }));
         assert_eq!(a.orders.len(), 1);

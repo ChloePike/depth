@@ -159,6 +159,7 @@ fn order(o: &Value) -> OpenOrder {
         price: crate::opt_num(&o["price"]).unwrap_or(0.0), qty: crate::opt_num(&o["size"]).unwrap_or(0.0),
         // WS: accBaseVolume is cumulative, baseVolume the latest fill; REST: baseVolume is cumulative
         filled: crate::opt_num(&o["accBaseVolume"]).or(crate::opt_num(&o["baseVolume"])).unwrap_or(0.0),
+        tif: o["force"].as_str().unwrap_or_default().into(),
         kind: o["orderType"].as_str().unwrap_or_default().into(),
         reduce_only: o["reduceOnly"].as_str().is_some_and(|r| r.eq_ignore_ascii_case("yes")) || (hedge_pos.is_some() && closing),
         ts: crate::opt_num(&o["cTime"]).unwrap_or(0.0) as i64, pos: hedge_pos,

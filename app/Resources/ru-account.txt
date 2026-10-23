@@ -61,6 +61,7 @@ Fees (your tier) = Комиссии (ваш уровень)
 Fill the order panel with a limit close at the mark price = Заполнить панель ордеров лимитным закрытием по маркировочной цене
 Filled = Исполнено
 Filled / Amount = Исполнено / Объём
+Filled / Size = Исполнено / Объём
 Fixed venue = Фиксированная биржа
 free = свободно
 From = Откуда

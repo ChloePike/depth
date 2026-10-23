@@ -130,8 +130,8 @@ impl Default for Ind { fn default() -> Self { Ind { rsi: 14, macd: [12, 26, 9], 
 
 /// A price line from the account: entry of a position or a resting order.
 /// Drawn dashed with a tag at the left edge ("tag | sub") and the price on the axis.
-/// Banner on top of the chart for 8 s (red dot when `err`).
-impl Chart { pub fn toast(&mut self, msg: String, err: bool) { self.toast = Some((msg, std::time::Instant::now() + std::time::Duration::from_secs(8), err)); } }
+/// Banner on top of the chart for 8 s with a coloured dot.
+impl Chart { pub fn toast(&mut self, msg: String, dot: Color32) { self.toast = Some((msg, std::time::Instant::now() + std::time::Duration::from_secs(8), dot)); } }
 
 #[derive(Clone)]
 pub struct ChartLine { pub price: f64, pub ex: Option<Exchange>, pub tag: String, pub sub: String, pub col: Color32, pub act: Option<LineAct> }
@@ -383,7 +383,7 @@ pub struct Chart {
     /// alerts that fired since the host last asked: (title, body)
     #[serde(skip)] pub fired: Vec<(String, String)>,
     /// banner of the last alert and until when it shows
-    #[serde(skip)] toast: Option<(String, std::time::Instant, bool)>,
+    #[serde(skip)] toast: Option<(String, std::time::Instant, Color32)>,
     /// one cell of a multi-chart layout: the legend names the interval
     #[serde(skip)] pub multi: bool,
     /// account line under the pointer last frame, the one being dragged, and a move awaiting
@@ -1742,7 +1742,7 @@ impl Chart {
             painter.text(pos2(main.left() + 6.0, main.top() + 80.0), Align2::LEFT_CENTER, t("chart.loading"), prop_m(12.0), WARN);
         }
         self.replay_ui(ui, &resp, &painter, main_plot, &fr, hover.map(|_| bars[hi_idx].t), next_t, now);
-        if let Some((msg, until, err)) = self.toast.clone() {
+        if let Some((msg, until, dot)) = self.toast.clone() {
             let left = until.saturating_duration_since(std::time::Instant::now());
             if !left.is_zero() {
                 // slides down and fades in over 250 ms, fades out over the last 400 ms
@@ -1754,7 +1754,7 @@ impl Chart {
                 let r = Rect::from_center_size(pos2(main_plot.center().x, main_plot.top() + 6.0 + 14.0 * ease), g.size() + vec2(42.0, 20.0));
                 painter.add(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(((if light() { 40.0 } else { 115.0 }) * ease) as u8) }.as_shape(r, 6));
                 painter.rect(r, 6, popup_bg().gamma_multiply(ease), Stroke::new(1.0, line().gamma_multiply(ease)), egui::StrokeKind::Inside);
-                painter.circle_filled(pos2(r.left() + 16.0, r.center().y), 4.0, if err { dn() } else { accent() }.gamma_multiply(ease));
+                painter.circle_filled(pos2(r.left() + 16.0, r.center().y), 4.0, dot.gamma_multiply(ease));
                 painter.galley(pos2(r.left() + 30.0, r.center().y - g.size().y / 2.0), g, fg_strong().gamma_multiply(ease));
                 if t < 1.0 { ui.ctx().request_repaint(); } else { ui.ctx().request_repaint_after(left.saturating_sub(std::time::Duration::from_millis(400))); }
             } else { self.toast = None; }
@@ -2369,7 +2369,7 @@ impl Chart {
                 let title = format!("{base} {} {}", if p >= lv { "↑" } else { "↓" }, fmt_px(lv));
                 let body = format!("{} {}", t("alert.crossed"), fmt_px(p));
                 play_sound(&sound);
-                self.toast = Some((format!("⏰ {title} · {body}"), std::time::Instant::now() + std::time::Duration::from_secs(8), false));
+                self.toast = Some((format!("⏰ {title} · {body}"), std::time::Instant::now() + std::time::Duration::from_secs(8), accent()));
                 self.fired.push((title, body));
             }
         }

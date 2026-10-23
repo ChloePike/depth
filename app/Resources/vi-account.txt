@@ -61,6 +61,7 @@ Fees (your tier) = Phí (cấp của bạn)
 Fill the order panel with a limit close at the mark price = Điền bảng đặt lệnh bằng lệnh Limit đóng ở giá đánh dấu
 Filled = Đã khớp
 Filled / Amount = Đã khớp / Số lượng
+Filled / Size = Đã khớp / Số lượng
 Fixed venue = Sàn cố định
 free = khả dụng
 From = Từ

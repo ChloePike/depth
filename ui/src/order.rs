@@ -158,28 +158,20 @@ pub(crate) fn signed(v: f64) -> String { format!("{}{}", if v >= 0.0 { "+" } els
 fn f(v: &Value) -> Option<f64> { v.as_f64() }
 fn s(v: &Value) -> &str { v.as_str().unwrap_or_default() }
 
-/// What the venues answered since a panel last sent something at `sent_ms` (`log`: the order log,
-/// newest first), for 20 s after the last answer (a minute for a rejection): accepted in green,
-/// the venue's error in red with the order on hover.
+/// "Sent, waiting for the venue…" until the first answer to what a panel sent at `sent_ms` (`log`:
+/// the order log, newest first); the answers themselves are toasts (`log_toast`).
 pub(crate) fn results(ui: &mut Ui, sent_ms: i64, log: &[(i64, &str, bool)]) {
-    if sent_ms == 0 { return; }
-    let new: Vec<&(i64, &str, bool)> = log.iter().filter(|x| x.0 >= sent_ms).collect();
-    let fail = new.iter().any(|x| !x.2);
-    let last = new.iter().map(|x| x.0).max().unwrap_or(sent_ms);
-    if depth::now_ms() - last > if fail { 60_000 } else { 20_000 } { return; }
-    if new.is_empty() { kit::note(ui, l("Sent, waiting for the venue…"), mu()); return; }
-    for (_, m, ok) in new.iter().take(4).rev() {
-        if *ok {
-            // "OK Bybit BTCUSDT open long 0.01 limit 81900 id 123 (45 ms)" -> "Bybit BTCUSDT open long 0.01 limit 81900 · 45 ms"
-            let body = m.strip_prefix("OK ").unwrap_or(m);
-            let (what, rest) = body.split_once(" id ").unwrap_or((body, ""));
-            let ms = rest.rsplit_once('(').map(|(_, t)| t.trim_end_matches(')')).unwrap_or("");
-            kit::note(ui, &format!("✓ {what}{}", if ms.is_empty() { String::new() } else { format!(" · {ms}") }), up());
-        } else {
-            let (what, err) = m.strip_prefix("FAIL ").unwrap_or(m).split_once(": ").unwrap_or((m, ""));
-            ui.add(egui::Label::new(RichText::new(format!("✗ {err}")).font(prop(11.5)).color(dn())).wrap()).on_hover_text(what);
-        }
-    }
+    if sent_ms == 0 || depth::now_ms() - sent_ms > 20_000 || log.iter().any(|x| x.0 >= sent_ms) { return; }
+    kit::note(ui, l("Sent, waiting for the venue…"), mu());
+}
+
+/// One order log line as a toast: "OK Bybit BTCUSDT open long 0.01 limit 81900 id 123 (45 ms)" ->
+/// "Bybit BTCUSDT open long 0.01 limit 81900 · 45 ms"; a failure keeps the venue's error.
+pub(crate) fn log_toast(m: &str, ok: bool) -> String {
+    if !ok { return m.strip_prefix("FAIL ").unwrap_or(m).to_string(); }
+    let body = m.strip_prefix("OK ").unwrap_or(m);
+    let (what, rest) = body.split_once(" id ").unwrap_or((body, ""));
+    match rest.rsplit_once('(').map(|(_, t)| t.trim_end_matches(')')) { Some(ms) => format!("{what} · {ms}"), None => what.to_string() }
 }
 
 /// Market-closes each position (the venue's own reduce-only close); the last error is kept.
@@ -314,7 +306,7 @@ pub(crate) fn dialog_title(ui: &mut Ui, title: &str, sub: &str, tag: Option<(&st
 }
 
 /// Dialog footer: Cancel (secondary) and the primary action side by side; returns (cancel, ok).
-fn dialog_buttons(ui: &mut Ui, cancel: &str, ok: &str, col: Color32, enabled: bool) -> (bool, bool) {
+pub(crate) fn dialog_buttons(ui: &mut Ui, cancel: &str, ok: &str, col: Color32, enabled: bool) -> (bool, bool) {
     ui.add_space(4.0);
     let (mut c, mut o) = (false, false);
     ui.columns(2, |cols| {

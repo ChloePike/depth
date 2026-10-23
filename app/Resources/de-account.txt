@@ -61,6 +61,7 @@ Fees (your tier) = Gebühren (dein Tier)
 Fill the order panel with a limit close at the mark price = Order-Panel mit einem Limit-Close zum Mark-Preis füllen
 Filled = Ausgeführt
 Filled / Amount = Ausgeführt / Menge
+Filled / Size = Ausgeführt / Menge
 Fixed venue = Feste Börse
 free = frei
 From = Von

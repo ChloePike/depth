@@ -61,6 +61,7 @@ Fees (your tier) = Comisiones (tu nivel)
 Fill the order panel with a limit close at the mark price = Rellena el panel de órdenes con un cierre límite al precio de referencia
 Filled = Ejecutada
 Filled / Amount = Ejecutada / Cantidad
+Filled / Size = Ejecutada / Cantidad
 Fixed venue = Exchange fijo
 free = libre
 From = Desde

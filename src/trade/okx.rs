@@ -194,7 +194,7 @@ fn order(o: &Value, ct: impl Fn(&str) -> Option<Inst>) -> Option<OpenOrder> {
     let i = ct(id)?;
     Some(OpenOrder {
         ex: Exchange::Okx, symbol, id: o["ordId"].as_str().unwrap_or_default().into(), side: if o["side"] == "sell" { Side::Sell } else { Side::Buy },
-        price: z(&o["px"]), qty: z(&o["sz"]) * i.ct, filled: z(&o["accFillSz"]) * i.ct, kind: o["ordType"].as_str().unwrap_or_default().into(),
+        price: z(&o["px"]), qty: z(&o["sz"]) * i.ct, filled: z(&o["accFillSz"]) * i.ct, tif: String::new(), kind: o["ordType"].as_str().unwrap_or_default().into(),
         reduce_only: o["reduceOnly"] == "true" || o["reduceOnly"] == true, ts: z(&o["cTime"]) as i64,
         pos: match o["posSide"].as_str() { Some("long") => Some(Side::Buy), Some("short") => Some(Side::Sell), _ => None },
     })

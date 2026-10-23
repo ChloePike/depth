@@ -138,7 +138,7 @@ fn binance_order(ex: Exchange, o: &Value) -> OpenOrder {
     OpenOrder {
         ex, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].to_string(),
         side: if o["side"] == "SELL" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["origQty"]), filled: n(&o["executedQty"]),
-        kind: o["type"].as_str().unwrap_or("LIMIT").to_lowercase(), reduce_only: false, ts: n(&o["time"]) as i64, pos: None,
+        tif: o["timeInForce"].as_str().unwrap_or_default().into(), kind: o["type"].as_str().unwrap_or("LIMIT").to_lowercase(), reduce_only: false, ts: n(&o["time"]) as i64, pos: None,
     }
 }
 
@@ -181,7 +181,7 @@ pub async fn open_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
             Ok(v["list"].as_array().into_iter().flatten().map(|o| OpenOrder {
                 ex, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].as_str().unwrap_or_default().into(),
                 side: if o["side"] == "Sell" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["qty"]), filled: n(&o["cumExecQty"]),
-                kind: o["orderType"].as_str().unwrap_or("Limit").to_lowercase(), reduce_only: false, ts: n(&o["createdTime"]) as i64, pos: None,
+                tif: o["timeInForce"].as_str().unwrap_or_default().into(), kind: o["orderType"].as_str().unwrap_or("Limit").to_lowercase(), reduce_only: false, ts: n(&o["createdTime"]) as i64, pos: None,
             }).collect())
         }
         Exchange::Binance => {

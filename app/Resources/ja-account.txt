@@ -61,6 +61,7 @@ Fees (your tier) = 手数料（適用ランク）
 Fill the order panel with a limit close at the mark price = マーク価格で指値決済を注文パネルに入力
 Filled = 約定済み
 Filled / Amount = 約定済み / 数量
+Filled / Size = 約定済み / 数量
 Fixed venue = 固定取引所
 free = 利用可
 From = 振替元

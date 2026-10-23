@@ -211,7 +211,7 @@ fn order(o: &Value, mult: f64, dual: bool) -> OpenOrder {
     OpenOrder {
         ex: Exchange::Gate, symbol: unified(o["contract"].as_str().unwrap_or_default()), id: id_of(o), side, price,
         qty: size.abs() * mult, filled: (size.abs() - z(&o["left"]).abs()) * mult,
-        kind: if price == 0.0 { "market".into() } else { format!("limit {}", o["tif"].as_str().unwrap_or("gtc")) }, reduce_only, ts,
+        tif: o["tif"].as_str().unwrap_or("gtc").into(), kind: if price == 0.0 { "market" } else { "limit" }.into(), reduce_only, ts,
         // dual mode: a buy adds to the long unless it reduces the short
         pos: dual.then(|| match (reduce_only, side) { (false, s) => s, (true, Side::Buy) => Side::Sell, (true, Side::Sell) => Side::Buy }),
     }

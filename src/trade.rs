@@ -204,7 +204,9 @@ pub struct Position { pub ex: Exchange, pub symbol: String, pub side: Side, pub 
     pub cross: Option<bool> }
 
 #[derive(Clone, Debug)]
-pub struct OpenOrder { pub ex: Exchange, pub symbol: String, pub id: String, pub side: Side, pub price: f64, pub qty: f64, pub filled: f64, pub kind: String, pub reduce_only: bool, pub ts: i64,
+pub struct OpenOrder { pub ex: Exchange, pub symbol: String, pub id: String, pub side: Side, pub price: f64, pub qty: f64, pub filled: f64, pub kind: String,
+    /// time in force as the venue spells it (GTC, IOC, PostOnly, alo, poc, ...); empty when the venue puts it in `kind`
+    pub tif: String, pub reduce_only: bool, pub ts: i64,
     /// hedge mode: which position the order belongs to
     pub pos: Option<Side> }
 
@@ -787,7 +789,7 @@ pub async fn option_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
             Ok(v["list"].as_array().into_iter().flatten().map(|o| OpenOrder {
                 ex, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].as_str().unwrap_or_default().into(),
                 side: if o["side"] == "Sell" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["qty"]), filled: n(&o["cumExecQty"]),
-                kind: o["orderType"].as_str().unwrap_or("Limit").to_lowercase(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: n(&o["createdTime"]) as i64, pos: None,
+                tif: o["timeInForce"].as_str().unwrap_or_default().into(), kind: o["orderType"].as_str().unwrap_or("Limit").to_lowercase(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: n(&o["createdTime"]) as i64, pos: None,
             }).collect())
         }
         _ => Ok(vec![]),
@@ -894,7 +896,7 @@ pub async fn open_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
             Ok(v.as_array().into_iter().flatten().map(|o| OpenOrder {
                 ex, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].to_string(),
                 side: if o["side"] == "SELL" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["origQty"]), filled: n(&o["executedQty"]),
-                kind: o["type"].as_str().unwrap_or_default().into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: o["time"].as_i64().unwrap_or(0),
+                tif: o["timeInForce"].as_str().unwrap_or_default().into(), kind: o["type"].as_str().unwrap_or_default().into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: o["time"].as_i64().unwrap_or(0),
                 pos: match o["positionSide"].as_str() { Some("LONG") => Some(Side::Buy), Some("SHORT") => Some(Side::Sell), _ => None },
             }).collect())
         }
@@ -952,7 +954,7 @@ fn bybit_order(o: &Value) -> OpenOrder {
     OpenOrder {
         ex: Exchange::Bybit, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].as_str().unwrap_or_default().into(),
         side: if o["side"] == "Sell" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["qty"]), filled: n(&o["cumExecQty"]),
-        kind: o["orderType"].as_str().unwrap_or_default().into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: n(&o["createdTime"]) as i64,
+        tif: o["timeInForce"].as_str().unwrap_or_default().into(), kind: o["orderType"].as_str().unwrap_or_default().into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: n(&o["createdTime"]) as i64,
         pos: match o["positionIdx"].as_i64() { Some(1) => Some(Side::Buy), Some(2) => Some(Side::Sell), _ => None },
     }
 }
@@ -1126,7 +1128,7 @@ async fn binance_stream(k: Keys, tx: AccTx) {
                         if matches!(o["X"].as_str(), Some("NEW" | "PARTIALLY_FILLED")) {
                             send(AccEvent::Order(OpenOrder {
                                 ex, symbol: o["s"].as_str().unwrap_or_default().into(), id, side: if o["S"] == "SELL" { Side::Sell } else { Side::Buy },
-                                price: n(&o["p"]), qty: n(&o["q"]), filled: n(&o["z"]), kind: o["o"].as_str().unwrap_or_default().into(),
+                                price: n(&o["p"]), qty: n(&o["q"]), filled: n(&o["z"]), tif: o["f"].as_str().unwrap_or_default().into(), kind: o["o"].as_str().unwrap_or_default().into(),
                                 reduce_only: o["R"].as_bool().unwrap_or(false), ts: o["T"].as_i64().unwrap_or(0),
                                 pos: match o["ps"].as_str() { Some("LONG") => Some(Side::Buy), Some("SHORT") => Some(Side::Sell), _ => None },
                             }));

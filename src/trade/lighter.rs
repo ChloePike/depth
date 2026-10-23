@@ -297,7 +297,7 @@ fn order(mkts: &[Mkt], o: &Value) -> OpenOrder {
     OpenOrder {
         ex: Exchange::Lighter, symbol: sym_of(mkts, o["market_index"].as_i64().unwrap_or(-1)), id: o["order_index"].to_string(),
         side: if o["is_ask"] == true { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["initial_base_amount"]), filled: n(&o["filled_base_amount"]),
-        kind: o["type"].as_str().unwrap_or_default().into(), reduce_only: o["reduce_only"].as_bool().unwrap_or(false),
+        tif: o["time_in_force"].as_str().unwrap_or_default().into(), kind: o["type"].as_str().unwrap_or_default().into(), reduce_only: o["reduce_only"].as_bool().unwrap_or(false),
         ts: if ts > 0 && ts < 100_000_000_000 { ts * 1000 } else { ts }, pos: None,
     }
 }
