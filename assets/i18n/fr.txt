@@ -344,6 +344,7 @@ sound.none = Aucun son
 tr.drag_line = Glisser pour déplacer
 tr.move = Déplacer
 tr.cancel_action = Annuler
+tr.cancel_order = Annuler l'ordre
 tr.move_replace = Pas de modification sur cette plateforme : annulation puis nouvel ordre
 tr.fill_px = Utiliser ce prix dans l'ordre
 draw.position = Position longue / courte

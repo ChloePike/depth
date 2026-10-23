@@ -344,6 +344,7 @@ sound.none = Без звука
 tr.drag_line = Перетащите, чтобы сдвинуть
 tr.move = Сдвинуть
 tr.cancel_action = Отмена
+tr.cancel_order = Отменить ордер
 tr.move_replace = Биржа не умеет изменять ордер: отмена и новый ордер
 tr.fill_px = Подставить цену в ордер
 draw.position = Длинная / короткая позиция

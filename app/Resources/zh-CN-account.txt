@@ -263,3 +263,7 @@ Funding paid since the position opened = 开仓以来的资金费
 Funding paid = 已付资金费
 since = 自
 Funding paid since the position opened: Binance, Bybit, OKX, Gate and Hyperliquid = 开仓以来已付资金费：Binance、Bybit、OKX、Gate、Hyperliquid
+Move order? = 修改挂单价格？
+Move = 改价
+Fill sound = 成交提示音
+Type a new price, Enter to move the order = 输入新价格，回车改单

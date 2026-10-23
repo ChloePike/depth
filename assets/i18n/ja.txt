@@ -344,6 +344,7 @@ sound.none = サウンドなし
 tr.drag_line = ドラッグで移動
 tr.move = 移動
 tr.cancel_action = キャンセル
+tr.cancel_order = 注文を取消
 tr.move_replace = この取引所は注文変更に非対応：取消してから新価格で再発注します
 tr.fill_px = この価格を注文パネルへ
 draw.position = ロング / ショートポジション

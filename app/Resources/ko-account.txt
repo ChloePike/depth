@@ -263,3 +263,7 @@ Funding paid since the position opened = 포지션 진입 이후 펀딩비
 Funding paid = 지불한 펀딩비
 since = 부터
 Funding paid since the position opened: Binance, Bybit, OKX, Gate and Hyperliquid = 포지션 진입 이후 지불한 펀딩비: Binance, Bybit, OKX, Gate, Hyperliquid
+Move order? = 주문 가격을 변경할까요?
+Move = 변경
+Fill sound = 체결 알림음
+Type a new price, Enter to move the order = 새 가격 입력 후 Enter로 변경

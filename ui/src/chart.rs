@@ -390,7 +390,8 @@ pub struct Chart {
     /// confirmation (what, label, from, to, where)
     #[serde(skip)] line_hot: Option<usize>,
     #[serde(skip)] line_drag: Option<usize>,
-    #[serde(skip)] pending_move: Option<(LineAct, String, f64, f64, Pos2)>,
+    /// a move (Some(new price)) or cancel (None) of an account line waiting for confirmation
+    #[serde(skip)] pending_move: Option<(LineAct, String, f64, Option<f64>, Pos2)>,
     /// requests for the app, drained each frame
     #[serde(skip)] pub actions: Vec<ChartAct>,
     /// set by the app: confirm before moving orders; keys present (order tools shown); account equity
@@ -1519,7 +1520,10 @@ impl Chart {
                 if x_hot { painter.rect_filled(xr.shrink(2.0), 2, l.col.gamma_multiply(0.25)); ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
                 let (c, d) = (xr.center(), 3.5);
                 for (a, b) in [(vec2(-d, -d), vec2(d, d)), (vec2(-d, d), vec2(d, -d))] { painter.line_segment([c + a, c + b], Stroke::new(1.3, l.col)); }
-                if x_hot && resp.clicked() { self.actions.push(ChartAct::Cancel(l.act.clone().unwrap())); }
+                if x_hot && resp.clicked() {
+                    let act = l.act.clone().unwrap();
+                    if self.confirm { self.pending_move = Some((act, format!("{} {}", l.tag, l.sub).trim().to_string(), l.price, None, xr.center())); } else { self.actions.push(ChartAct::Cancel(act)); }
+                }
             }
             painter.rect_filled(r1, egui::CornerRadius { nw: 3, sw: 3, ne: 0, se: 0 }, l.col);
             painter.rect_stroke(r1.union(r2), 3, Stroke::new(1.0, l.col), egui::StrokeKind::Inside);
@@ -1547,7 +1551,7 @@ impl Chart {
                     if resp.drag_stopped() {
                         if (y(np) - y(l.price)).abs() > 2.0 {
                             let act = l.act.clone().unwrap();
-                            if self.confirm && !matches!(act, LineAct::Preview(_)) { self.pending_move = Some((act, l.tag.clone(), l.price, np, p)); } else { self.actions.push(ChartAct::Move(act, np)); }
+                            if self.confirm && !matches!(act, LineAct::Preview(_)) { self.pending_move = Some((act, l.tag.clone(), l.price, Some(np), p)); } else { self.actions.push(ChartAct::Move(act, np)); }
                         }
                         self.line_drag = None;
                     }
@@ -1560,20 +1564,22 @@ impl Chart {
         }
         self.line_hot = line_hot;
         if let Some((act, tag, from, to, at)) = self.pending_move.clone() {
-            ghost(to, accent());
+            if let Some(to) = to { ghost(to, accent()); }
             let (mut open, mut done) = (true, None);
             egui::Popup::menu(&resp).id(ui.id().with("move_confirm")).at_position(at).open_bool(&mut open)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
-                ui.label(RichText::new(format!("{tag}:  {} → {}", fmt_px(from), fmt_px(to))).font(mono_s(12.5)).color(fg_strong()));
+                let what = match to { Some(to) => format!("{tag}:  {} → {}", fmt_px(from), fmt_px(to)), None => tag.clone() };
+                ui.label(RichText::new(what).font(mono_s(12.5)).color(fg_strong()));
                 // only Bybit / Binance orders are amended in place; elsewhere the order is cancelled and placed again
-                if matches!(act, LineAct::Order(..)) && !self.amends { kit::note(ui, t("tr.move_replace"), WARN); }
+                if to.is_some() && matches!(act, LineAct::Order(..)) && !self.amends { kit::note(ui, t("tr.move_replace"), WARN); }
                 ui.horizontal(|ui| {
-                    if kit::button(ui, t("tr.move"), kit::Look::Fill(accent()), kit::H, None, true).clicked() { done = Some(true); ui.close(); }
+                    let (ok, col) = if to.is_some() { (t("tr.move"), accent()) } else { (t("tr.cancel_order"), dn()) };
+                    if kit::button(ui, ok, kit::Look::Fill(col), kit::H, None, true).clicked() { done = Some(true); ui.close(); }
                     if kit::button(ui, t("tr.cancel_action"), kit::Look::Secondary, kit::H, None, true).clicked() { done = Some(false); ui.close(); }
                 });
             });
-            if done == Some(true) { self.actions.push(ChartAct::Move(act, to)); }
+            if done == Some(true) { self.actions.push(match to { Some(to) => ChartAct::Move(act, to), None => ChartAct::Cancel(act) }); }
             if !open || done.is_some() { self.pending_move = None; }
         }
 

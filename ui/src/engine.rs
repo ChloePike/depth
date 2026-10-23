@@ -64,9 +64,13 @@ pub struct Account {
     /// bumped when own fills were stored (the chart re-reads them from the db); (venue, symbol)
     /// pairs already back-filled over REST this session
     pub fills_ver: u64,
-    /// live fill pushes (fill sound + toast) and the newest one
+    /// live fills (fill sound + toast) and the newest one: pushed fills on Binance / Bybit, a
+    /// pushed position size change on the other venues
     pub fill_seq: u64,
-    pub last_fill: Option<trade::Fill>,
+    pub last_fill: Option<FillNote>,
+    /// when each venue's private stream last (re)subscribed: position pushes right after are its
+    /// snapshot, not fills
+    pub resync_ms: HashMap<Exchange, i64>,
     pub fills_done: std::collections::HashSet<(Exchange, String)>,
     pub transferring: bool,
     /// auto top-up rules per venue (persisted in settings.json) and the last time one fired
@@ -87,6 +91,10 @@ impl Account {
         if self.log.len() > 200 { self.log.pop_front(); }
     }
 }
+
+/// A fill for the toast: venue, symbol, side, size, price when the venue said it.
+#[derive(Clone, Debug)]
+pub struct FillNote { pub ex: Exchange, pub symbol: String, pub buy: bool, pub qty: f64, pub price: Option<f64> }
 
 /// One USDT perpetual for the symbol picker.
 #[derive(Clone, Debug)]
@@ -571,7 +579,7 @@ impl Engine {
                             let mut a = account.lock().unwrap();
                             for (ex, ev) in buf.drain(..) {
                                 match ev {
-                                    trade::AccEvent::Resync => resync.push(ex),
+                                    trade::AccEvent::Resync => { a.resync_ms.insert(ex, now_ms()); resync.push(ex); }
                                     trade::AccEvent::SpotDirty => { spot_dirty.insert(ex); }
                                     trade::AccEvent::BalanceDirty => {
                                         dirty.insert(ex);
@@ -1450,6 +1458,13 @@ fn apply(a: &mut Account, ex: Exchange, ev: trade::AccEvent) -> bool {
             let same = |x: &Position| x.ex == ex && x.symbol == p.symbol && (one_way || x.side == p.side);
             let old = a.positions.iter().find(|x| same(x)).cloned();
             a.positions.retain(|x| !same(x));
+            // venues without a fill push: a size change is a fill (long = +, short = -)
+            let signed = |x: &Position| if x.side == depth::Side::Buy { x.qty } else { -x.qty };
+            let d = signed(&p) - old.as_ref().map_or(0.0, signed);
+            if !matches!(ex, Exchange::Binance | Exchange::Bybit) && d.abs() > 1e-12 && a.resync_ms.get(&ex).is_some_and(|t| now_ms() - t > 5_000) {
+                a.fill_seq += 1;
+                a.last_fill = Some(FillNote { ex, symbol: p.symbol.clone(), buy: d > 0.0, qty: d.abs(), price: None });
+            }
             if p.qty > 0.0 {
                 // fields a push leaves out keep their last known value, except the liquidation price
                 // and margin of a position whose size or entry changed: those belonged to the old
@@ -1507,7 +1522,13 @@ fn apply(a: &mut Account, ex: Exchange, ev: trade::AccEvent) -> bool {
         }
         E::TpSl(t) => { a.tpsl.retain(|x| !(x.ex == ex && x.id == t.id)); a.tpsl.push(t); true }
         E::TpSlDone { id } => { a.tpsl.retain(|x| !(x.ex == ex && x.id == id)); true }
-        E::Fill(f) => { depth::db::fills_put(std::slice::from_ref(&f)); a.fills_ver += 1; a.fill_seq += 1; a.last_fill = Some(f); true }
+        E::Fill(f) => {
+            depth::db::fills_put(std::slice::from_ref(&f));
+            a.fills_ver += 1;
+            a.fill_seq += 1;
+            a.last_fill = Some(FillNote { ex, symbol: f.symbol, buy: f.side == depth::Side::Buy, qty: f.qty, price: Some(f.price) });
+            true
+        }
         E::OptPos(p) => {
             a.opts.retain(|x| !(x.ex == ex && x.symbol == p.symbol));
             if p.qty > 0.0 { a.opts.push(p); }

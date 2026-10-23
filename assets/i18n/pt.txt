@@ -344,6 +344,7 @@ sound.none = Sem som
 tr.drag_line = Arraste para mover
 tr.move = Mover
 tr.cancel_action = Cancelar
+tr.cancel_order = Cancelar ordem
 tr.move_replace = Esta corretora não altera ordens: cancela e coloca de novo
 tr.fill_px = Usar este preço na ordem
 draw.position = Posição long / short

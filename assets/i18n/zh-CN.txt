@@ -377,6 +377,7 @@ sound.none = 无声
 tr.drag_line = 拖动改价
 tr.move = 确认改价
 tr.cancel_action = 取消
+tr.cancel_order = 撤单
 tr.move_replace = 这家交易所不支持直接改单：会先撤单，再按新价重新下单
 tr.fill_px = 把这个价格填入下单面板
 draw.position = 多空仓位工具

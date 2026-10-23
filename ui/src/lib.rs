@@ -1034,9 +1034,9 @@ impl App {
                 // fill_seq counts live pushes only (REST back-fills bypass it): every bump is a new fill
                 if acc.fill_seq != self.fill_seen {
                     if let Some(f) = &acc.last_fill {
-                        chart::play_sound("depth:bell");
-                        let buy = f.side == depth::Side::Buy;
-                        self.chart.toast(format!("{:?} {} {} {}@{}", f.ex, f.symbol, if buy { t("tr.buy") } else { t("tr.sell") }, fmt_qty(f.qty), fmt_px(f.price)), if buy { up() } else { dn() });
+                        chart::play_sound(&self.prefs.fill_sound);
+                        let px = f.price.map(|x| format!("@{}", fmt_px(x))).unwrap_or_default();
+                        self.chart.toast(format!("{:?} {} {} {}{px}", f.ex, f.symbol, if f.buy { t("tr.buy") } else { t("tr.sell") }, fmt_qty(f.qty)), if f.buy { up() } else { dn() });
                     }
                     self.fill_seen = acc.fill_seq;
                 }

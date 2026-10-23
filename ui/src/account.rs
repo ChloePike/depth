@@ -29,7 +29,7 @@ impl Tab {
 }
 
 /// A destructive position action waiting for confirmation.
-enum PosAct { Market(Value, f64), Limit(Value, f64, f64), Reverse(Value), CloseAll(Vec<Value>) }
+enum PosAct { Market(Value, f64), Limit(Value, f64, f64), Reverse(Value), CloseAll(Vec<Value>), Move(Value, f64) }
 
 /// Something a table cell or menu asked for, run after the frame's tables are drawn.
 enum Act { Op(Value), Goto(String), Copy(String), Confirm(PosAct), TpSl(Value), Share(Value), Prefill(Value), Transfer(String), Keys, Insure(Value) }
@@ -324,7 +324,7 @@ fn cell_field(ui: &mut Ui, r: Rect, text: &mut String, id: impl std::hash::Hash 
     ui.painter().rect(r, kit::rad(), well(), egui::Stroke::new(1.0, lerp(line(), accent(), f)), egui::StrokeKind::Inside);
     let resp = ui.put(r.shrink2(egui::vec2(8.0, 2.0)), egui::TextEdit::singleline(text).id(eid).frame(egui::Frame::NONE).font(mono_m(12.5)).text_color(fg_strong())
         .horizontal_align(egui::Align::RIGHT).vertical_align(egui::Align::Center));
-    if resp.changed() && !text.is_ascii() { *text = kit::ascii_num(text); }
+    if resp.changed() { *text = kit::ascii_num(text); }
     resp
 }
 
@@ -807,10 +807,15 @@ impl AccountPanel {
                     (l("then open").into(), format!("{other} {}", unit(p, f(&p["qty"]))), if s(&p["side"]) == "long" { dn() } else { up() }),
                 ], l("Two market orders; if the second fails you are left flat."))
             }
+            PosAct::Move(o, x) => (l("Move order?"), l("Move"), Some(o), vec![
+                (l("Side").into(), side_name(s(&o["side"])).into(), if s(&o["side"]) == "buy" { up() } else { dn() }), (l("Size").into(), unit(o, f(&o["qty"]) - f(&o["filled"])), fg_strong()),
+                (l("Price").into(), format!("{} → {}", fmt_px(f(&o["price"])), fmt_px(*x)), fg_strong()),
+            ], ""),
             PosAct::CloseAll(ps) => (l("Close all positions at market?"), l("Close All"), None,
                 ps.iter().map(|p| (format!("{} {} {}", s(&p["ex"]), s(&p["symbol"]), ls(p)), unit(p, f(&p["qty"])), side_col(p))).collect(),
                 l("A market order fills against the book; slippage applies.")),
         };
+        let move_ = matches!(a, PosAct::Move(..));
         let mut done = None;
         let m = dialog("pos_confirm").show(ui.ctx(), |ui| {
             ui.set_width(360.0);
@@ -826,7 +831,7 @@ impl AccountPanel {
             for (k, v, c) in rows { kit::kv(ui, &k, v, c); }
             if !warn.is_empty() { ui.add_space(8.0); kit::note(ui, warn, mu()); }
             ui.add_space(12.0);
-            let (c, o) = dialog_buttons(ui, l("Cancel"), button_t, dn(), true);
+            let (c, o) = dialog_buttons(ui, l("Cancel"), button_t, if move_ { accent() } else { dn() }, true);
             if c || ui.input(|i| i.key_pressed(egui::Key::Escape)) { done = Some(false); }
             if o { done = Some(true); }
         });
@@ -840,6 +845,7 @@ impl AccountPanel {
             PosAct::Limit(p, x, q) => vec![close(&p, q, Some(x))],
             PosAct::Reverse(p) => vec![json!({"op": "reverse_position", "ex": p["ex"], "symbol": p["symbol"], "side": p["side"]})],
             PosAct::CloseAll(ps) => ps.iter().map(|p| close(p, f(&p["qty"]), None)).collect(),
+            PosAct::Move(o, x) => vec![json!({"op": "move_order", "ex": o["ex"], "id": o["id"], "price": x})],
         };
         for v in ops { if let Err(e) = call(v) { self.error = Some(e); } }
     }
@@ -944,6 +950,7 @@ impl AccountPanel {
             });
         }
         let px_map = &mut self.order_px;
+        let confirm = st["prefs"]["confirm"].as_bool().unwrap_or(true);
         table(ui, "orders", &cols, rows, 36.0, l("No open orders"), Some(&mut self.sort_orders), Some(&mut self.sel_orders), &mut |ui, part| match part {
             Part::Cell(i, r, o) => match i {
                 0 => { txt(ui, r, time(o["ts"].as_i64().unwrap_or(0)), mono(12.0), mu(), false); }
@@ -976,7 +983,9 @@ impl AccountPanel {
                     if fr.changed() { px_map.insert(key.clone(), t.clone()); }
                     if fr.lost_focus() {
                         if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            if let Some(x) = parse(&t).filter(|x| *x > 0.0 && (x - f(&o["price"])).abs() > 1e-12) { acts.push(Act::Op(json!({"op": "move_order", "ex": o["ex"], "id": o["id"], "price": x}))); }
+                            if let Some(x) = parse(&t).filter(|x| *x > 0.0 && (x - f(&o["price"])).abs() > 1e-12) {
+                                acts.push(if confirm { Act::Confirm(PosAct::Move(o.clone(), x)) } else { Act::Op(json!({"op": "move_order", "ex": o["ex"], "id": o["id"], "price": x})) });
+                            }
                         }
                         px_map.remove(&key);
                     }

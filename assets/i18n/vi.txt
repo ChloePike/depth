@@ -344,6 +344,7 @@ sound.none = Không âm thanh
 tr.drag_line = Kéo để di chuyển
 tr.move = Di chuyển
 tr.cancel_action = Hủy
+tr.cancel_order = Hủy lệnh
 tr.move_replace = Sàn này không sửa lệnh: hủy rồi đặt lại ở giá mới
 tr.fill_px = Dùng giá này trong bảng lệnh
 draw.position = Vị thế long / short

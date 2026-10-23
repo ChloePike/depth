@@ -45,11 +45,13 @@ pub struct Prefs {
     /// terminal style: pure black, hairlines between panels instead of gutters (choosing it also
     /// sets the amber accent, square corners and the dark theme)
     pub terminal: bool,
+    /// sound of a fill on any venue (chart::sounds id; "none" = silent)
+    pub fill_sound: String,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false }
+        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into() }
     }
 }
 
@@ -636,6 +638,17 @@ fn trading(ui: &mut Ui, st: &Value, call: &mut Call) {
     });
     section(ui, l("Orders"), l("Shows an order summary before it is sent."), |ui| {
         row(ui, l("Confirm before sending orders"), |ui| { kit::switch(ui, &mut p.confirm); });
+        row_sep(ui);
+        row(ui, l("Fill sound"), |ui| {
+            let sounds = super::chart::sounds();
+            let name = sounds.iter().find(|x| x.0 == p.fill_sound).map_or(p.fill_sound.clone(), |x| x.1.clone());
+            egui::ComboBox::from_id_salt("set.fill_sound").icon(chevron).width(200.0).selected_text(name).height(320.0).show_ui(ui, |ui| {
+                // choosing one plays it
+                for (id, name) in &sounds {
+                    if ui.selectable_label(*id == p.fill_sound, name).clicked() { super::chart::play_sound(id); p.fill_sound = id.clone(); }
+                }
+            });
+        });
     });
     section(ui, l("Fees (your tier)"), l("Taker / maker in percent per fill. Used for fee estimates and routing; enter your VIP tier's rates."), |ui| {
         for (i, k) in tradable.iter().enumerate() {

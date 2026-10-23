@@ -263,3 +263,7 @@ Funding paid since the position opened = Funding pagado desde la apertura de la 
 Funding paid = Funding pagado
 since = desde
 Funding paid since the position opened: Binance, Bybit, OKX, Gate and Hyperliquid = Funding pagado desde la apertura: Binance, Bybit, OKX, Gate e Hyperliquid
+Move order? = ¿Mover la orden?
+Move = Mover
+Fill sound = Sonido de ejecución
+Type a new price, Enter to move the order = Escribe un precio nuevo, Enter mueve la orden

@@ -70,17 +70,21 @@ pub fn field(ui: &mut Ui, label: &str, text: &mut String, unit: &str, id: impl s
     let edit = Rect::from_min_max(egui::pos2(rect.left() + lw + 18.0, rect.top() + 4.0), egui::pos2(rect.right() - uw - 18.0, rect.bottom() - 4.0));
     let r = ui.put(edit, egui::TextEdit::singleline(text).id(eid).frame(egui::Frame::NONE).font(mono_m(13.5)).text_color(fg_strong())
         .horizontal_align(egui::Align::RIGHT).vertical_align(egui::Align::Center));
-    // numbers only: a Chinese / Japanese IME types 。．，and full-width digits
-    if r.changed() && text.chars().any(|c| !c.is_ascii()) { *text = ascii_num(text); }
+    if r.changed() { *text = ascii_num(text); }
     let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
     (r, enter)
 }
 
-/// Full-width punctuation and digits from an IME as ASCII ("１２。５" -> "12.5").
+/// What a number field keeps of typed text: digits, one decimal point and thousands commas;
+/// an IME's full-width digits and 。．，count as their ASCII forms ("１２。５" -> "12.5", "..1.2" -> ".12").
 pub fn ascii_num(s: &str) -> String {
-    s.chars().map(|c| match c {
-        '。' | '．' | '｡' => '.', '，' | '、' => ',', '－' | '—' => '-', '＋' => '+',
-        '０'..='９' => char::from(b'0' + (c as u32 - '０' as u32) as u8), c => c,
+    let mut dot = false;
+    s.chars().filter_map(|c| match c {
+        '0'..='9' => Some(c),
+        '０'..='９' => Some(char::from(b'0' + (c as u32 - '０' as u32) as u8)),
+        '.' | '。' | '．' | '｡' if !dot => { dot = true; Some('.') }
+        ',' | '，' => Some(','),
+        _ => None,
     }).collect()
 }
 
@@ -202,4 +206,4 @@ pub fn th(p: &egui::Painter, pos: egui::Pos2, align: Align2, text: &str, sorted:
 
 #[cfg(test)]
 #[test]
-fn ascii_num_maps_ime_input() { assert_eq!(ascii_num("１２。５"), "12.5"); assert_eq!(ascii_num("1，000．5"), "1,000.5"); }
+fn ascii_num_maps_ime_input() { assert_eq!(ascii_num("１２。５"), "12.5"); assert_eq!(ascii_num("1，000．5"), "1,000.5"); assert_eq!(ascii_num("....147.77"), ".14777"); assert_eq!(ascii_num("12a.3x"), "12.3"); }

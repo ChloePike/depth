@@ -344,6 +344,7 @@ sound.none = Kein Ton
 tr.drag_line = Ziehen zum Verschieben
 tr.move = Verschieben
 tr.cancel_action = Abbrechen
+tr.cancel_order = Order stornieren
 tr.move_replace = Diese Börse kann nicht ändern: Order wird storniert und neu platziert
 tr.fill_px = Preis ins Orderfeld übernehmen
 draw.position = Long-/Short-Position

@@ -378,6 +378,7 @@ sound.none = No sound
 tr.drag_line = Drag to move
 tr.move = Move
 tr.cancel_action = Cancel
+tr.cancel_order = Cancel order
 tr.move_replace = This venue has no in-place amend: the order is cancelled, then placed again at the new price
 tr.fill_px = Use this price in the order panel
 draw.position = Long / short position

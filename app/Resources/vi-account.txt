@@ -263,3 +263,7 @@ Funding paid since the position opened = Funding đã trả từ khi mở vị t
 Funding paid = Funding đã trả
 since = từ
 Funding paid since the position opened: Binance, Bybit, OKX, Gate and Hyperliquid = Funding đã trả từ khi mở vị thế: Binance, Bybit, OKX, Gate và Hyperliquid
+Move order? = Đổi giá lệnh?
+Move = Đổi giá
+Fill sound = Âm báo khớp lệnh
+Type a new price, Enter to move the order = Nhập giá mới, Enter để đổi lệnh

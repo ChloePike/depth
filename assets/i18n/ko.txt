@@ -344,6 +344,7 @@ sound.none = 소리 없음
 tr.drag_line = 드래그해서 이동
 tr.move = 이동
 tr.cancel_action = 취소
+tr.cancel_order = 주문 취소
 tr.move_replace = 이 거래소는 정정 미지원: 취소 후 새 가격으로 다시 주문합니다
 tr.fill_px = 이 가격을 주문 패널에 입력
 draw.position = 롱 / 숏 포지션

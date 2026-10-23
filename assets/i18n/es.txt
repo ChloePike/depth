@@ -344,6 +344,7 @@ sound.none = Sin sonido
 tr.drag_line = Arrastra para mover
 tr.move = Mover
 tr.cancel_action = Cancelar
+tr.cancel_order = Cancelar orden
 tr.move_replace = Este exchange no modifica órdenes: se cancela y se coloca de nuevo
 tr.fill_px = Usar este precio en la orden
 draw.position = Posición larga / corta
