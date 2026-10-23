@@ -130,8 +130,11 @@ impl Default for Ind { fn default() -> Self { Ind { rsi: 14, macd: [12, 26, 9], 
 
 /// A price line from the account: entry of a position or a resting order.
 /// Drawn dashed with a tag at the left edge ("tag | sub") and the price on the axis.
+/// Banner on top of the chart for 8 s (red dot when `err`).
+impl Chart { pub fn toast(&mut self, msg: String, err: bool) { self.toast = Some((msg, std::time::Instant::now() + std::time::Duration::from_secs(8), err)); } }
+
 #[derive(Clone)]
-pub struct ChartLine { pub price: f64, pub tag: String, pub sub: String, pub col: Color32, pub act: Option<LineAct> }
+pub struct ChartLine { pub price: f64, pub ex: Option<Exchange>, pub tag: String, pub sub: String, pub col: Color32, pub act: Option<LineAct> }
 
 /// What dragging an account line changes: a resting limit order, a TP / SL trigger (venue, id), or a
 /// field of the order being typed in the panel.
@@ -140,7 +143,7 @@ pub enum LineAct { Order(Exchange, String), TpSl(Exchange, String), Preview(&'st
 
 /// Requests from the chart to the app: move an order / trigger, or put a price into the order panel.
 #[derive(Clone, Debug)]
-pub enum ChartAct { Move(LineAct, f64), Fill(f64) }
+pub enum ChartAct { Move(LineAct, f64), Cancel(LineAct), Fill(f64) }
 
 /// One moving average line: period, color (0xRRGGBB), exponential instead of simple, shown.
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -380,7 +383,7 @@ pub struct Chart {
     /// alerts that fired since the host last asked: (title, body)
     #[serde(skip)] pub fired: Vec<(String, String)>,
     /// banner of the last alert and until when it shows
-    #[serde(skip)] toast: Option<(String, std::time::Instant)>,
+    #[serde(skip)] toast: Option<(String, std::time::Instant, bool)>,
     /// one cell of a multi-chart layout: the legend names the interval
     #[serde(skip)] pub multi: bool,
     /// account line under the pointer last frame, the one being dragged, and a move awaiting
@@ -1103,8 +1106,6 @@ impl Chart {
             }
         } else { None };
         let mark_ax = mark.filter(|m| *m > lo && *m < hi).map(|mk| place(Rect::from_min_size(pos2(main.right() + 2.0, y(mk) - 9.0), vec2(AXIS_W - 4.0, 18.0)), &mut taken));
-        let line_ax: Vec<Option<Rect>> = self.lines.iter().map(|l| (live && l.price > lo && l.price < hi)
-            .then(|| place(Rect::from_min_size(pos2(main.right() + 2.0, y(l.price) - 9.0), vec2(AXIS_W - 4.0, 18.0)), &mut taken))).collect();
 
         // volume profile of the visible range (1m bars): histogram on the right, POC, value area,
         // high-volume nodes as support / resistance, and closes through them as breakouts
@@ -1154,18 +1155,13 @@ impl Chart {
                 clip.hline(main.left()..=main.right(), y(l.px), Stroke::new(1.0, col.linear_multiply(0.35 + 0.4 * l.score as f32)));
                 tagged.push((l.px, k.to_string(), col));
             }
-            // TradingView-style: the price sits in a tag on the axis, the name small at the plot's left
-            // edge, so neither covers the candles
+            // name@price small at the plot's left edge (the account line labels start right of these)
             for (px, tag, col) in tagged {
                 if !(px > lo && px < hi) { continue; }
-                let g = painter.layout_no_wrap(tag, prop(9.5), col);
+                let g = painter.layout_no_wrap(format!("{tag}@{}", fmt_px(px)), prop(9.5), col);
                 let r = Rect::from_min_size(pos2(main.left() + 4.0, y(px) - 13.0), vec2(g.size().x + 6.0, 12.0));
                 painter.rect_filled(r, 2, label_bg().gamma_multiply(0.8));
                 painter.galley(r.center() - g.size() / 2.0, g, col);
-                if let Some(ax) = try_place(Rect::from_min_size(pos2(main.right() + 2.0, y(px) - 8.0), vec2(AXIS_W - 4.0, 16.0)), &mut taken) {
-                    painter.rect_filled(ax, 2, col.linear_multiply(0.85));
-                    painter.text(ax.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(px), mono_m(11.0), Color32::BLACK);
-                }
             }
         }
         if let (true, Some(p)) = (self.breakouts, prof.as_ref()) {
@@ -1181,21 +1177,17 @@ impl Chart {
                 // a failed break up traps longs (bearish), a failed break down traps shorts: color by that
                 let col = if is_up != failed { up() } else { dn() };
                 // TradingView-style level: a thin line (dashed when the break failed), a small solid
-                // label at the right edge of the plot and the price on the axis; nothing over the candles
+                // name@price label at the right edge of the plot; nothing over the candles
                 let ly = y(l.px);
                 let clip = painter.with_clip_rect(main_plot);
                 let st = Stroke::new(1.0, col.gamma_multiply(0.75));
                 if failed { clip.extend(egui::Shape::dashed_line(&[pos2(main.left(), ly), pos2(main.right(), ly)], st, 5.0, 4.0)); }
                 else { clip.hline(main.left()..=main.right(), ly, st); }
                 let key = match (is_up, failed) { (true, false) => "chart.broke_up", (false, false) => "chart.broke_down", (true, true) => "chart.failed_up", (false, true) => "chart.failed_down" };
-                let g = painter.layout_no_wrap(t(key).to_string(), prop_s(10.5), Color32::WHITE);
+                let g = painter.layout_no_wrap(format!("{}@{}", t(key), fmt_px(l.px)), prop_s(10.5), Color32::WHITE);
                 let r = place(Rect::from_min_size(pos2(main.right() - g.size().x - 14.0, ly - 9.0), g.size() + vec2(10.0, 4.0)), &mut taken);
                 painter.rect_filled(r, 2, col.gamma_multiply(0.9));
                 painter.galley(r.min + vec2(5.0, 2.0), g, Color32::WHITE);
-                if let Some(ax) = try_place(Rect::from_min_size(pos2(main.right() + 2.0, ly - 8.0), vec2(AXIS_W - 4.0, 16.0)), &mut taken) {
-                    painter.rect_filled(ax, 2, col.gamma_multiply(0.9));
-                    painter.text(ax.left_center() + vec2(5.0, 0.0), Align2::LEFT_CENTER, fmt_px(l.px), mono_m(10.5), Color32::WHITE);
-                }
             }
         }
         // expected move: EWMA volatility of 1m returns, widened with sqrt(time) over the next 30 bars
@@ -1510,20 +1502,32 @@ impl Chart {
             dashed(&painter, main.left(), main.right(), ly, l.col.linear_multiply(0.8));
             let g1 = painter.layout_no_wrap(l.tag.clone(), prop(11.0), Color32::WHITE);
             let g2 = painter.layout_no_wrap(l.sub.clone(), mono(11.0), l.col);
-            let x0 = main.left() + 6.0;
-            let both = place(Rect::from_min_size(pos2(x0, ly - 10.0), vec2(g1.size().x + g2.size().x + 28.0, 20.0)), &mut taken);
-            let r1 = Rect::from_min_size(both.min, vec2(g1.size().x + 14.0, 20.0));
-            let r2 = Rect::from_min_size(pos2(r1.right(), both.top()), vec2(g2.size().x + 14.0, 20.0));
+            // right of the POC / VAH / S tags at the left edge, so the two never stack
+            let x0 = main.left() + 80.0;
+            // venue logo in front of the tag (the tag may be empty: logo only)
+            let lw = if l.ex.is_some() { if l.tag.is_empty() { 14.0 } else { 18.0 } } else { 0.0 };
+            let w1 = lw + g1.size().x + if l.tag.is_empty() { 8.0 } else { 14.0 };
+            // resting orders and TP / SL get a cancel box at the right end
+            let xw = if matches!(l.act, Some(LineAct::Order(..) | LineAct::TpSl(..))) { 20.0 } else { 0.0 };
+            let both = place(Rect::from_min_size(pos2(x0, ly - 10.0), vec2(w1 + g2.size().x + 14.0 + xw, 20.0)), &mut taken);
+            let r1 = Rect::from_min_size(both.min, vec2(w1, 20.0));
+            let r2 = Rect::from_min_size(pos2(r1.right(), both.top()), vec2(g2.size().x + 14.0 + xw, 20.0));
             painter.rect_filled(r1.union(r2), 3, label_bg());
+            let xr = Rect::from_min_max(pos2(r2.right() - xw, r2.top()), r2.max);
+            let x_hot = xw > 0.0 && hover_p.is_some_and(|p| xr.contains(p));
+            if xw > 0.0 {
+                if x_hot { painter.rect_filled(xr.shrink(2.0), 2, l.col.gamma_multiply(0.25)); ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
+                let (c, d) = (xr.center(), 3.5);
+                for (a, b) in [(vec2(-d, -d), vec2(d, d)), (vec2(-d, d), vec2(d, -d))] { painter.line_segment([c + a, c + b], Stroke::new(1.3, l.col)); }
+                if x_hot && resp.clicked() { self.actions.push(ChartAct::Cancel(l.act.clone().unwrap())); }
+            }
             painter.rect_filled(r1, egui::CornerRadius { nw: 3, sw: 3, ne: 0, se: 0 }, l.col);
             painter.rect_stroke(r1.union(r2), 3, Stroke::new(1.0, l.col), egui::StrokeKind::Inside);
-            painter.galley(r1.center() - g1.size() / 2.0, g1, Color32::WHITE);
-            painter.galley(r2.center() - g2.size() / 2.0, g2, l.col);
-            let ax = line_ax.get(li).copied().flatten().unwrap_or_else(|| Rect::from_min_size(pos2(main.right() + 2.0, ly - 9.0), vec2(AXIS_W - 4.0, 18.0)));
-            painter.rect_filled(ax, 3, label_bg());
-            painter.rect_stroke(ax, 3, Stroke::new(1.0, l.col), egui::StrokeKind::Inside);
-            painter.text(ax.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(l.price), mono_m(11.0), l.col);
-            if l.act.is_some() && hover_p.is_some_and(|p| both.contains(p)) { line_hot = Some(li); }
+            if let Some(e) = l.ex { icon(&painter, e, Rect::from_center_size(pos2(r1.left() + 4.0 + 7.0, r1.center().y), vec2(14.0, 14.0)), false); }
+            painter.galley(pos2(r1.left() + (if l.ex.is_some() { 4.0 + lw } else { 7.0 }), r1.center().y - g1.size().y / 2.0), g1, Color32::WHITE);
+            painter.galley(pos2(r2.left() + 7.0, r2.center().y - g2.size().y / 2.0), g2, l.col);
+            // the price is in the label (@price): no axis tag, they piled up on the right
+            if l.act.is_some() && !x_hot && hover_p.is_some_and(|p| both.contains(p)) { line_hot = Some(li); }
         }
         // dragging an order / TP / SL line: a ghost follows the pointer; release moves it (after a
         // confirmation when order confirmations are on)
@@ -1738,7 +1742,7 @@ impl Chart {
             painter.text(pos2(main.left() + 6.0, main.top() + 80.0), Align2::LEFT_CENTER, t("chart.loading"), prop_m(12.0), WARN);
         }
         self.replay_ui(ui, &resp, &painter, main_plot, &fr, hover.map(|_| bars[hi_idx].t), next_t, now);
-        if let Some((msg, until)) = self.toast.clone() {
+        if let Some((msg, until, err)) = self.toast.clone() {
             let left = until.saturating_duration_since(std::time::Instant::now());
             if !left.is_zero() {
                 // slides down and fades in over 250 ms, fades out over the last 400 ms
@@ -1750,7 +1754,7 @@ impl Chart {
                 let r = Rect::from_center_size(pos2(main_plot.center().x, main_plot.top() + 6.0 + 14.0 * ease), g.size() + vec2(42.0, 20.0));
                 painter.add(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(((if light() { 40.0 } else { 115.0 }) * ease) as u8) }.as_shape(r, 6));
                 painter.rect(r, 6, popup_bg().gamma_multiply(ease), Stroke::new(1.0, line().gamma_multiply(ease)), egui::StrokeKind::Inside);
-                painter.circle_filled(pos2(r.left() + 16.0, r.center().y), 4.0, accent().gamma_multiply(ease));
+                painter.circle_filled(pos2(r.left() + 16.0, r.center().y), 4.0, if err { dn() } else { accent() }.gamma_multiply(ease));
                 painter.galley(pos2(r.left() + 30.0, r.center().y - g.size().y / 2.0), g, fg_strong().gamma_multiply(ease));
                 if t < 1.0 { ui.ctx().request_repaint(); } else { ui.ctx().request_repaint_after(left.saturating_sub(std::time::Duration::from_millis(400))); }
             } else { self.toast = None; }
@@ -2365,7 +2369,7 @@ impl Chart {
                 let title = format!("{base} {} {}", if p >= lv { "↑" } else { "↓" }, fmt_px(lv));
                 let body = format!("{} {}", t("alert.crossed"), fmt_px(p));
                 play_sound(&sound);
-                self.toast = Some((format!("⏰ {title} · {body}"), std::time::Instant::now() + std::time::Duration::from_secs(8)));
+                self.toast = Some((format!("⏰ {title} · {body}"), std::time::Instant::now() + std::time::Duration::from_secs(8), false));
                 self.fired.push((title, body));
             }
         }

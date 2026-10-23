@@ -245,6 +245,8 @@ pub struct App {
     others: Vec<(usize, chart::Chart)>,
     /// (symbol, account fills version) the chart's own fills were read from the db for
     fills_key: (String, u64),
+    /// time of the newest trade log entry already toasted
+    log_seen: i64,
     /// egui ports of the native panels: their state document (when built, stale) and the order panel
     st: (std::sync::Arc<serde_json::Value>, Instant, bool),
     order: order::OrderPanel,
@@ -321,7 +323,7 @@ impl App {
             shot: env("T1_SHOT").map(|p| (p, env("T1_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(30.0))),
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
             route: st.route.clone().unwrap_or_default(), pending_base: None, pending_mode: None, pending_restart: false, book_w: 0.0,
-            layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(), fills_key: Default::default(),
+            layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(), fills_key: Default::default(), log_seen: now_ms(),
             st: (Default::default(), Instant::now(), true), order: Default::default(), hot_trade: vec![], venue_toggle: None, order_panel: st.order_panel.unwrap_or(true), top: Default::default(), venue_pages: Default::default(),
             account: Default::default(),
         }
@@ -799,6 +801,15 @@ impl App {
                     if let Some(o) = o { self.eng.replace_order(&o, px, ctx); }
                 }
                 chart::ChartAct::Move(chart::LineAct::Preview(field), px) => self.order.set_preview(field, px),
+                chart::ChartAct::Cancel(chart::LineAct::Order(ex, id)) => {
+                    let o = self.eng.account.lock().unwrap().orders.iter().find(|o| o.ex == ex && o.id == id).cloned();
+                    if let Some(o) = o { self.eng.cancel(&o, ctx); }
+                }
+                chart::ChartAct::Cancel(chart::LineAct::TpSl(ex, id)) => {
+                    let x = self.eng.account.lock().unwrap().tpsl.iter().find(|x| x.ex == ex && x.id == id).cloned();
+                    if let Some(x) = x { self.eng.cancel_tpsl(&x, ctx); }
+                }
+                chart::ChartAct::Cancel(_) => {}
                 chart::ChartAct::Move(chart::LineAct::TpSl(ex, id), px) => {
                     let mut acc = self.eng.account.lock().unwrap();
                     let Some(tp) = acc.tpsl.iter().find(|x| x.ex == ex && x.id == id).cloned() else { continue };
@@ -1013,33 +1024,38 @@ impl App {
                     self.chart.fills = depth::db::fills(&sym, now_ms() - 30 * 86_400_000);
                 }
                 let acc = self.eng.account.lock().unwrap();
+                // failed orders / cancels / moves: toast on the chart (the full line stays in Account > Log)
+                if let Some((ts, m, _)) = acc.log.iter().rev().take_while(|(ts, ..)| *ts > self.log_seen).find(|(_, _, ok)| !ok) { self.chart.toast(m.trim_start_matches("FAIL ").to_string(), true); self.log_seen = *ts; }
+                if let Some((ts, ..)) = acc.log.back() { self.log_seen = self.log_seen.max(*ts); }
                 let mut lines: Vec<chart::ChartLine> = acc.positions.iter().filter(|p| p.symbol == sym).map(|p| chart::ChartLine {
-                    price: p.entry, col: if p.side == depth::Side::Buy { up() } else { dn() },
-                    tag: format!("{:?} {} {}", p.ex, if p.side == depth::Side::Buy { t("tr.long_s") } else { t("tr.short_s") }, fmt_qty(p.qty)),
-                    sub: format!("{:+.2}", p.upnl), act: None,
+                    price: p.entry, ex: Some(p.ex), col: if p.side == depth::Side::Buy { up() } else { dn() },
+                    tag: if p.side == depth::Side::Buy { t("tr.long_s") } else { t("tr.short_s") }.to_string(),
+                    sub: format!("{}@{} · {:+.2}", fmt_qty(p.qty), fmt_px(p.entry), p.upnl), act: None,
                 }).collect();
                 lines.extend(acc.orders.iter().filter(|o| o.symbol == sym && o.price > 0.0).map(|o| chart::ChartLine {
                     price: o.price, col: if o.side == depth::Side::Buy { up() } else { dn() }.linear_multiply(0.75),
-                    tag: format!("{:?} {}", o.ex, o.kind), sub: format!("{} {}", if o.side == depth::Side::Buy { t("tr.buy") } else { t("tr.sell") }, fmt_qty(o.qty - o.filled)),
+                    // logo + size@price; the order type only when it is not a plain limit
+                    ex: Some(o.ex), tag: if o.kind.eq_ignore_ascii_case("limit") { String::new() } else { o.kind.clone() },
+                    sub: format!("{}{}@{}", if o.side == depth::Side::Buy { "+" } else { "-" }, fmt_qty(o.qty - o.filled), fmt_px(o.price)),
                     // only plain limit orders are dragged: a stop or post-only order would come back as something else
                     act: o.kind.eq_ignore_ascii_case("limit").then(|| chart::LineAct::Order(o.ex, o.id.clone())),
                 }));
                 // liquidation price of each position (none on Binance Portfolio Margin: account-level uniMMR)
                 lines.extend(acc.positions.iter().filter(|p| p.symbol == sym).filter_map(|p| p.liq.filter(|l| *l > 0.0).map(|l| chart::ChartLine {
-                    price: l, col: theme::WARN,
-                    tag: format!("{:?} Liq.", p.ex), sub: format!("{} {}", if p.side == depth::Side::Buy { t("tr.long_s") } else { t("tr.short_s") }, fmt_qty(p.qty)), act: None,
+                    price: l, ex: Some(p.ex), col: theme::WARN,
+                    tag: "Liq.".into(), sub: format!("@{}", fmt_px(l)), act: None,
                 })));
                 // take-profit / stop-loss triggers
                 lines.extend(acc.tpsl.iter().filter(|x| x.symbol == sym).map(|x| chart::ChartLine {
-                    price: x.trigger_px, col: if x.take_profit { up() } else { dn() }.linear_multiply(0.8),
-                    tag: format!("{:?} {}", x.ex, if x.take_profit { "TP" } else { "SL" }),
-                    sub: x.qty.map(fmt_qty).unwrap_or_else(|| t("tr.whole").to_string()),
+                    price: x.trigger_px, ex: Some(x.ex), col: if x.take_profit { up() } else { dn() }.linear_multiply(0.8),
+                    tag: if x.take_profit { "TP" } else { "SL" }.into(),
+                    sub: format!("{}@{}", x.qty.map(fmt_qty).unwrap_or_else(|| t("tr.whole").to_string()), fmt_px(x.trigger_px)),
                     act: Some(chart::LineAct::TpSl(x.ex, x.id.clone())),
                 }));
                 // the order being typed in the panel (perp), draggable to change its price
                 if self.mode == Market::Perp && self.order_panel {
                     lines.extend(self.order.preview.iter().map(|(px, field, tag, sub, col)| chart::ChartLine {
-                        price: *px, col: *col, tag: tag.to_string(), sub: sub.clone(), act: Some(chart::LineAct::Preview(field)),
+                        price: *px, ex: None, col: *col, tag: tag.to_string(), sub: sub.clone(), act: Some(chart::LineAct::Preview(field)),
                     }));
                 }
                 self.chart.lines = lines;

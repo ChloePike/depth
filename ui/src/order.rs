@@ -443,11 +443,12 @@ impl OrderPanel {
         // preview lines: the prices this order would rest / trigger at, with the size and the distance from the touch
         self.tick = tick;
         let away = |p: f64| mid.map(|m| format!("{:+.2}%", (p / m - 1.0) * 100.0)).unwrap_or_default();
-        let sub = |p: f64| if qty_v > 0.0 { format!("{} {base} · {}", fmt_qty(qty_v), away(p)) } else { away(p) };
+        let sub = |p: f64| if qty_v > 0.0 { format!("{}@{} · {}", fmt_qty(qty_v), fmt_px(p), away(p)) } else { format!("@{} · {}", fmt_px(p), away(p)) };
         let mut pv = vec![];
         let mut add = |field: &'static str, tag: &'static str, v: &str, col: Color32| if let Some(p) = parse(v).filter(|p| *p > 0.0) { pv.push((p, field, tag, sub(p), col)); };
         match self.kind {
-            Kind::Limit if !use_bbo => add("price", l("Limit"), &self.price, accent()),
+            // the price field is pre-filled with the bid: no line until a size is typed
+            Kind::Limit if !use_bbo && qty_v > 0.0 => add("price", l("Limit"), &self.price, accent()),
             Kind::Stop => {
                 add("trigger", l("Stop"), &self.trigger, accent());
                 if self.stop_limit { add("price", l("Limit"), &self.price, accent()); }
