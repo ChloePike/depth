@@ -155,6 +155,30 @@ pub(crate) fn signed(v: f64) -> String { format!("{}{}", if v >= 0.0 { "+" } els
 fn f(v: &Value) -> Option<f64> { v.as_f64() }
 fn s(v: &Value) -> &str { v.as_str().unwrap_or_default() }
 
+/// What the venues answered since a panel last sent something at `sent_ms` (`log`: the order log,
+/// newest first), for 20 s after the last answer (a minute for a rejection): accepted in green,
+/// the venue's error in red with the order on hover.
+pub(crate) fn results(ui: &mut Ui, sent_ms: i64, log: &[(i64, &str, bool)]) {
+    if sent_ms == 0 { return; }
+    let new: Vec<&(i64, &str, bool)> = log.iter().filter(|x| x.0 >= sent_ms).collect();
+    let fail = new.iter().any(|x| !x.2);
+    let last = new.iter().map(|x| x.0).max().unwrap_or(sent_ms);
+    if depth::now_ms() - last > if fail { 60_000 } else { 20_000 } { return; }
+    if new.is_empty() { kit::note(ui, l("Sent, waiting for the venue…"), mu()); return; }
+    for (_, m, ok) in new.iter().take(4).rev() {
+        if *ok {
+            // "OK Bybit BTCUSDT open long 0.01 limit 81900 id 123 (45 ms)" -> "Bybit BTCUSDT open long 0.01 limit 81900 · 45 ms"
+            let body = m.strip_prefix("OK ").unwrap_or(m);
+            let (what, rest) = body.split_once(" id ").unwrap_or((body, ""));
+            let ms = rest.rsplit_once('(').map(|(_, t)| t.trim_end_matches(')')).unwrap_or("");
+            kit::note(ui, &format!("✓ {what}{}", if ms.is_empty() { String::new() } else { format!(" · {ms}") }), up());
+        } else {
+            let (what, err) = m.strip_prefix("FAIL ").unwrap_or(m).split_once(": ").unwrap_or((m, ""));
+            ui.add(egui::Label::new(RichText::new(format!("✗ {err}")).font(prop(11.5)).color(dn())).wrap()).on_hover_text(what);
+        }
+    }
+}
+
 /// Market-closes each position (the venue's own reduce-only close); the last error is kept.
 fn flatten(ps: &[Value], call: &mut Call, err: &mut Option<String>) {
     for p in ps {
@@ -994,29 +1018,9 @@ impl OrderPanel {
         self.last_pos = Some(s(&p["side"]).into());
     }
 
-    /// What the venues answered since this panel last sent something (the order log), for 20 s
-    /// after the last answer (a minute for a rejection): accepted in green, the venue's error in red.
     fn results(&self, ui: &mut Ui, st: &Value) {
-        if self.sent_ms == 0 { return; }
-        let now = depth::now_ms();
-        let new: Vec<&Value> = st["log"].as_array().map(|a| a.iter().filter(|x| x["ts"].as_i64().unwrap_or(0) >= self.sent_ms).collect()).unwrap_or_default();
-        let fail = new.iter().any(|x| x["ok"] != true);
-        let last = new.iter().filter_map(|x| x["ts"].as_i64()).max().unwrap_or(self.sent_ms);
-        if now - last > if fail { 60_000 } else { 20_000 } { return; }
-        if new.is_empty() { kit::note(ui, l("Sent, waiting for the venue…"), mu()); return; }
-        for x in new.iter().take(4).rev() {
-            let m = s(&x["msg"]);
-            if x["ok"] == true {
-                // "OK Bybit BTCUSDT open long 0.01 limit 81900 id 123 (45 ms)" -> "Bybit BTCUSDT open long 0.01 limit 81900 · 45 ms"
-                let body = m.strip_prefix("OK ").unwrap_or(m);
-                let (what, rest) = body.split_once(" id ").unwrap_or((body, ""));
-                let ms = rest.rsplit_once('(').map(|(_, t)| t.trim_end_matches(')')).unwrap_or("");
-                kit::note(ui, &format!("✓ {what}{}", if ms.is_empty() { String::new() } else { format!(" · {ms}") }), up());
-            } else {
-                let (what, err) = m.strip_prefix("FAIL ").unwrap_or(m).split_once(": ").unwrap_or((m, ""));
-                ui.add(egui::Label::new(RichText::new(format!("✗ {err}")).font(prop(11.5)).color(dn())).wrap()).on_hover_text(what);
-            }
-        }
+        let log: Vec<(i64, &str, bool)> = st["log"].as_array().map(|a| a.iter().map(|x| (x["ts"].as_i64().unwrap_or(0), s(&x["msg"]), x["ok"] == true)).collect()).unwrap_or_default();
+        results(ui, self.sent_ms, &log);
     }
 
     /// The trade venue's account: margin health, equity, uPnL, keys shortcut.

@@ -367,6 +367,8 @@ impl App {
     /// text field has focus or a dialog (settings, order confirmation, ...) is open.
     fn shortcuts(&mut self, ctx: &egui::Context) {
         use hotkeys::Act;
+        // a trading key not taken by a panel last frame (none on screen) is dropped, never sent later
+        self.hot_trade.clear();
         let binds = hotkeys::complete(&self.prefs.hotkeys);
         let key = |a: Act| binds.iter().find(|b| b.act == a).and_then(|b| b.key.as_ref()).map_or(String::new(), |c| c.label());
         self.picker.keys = [key(Act::Picker), key(Act::PrevFav), key(Act::NextFav), key(Act::Star)];
@@ -716,13 +718,15 @@ impl App {
             if let Some(tab) = ap.open_settings.take() { self.settings.open_tab(tab); }
             if let Some(p) = ap.insure.take() { self.trade.ins_pos = Some(p); }
             if self.trade.ins_pos.is_some() { let g = agg.lock().unwrap(); self.trade.insure_modal(&ctx, &g, &self.eng); }
+            // trading hotkeys go to the order panel on screen; none shown (or options): dropped, never queued for later
+            let hot = std::mem::take(&mut self.hot_trade);
             if self.mode == Market::Perp && self.order_panel {
                 let mut op = std::mem::take(&mut self.order);
                 egui::Panel::right("order").show_separator_line(false).frame(Frame::new().fill(bg()).inner_margin(Margin::symmetric(4, 4))).resizable(false).exact_size(300.0)
                     .show(ui, |ui| egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
                         op.show(ui, &st, &mut |v| { let r = self.call(&ctx, &v); self.st.2 = true; r });
                         let usdt = self.prefs.hot_usdt;
-                        for a in std::mem::take(&mut self.hot_trade) { op.hotkey(a, usdt, &st, &mut |v| { let r = self.call(&ctx, &v); self.st.2 = true; r }); }
+                        for a in hot.iter().copied() { op.hotkey(a, usdt, &st, &mut |v| { let r = self.call(&ctx, &v); self.st.2 = true; r }); }
                         ui.add_space(8.0);
                         let g = agg.lock().unwrap();
                         let base = self.eng.base.clone();
@@ -744,7 +748,10 @@ impl App {
                         let g = agg.lock().unwrap();
                         let base = self.eng.base.clone();
                         if self.mode == Market::Option { self.opt.ticket(ui, &g, &self.eng, &base, self.prefs.confirm); }
-                        else { self.spot.show(ui, &g, &self.eng, &base, self.mode, self.trade.fill, self.prefs.confirm); }
+                        else {
+                            self.spot.show(ui, &g, &self.eng, &base, self.mode, self.trade.fill, self.prefs.confirm);
+                            for a in hot.iter().copied() { self.spot.hotkey(a, self.prefs.hot_usdt, &g, &self.eng, &base, self.mode, self.prefs.confirm, ui.ctx()); }
+                        }
                     }));
             }
             self.account = ap;

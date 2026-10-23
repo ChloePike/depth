@@ -274,7 +274,7 @@ impl SettingsView {
                 });
             }
         };
-        section(ui, l("Trading"), l("Perp order panel, on its trading venue. Buy / sell send the size below at the venue's own bid / ask (a limit that joins the queue) or at market, through the same confirmation as the buttons; TP/SL is not attached. Cancel-all and close-all act only on the trading venue, never on positions or orders held on other venues; close-all asks first when order confirmation is on."), |ui| {
+        section(ui, l("Trading"), l("The order panel on screen (Perp, Spot, Margin), on its venue. Buy / sell send the size below at the venue's own bid / ask (a limit that joins the queue) or at market, through the same confirmation as the buttons; TP/SL is not attached. Cancel-all and close-all act only on that venue, never on positions or orders held on other venues; close-all is perp only and asks first when order confirmation is on."), |ui| {
             number(ui, l("Order size"), &mut p.hot_usdt, 0, "USDT");
             row_sep(ui);
             rows(ui, true);

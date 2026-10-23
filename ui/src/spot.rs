@@ -5,6 +5,7 @@
 //! orders are listed under the ticket with a cancel each.
 use super::engine::Engine;
 use super::kit::{self, Look, H, H_LG, H_SM};
+use super::hotkeys::Act;
 use super::order::{dialog, dialog_title};
 use super::{fmt_px, fmt_qty, t, theme::*};
 use depth::agg::Agg;
@@ -34,12 +35,14 @@ pub struct SpotPanel {
     asked: Vec<(Exchange, bool)>,
     /// last book / chart click seen (None until the first frame), so each click sets the price once
     last_fill: Option<Option<(Exchange, f64)>>,
+    /// when this panel last sent something: order-log entries since then show under the ticket
+    sent_ms: i64,
 }
 
 impl Default for SpotPanel {
     fn default() -> Self {
         SpotPanel { ex: Exchange::Bybit, buy: true, ty: Type::Limit, effect: Effect::Borrow, px: String::new(), px_edited: false, qty: String::new(), in_quote: false,
-                    confirm: None, asked: vec![], last_fill: None }
+                    confirm: None, asked: vec![], last_fill: None, sent_ms: 0 }
     }
 }
 
@@ -180,12 +183,49 @@ impl SpotPanel {
             }
             if self.ex == Exchange::Binance && !margin { kit::note(ui, t("spot.binance_wallet"), dim()); }
             if margin && self.ex == Exchange::Bybit { kit::note(ui, t("spot.bybit_margin"), dim()); }
+            {
+                let acc = eng.account.lock().unwrap();
+                let log: Vec<(i64, &str, bool)> = acc.log.iter().rev().map(|(ts, m, ok)| (*ts, m.as_str(), *ok)).collect();
+                super::order::results(ui, self.sent_ms, &log);
+            }
             self.orders(ui, eng, &orders);
         });
         self.confirm_dialog(ui, eng, base);
     }
 
+    /// A trading hotkey in Spot / Margin mode, on this panel's venue: buy / sell `usdt` notional at
+    /// the venue's own touch (a limit joining the queue) or at market, through the same confirmation
+    /// as the button (margin orders keep the panel's loan setting); cancel the symbol's orders.
+    /// Close-all has no spot meaning (it would sell the coin) and does nothing here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hotkey(&mut self, act: Act, usdt: f64, a: &Agg, eng: &Engine, base: &str, market: Market, confirm: bool, ctx: &egui::Context) {
+        if self.confirm.is_some() { return; }
+        let symbol = trade::symbol(base);
+        let margin = market == Market::Margin;
+        if act == Act::CancelAll {
+            let acc = eng.account.lock().unwrap();
+            let mut os: Vec<(OpenOrder, bool)> = acc.spot_orders.iter().filter(|o| o.ex == self.ex && o.symbol == symbol).map(|o| (o.clone(), false)).collect();
+            if margin { os.extend(acc.margin_orders.iter().filter(|o| o.ex == self.ex && o.symbol == symbol).map(|o| (o.clone(), true))); }
+            drop(acc);
+            self.sent_ms = depth::now_ms();
+            for (o, m) in os { eng.spot_cancel(&o, m, ctx); }
+            return;
+        }
+        let buy = matches!(act, Act::BuyBid | Act::BuyMarket);
+        let mkt = matches!(act, Act::BuyMarket | Act::SellMarket);
+        if usdt <= 0.0 || !matches!(act, Act::BuyBid | Act::SellAsk | Act::BuyMarket | Act::SellMarket) { return; }
+        let touch = a.venues.get(&(self.ex, Market::Spot)).and_then(|v| v.bbo.map(|b| (b[0], b[2])).or_else(|| Some((v.book.best_bid()?.0, v.book.best_ask()?.0))));
+        let Some((b, k)) = touch else { return };
+        // limit: join our own side; market: priced at the side it takes
+        let p = if mkt == buy { k } else { b };
+        let kind = if mkt { Kind::Market } else { Kind::Limit { price: p, tif: Tif::Gtc } };
+        let tk = Ticket { ex: self.ex, symbol, buy, kind, qty: parse(&trim(usdt / p, 8)).unwrap_or(0.0), ref_px: p, margin: margin.then_some(self.effect) };
+        if tk.qty <= 0.0 { return; }
+        if confirm { self.confirm = Some(tk); } else { self.send(&tk, eng, ctx); }
+    }
+
     fn send(&mut self, tk: &Ticket, eng: &Engine, ctx: &egui::Context) {
+        self.sent_ms = depth::now_ms();
         eng.spot_submit(tk.ex, tk.symbol.clone(), if tk.buy { Side::Buy } else { Side::Sell }, tk.kind, tk.qty, tk.ref_px, tk.margin, ctx);
         self.qty.clear();
     }
