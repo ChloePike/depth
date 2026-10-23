@@ -439,7 +439,7 @@ impl App {
         let st = self.eng.stats.lock().unwrap();
         let venues: Vec<route::VenueSnap> = trade::TRADABLE.iter().filter_map(|&e| {
             let v = a.venues.get(&(e, Market::Perp))?;
-            Some(route::VenueSnap { ex: e, bids: v.book.bids().take(50).collect(), asks: v.book.asks().take(50).collect(), ts_ms: v.ts, lat_ms: st.latency(e) })
+            Some(route::VenueSnap { ex: e, bids: v.book.bids().take(50).collect(), asks: v.book.asks().take(50).collect(), ts_ms: v.fresh, lat_ms: st.latency(e) })
         }).collect();
         drop(st);
         drop(a);
@@ -461,7 +461,8 @@ impl App {
         if matches!(req.kind, Kind::Stop { .. } | Kind::Trailing { .. }) { policy.smart = false; }
         if !policy.smart { policy.fixed = self.trade.ex; }
         for e in trade::TRADABLE { let (t, m) = super::settings::fee(e); policy.fees.insert(e, (t, m)); }
-        // venue clocks may run a little behind ours; staleness is judged on exchange timestamps
+        // staleness is judged on local receive time of the last book/BBO (v.ts follows every event, incl. polled
+        // long/short rows stamped minutes back)
         route::plan(req, &venues, &snap, &policy, now_ms(), now_ms() as u64).map_err(|e| format!("{e:#}"))
     }
 }
