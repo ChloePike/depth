@@ -11,11 +11,11 @@ pub enum Act {
     Picker, PrevFav, NextFav, Star, PrevVenue, NextVenue,
     Spot, Margin, Perp, Option,
     Tf1m, Tf5m, Tf15m, Tf1h, Tf4h, Tf1d,
-    OrderPanel, Settings,
+    OrderPanel, Settings, Command,
 }
 
 impl Act {
-    pub const ALL: [Act; 24] = [Act::BuyBid, Act::SellAsk, Act::BuyMarket, Act::SellMarket, Act::CancelAll, Act::Flatten,
+    pub const ALL: [Act; 25] = [Act::Command, Act::BuyBid, Act::SellAsk, Act::BuyMarket, Act::SellMarket, Act::CancelAll, Act::Flatten,
         Act::Picker, Act::PrevFav, Act::NextFav, Act::Star, Act::PrevVenue, Act::NextVenue,
         Act::Spot, Act::Margin, Act::Perp, Act::Option, Act::Tf1m, Act::Tf5m, Act::Tf15m, Act::Tf1h, Act::Tf4h, Act::Tf1d,
         Act::OrderPanel, Act::Settings];
@@ -32,7 +32,7 @@ impl Act {
             Act::PrevVenue => "Previous trading venue", Act::NextVenue => "Next trading venue",
             Act::Spot => "Spot mode", Act::Margin => "Margin mode", Act::Perp => "Perp mode", Act::Option => "Options mode",
             Act::Tf1m => "1 minute", Act::Tf5m => "5 minutes", Act::Tf15m => "15 minutes", Act::Tf1h => "1 hour", Act::Tf4h => "4 hours", Act::Tf1d => "1 day",
-            Act::OrderPanel => "Show / hide the order panel", Act::Settings => "Settings",
+            Act::OrderPanel => "Show / hide the order panel", Act::Settings => "Settings", Act::Command => "Command bar",
         }
     }
 }
@@ -73,7 +73,7 @@ pub fn defaults() -> Vec<Binding> {
         Act::Spot => k(c, Key::Num1), Act::Margin => k(c, Key::Num2), Act::Perp => k(c, Key::Num3), Act::Option => k(c, Key::Num4),
         Act::Tf1m => k(Modifiers::CTRL, Key::Num1), Act::Tf5m => k(Modifiers::CTRL, Key::Num2), Act::Tf15m => k(Modifiers::CTRL, Key::Num3),
         Act::Tf1h => k(Modifiers::CTRL, Key::Num4), Act::Tf4h => k(Modifiers::CTRL, Key::Num5), Act::Tf1d => k(Modifiers::CTRL, Key::Num6),
-        Act::OrderPanel => k(c | Modifiers::ALT, Key::I), Act::Settings => k(c, Key::Comma),
+        Act::OrderPanel => k(c | Modifiers::ALT, Key::I), Act::Settings => k(c, Key::Comma), Act::Command => k(Modifiers::NONE, Key::Slash),
         _ => None,
     } }).collect()
 }

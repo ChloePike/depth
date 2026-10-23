@@ -15,6 +15,7 @@ mod trade;
 mod spot;
 mod settings;
 mod hotkeys;
+mod command;
 mod native;
 
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Ui};
@@ -193,6 +194,7 @@ pub struct App {
     eng: engine::Engine,
     prefs: settings::Prefs,
     settings: settings::SettingsView,
+    command: command::CommandBar,
     /// last settings JSON written, and when it was last checked
     saved: (String, Instant),
     /// own window's position and size [x, y, w, h] (not hosted; kept while maximized / full screen)
@@ -299,7 +301,7 @@ impl App {
         if let Some(tf) = env("T1_TF").and_then(|s| s.parse().ok()) { chart.tf = tf; }
         let layout = env("T1_LAYOUT").or(st.layout).unwrap_or_else(|| "1".into());
         App {
-            eng, prefs, settings: Default::default(), saved: (saved, Instant::now()), window: st.window, mode, chart, book, opt: Default::default(), picker, trade, spot: Default::default(),
+            eng, prefs, settings: Default::default(), command: Default::default(), saved: (saved, Instant::now()), window: st.window, mode, chart, book, opt: Default::default(), picker, trade, spot: Default::default(),
             rate: (Instant::now(), 0, 0.0),
             shot: env("T1_SHOT").map(|p| (p, env("T1_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(30.0))),
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
@@ -376,6 +378,7 @@ impl App {
         for a in hotkeys::pressed(ctx, &binds) {
             match a {
                 Act::Settings => self.settings.open = true,
+                Act::Command => self.command.open = true,
                 Act::OrderPanel => self.order_panel = !self.order_panel,
                 Act::Picker | Act::PrevFav | Act::NextFav | Act::Star => self.picker.hot.push(a),
                 Act::Spot | Act::Margin | Act::Perp | Act::Option => {
@@ -873,6 +876,20 @@ impl App {
         if let Some(m) = new_mode { self.mode = m; self.eng.ensure(m); }
         // T1_SETTINGS=<tab>: open the settings dialog once (screenshots)
         if let Some(n) = std::env::var("T1_SETTINGS").ok().and_then(|s| s.parse().ok()) { if !self.shot_sent && self.started.elapsed().as_secs() < 2 { self.settings.open_tab(n); } }
+        // T1_COMMAND=<text>: open the command bar with that text once (screenshots)
+        if let Ok(t) = std::env::var("T1_COMMAND") { if !self.shot_sent && self.started.elapsed().as_secs() < 2 && !self.command.open { self.command.open_with(&t); } }
+        if !self.hosted && self.command.open {
+            let bases: Vec<String> = self.eng.tickers.lock().unwrap().iter().map(|t| t.base.clone()).collect();
+            for c in self.command.show(&ctx, &bases).unwrap_or_default() {
+                match c {
+                    command::Cmd::Base(b) => if b != self.eng.base { self.pending_base = Some(b) },
+                    command::Cmd::Mode(m) => if m != self.mode { self.pending_mode = Some(m) },
+                    command::Cmd::Tf(tf) => self.chart.tf = tf,
+                    command::Cmd::Venue(e) => { let _ = self.call(&ctx, &serde_json::json!({"op": "set_trade_venue", "ex": native::ex_name(e)})); }
+                    command::Cmd::Settings(n) => self.settings.open_tab(n),
+                }
+            }
+        }
         if !self.hosted && self.settings.open {
             // ops take the agg lock themselves: nothing is held here
             let st = self.state_doc();

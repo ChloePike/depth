@@ -174,7 +174,7 @@ Keys work while no text field has focus. Click a key, then press the new combina
 Cancel all orders of this symbol on the trading venue = 撤销当前交易所该品种全部挂单
 Close all positions of this symbol on the trading venue at market = 市价平掉当前交易所该品种全部仓位
 Close all positions of this symbol on the trading venue at market? = 市价平掉当前交易所该品种的全部仓位？
-The order panel on screen (Perp, Spot, Margin), on its venue. Buy / sell send the size below at the venue's own bid / ask (a limit that joins the queue) or at market, through the same confirmation as the buttons; TP/SL is not attached. Cancel-all and close-all act only on that venue, never on positions or orders held on other venues; close-all is perp only and asks first when order confirmation is on. = 作用于当前显示的下单面板（永续、现货、杠杆）及其交易所。买 / 卖按下方金额，在该交易所自己的买一 / 卖一挂限价（排队）或市价下单，与按钮走同一个确认流程，不附带止盈止损。全部撤单和全部平仓只作用于该交易所，不会动其他交易所的仓位或挂单；全部平仓仅限永续，开启下单确认时会先询问。
+The order panel on screen (Perp, Spot, Margin), on its venue. In Perp the panel's Open / Close tab decides: on Close, buy closes the short and sell closes the long. Buy / sell send the size below at the venue's own bid / ask (a limit that joins the queue) or at market, through the same confirmation as the buttons; TP/SL is not attached. Cancel-all and close-all act only on that venue, never on positions or orders held on other venues; close-all is perp only and asks first when order confirmation is on. = 作用于当前显示的下单面板（永续、现货、杠杆）及其交易所。永续里由面板的「开仓 / 平仓」页签决定：在平仓页时，买入平空，卖出平多。买 / 卖按下方金额，在该交易所自己的买一 / 卖一挂限价（排队）或市价下单，与按钮走同一个确认流程，不附带止盈止损。全部撤单和全部平仓只作用于该交易所，不会动其他交易所的仓位或挂单；全部平仓仅限永续，开启下单确认时会先询问。
 Loans in Margin mode = 杠杆模式借贷
 Normal = 普通
 Borrow = 借币
@@ -183,3 +183,6 @@ Style = 风格
 Standard = 标准
 Terminal = 终端
 Terminal: pure black, panels joined by hairlines instead of gaps, square corners, amber accent (the accent and radius can still be changed below). = 终端：纯黑底，面板之间用细线分隔不留缝，直角，琥珀色强调色（强调色和圆角仍可在下方调整）。
+Command bar = 命令栏
+Unknown = 无法识别
+A coin, a market (perp, spot, margin, opt), an interval (1m … 1d), a venue, or keys / hotkeys / settings. Enter applies, Escape closes. = 币种、市场（perp、spot、margin、opt）、周期（1m … 1d）、交易所，或 keys / hotkeys / settings。回车执行，Esc 关闭。

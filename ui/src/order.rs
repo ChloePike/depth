@@ -878,7 +878,8 @@ impl OrderPanel {
         else if let Some(m) = f(&t["min_notional"]).filter(|m| notional > 0.0 && notional < *m) { kit::note(ui, &format!("{} {} USDT", l("Below the minimum order value"), usd(m)), WARN); }
     }
 
-    /// A trading hotkey. Buy / sell `usdt` notional at the venue's own touch (a limit joining the
+    /// A trading hotkey. Buy / sell `usdt` notional (on the Close tab: closing the short / long; the
+    /// venue clamps a close to the position) at the venue's own touch (a limit joining the
     /// queue) or at market, through the same preview and confirmation as the buttons, TP/SL off;
     /// cancel every order of the symbol on that venue; close every position of the symbol on that venue at market.
     pub(crate) fn hotkey(&mut self, a: Act, usdt: f64, st: &Value, call: &mut Call) {
@@ -909,10 +910,12 @@ impl OrderPanel {
                 let (bid, ask) = (f(&t["bid"]), f(&t["ask"]));
                 let px = if market { bid.zip(ask).map(|(b, k)| (b + k) / 2.0) } else if buy { bid } else { ask };
                 let Some(px) = px.filter(|p| *p > 0.0) else { self.error = Some(l("No price from this venue yet").into()); return };
-                (self.close, self.kind, self.bbo_on, self.tpsl_on, self.pct) = (false, if market { Kind::Market } else { Kind::Limit }, false, false, 0.0);
+                // the panel's Open / Close tab decides: on Close, buy closes the short and sell the long
+                (self.kind, self.bbo_on, self.tpsl_on, self.pct) = (if market { Kind::Market } else { Kind::Limit }, false, false, 0.0);
                 if !market { self.price = px_str(px, f(&t["tick"])); }
                 (self.qty_usdt, self.qty) = (false, qty_str(usdt / px, f(&t["step"])));
-                self.submit(if buy { "long" } else { "short" }, st, px, false, !market, call);
+                let pos = if buy != self.close { "long" } else { "short" };
+                self.submit(pos, st, px, false, !market, call);
             }
         }
     }
