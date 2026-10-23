@@ -546,6 +546,7 @@ impl OrderPanel {
             if let Some(p) = go { self.submit(p, st, ref_px, use_bbo, typed_price, call); }
             self.summary(ui, t, &base, qty_v * ref_px, use_bbo, has_key, qty_v);
             if let Some(e) = &self.error { kit::note(ui, e, dn()); }
+            self.position_rows(ui, st, &positions, can_trade, call);
             let mine: Vec<&Waiting> = self.waiting.iter().filter(|w| w.symbol == symbol).collect();
             if !mine.is_empty() {
                 kit::overline(ui, l("TP/SL waiting for fill"));
@@ -892,13 +893,63 @@ impl OrderPanel {
         }
     }
 
+    /// The positions of this symbol (on the trading venue; every venue when routing is smart) right
+    /// under the ticket, so the result of an order is visible where it was placed: side, size,
+    /// entry, liquidation, uPnL / ROE; Close fills the form with a limit close of the whole
+    /// position at the venue's touch, Market closes at market (confirmed when confirmations are on).
+    fn position_rows(&mut self, ui: &mut Ui, st: &Value, positions: &[&Value], can_trade: bool, call: &mut Call) {
+        if positions.is_empty() { return; }
+        ui.add_space(4.0);
+        ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top() - 2.0, Stroke::new(1.0, line()));
+        kit::overline(ui, l("Position"));
+        let mut act: Option<(Value, bool)> = None;
+        for p in positions {
+            let long = s(&p["side"]) == "long";
+            let (upnl, margin) = (f(&p["upnl"]).unwrap_or(0.0), f(&p["margin"]).unwrap_or(0.0));
+            let col = if upnl > 0.0 { up() } else if upnl < 0.0 { dn() } else { fg() };
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let side = format!("{}{}", if long { l("Long") } else { l("Short") }, f(&p["lev"]).map(|v| format!(" {v:.0}x")).unwrap_or_default());
+                kit::chip(ui, &side, if long { Tone::Up } else { Tone::Down });
+                ui.label(RichText::new(format!("{} {}", fmt_qty(f(&p["qty"]).unwrap_or(0.0)), s(&st["base"]))).font(mono_s(12.5)).color(fg_strong()));
+                if positions.iter().any(|q| q["ex"] != p["ex"]) { ui.label(RichText::new(s(&p["ex"])).font(prop(11.0)).color(dim())); }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(signed(upnl)).font(mono_s(12.5)).color(col));
+                });
+            });
+            // entry and liquidation on the left, ROE under the PnL
+            ui.horizontal(|ui| {
+                let liq = f(&p["liq"]).filter(|x| *x > 0.0).map(|x| format!("   {} {}", l("Liq."), fmt_px(x))).unwrap_or_default();
+                ui.label(RichText::new(format!("{} {}{liq}", l("Entry"), f(&p["entry"]).map(fmt_px).unwrap_or("–".into()))).font(mono(11.0)).color(mu()));
+                if margin > 0.0 {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(format!("{:+.2}%", upnl / margin * 100.0)).font(mono_m(11.0)).color(col));
+                    });
+                }
+            });
+            // limit close (fills the form) and market close, half the width each
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let w = (ui.available_width() - 8.0) / 2.0;
+                if kit::button(ui, l("Limit close"), Look::Secondary, H_SM, Some(w), can_trade).on_hover_text(l("Fill the form with a limit close of the whole position at the touch")).clicked() { act = Some(((*p).clone(), false)); }
+                if kit::button(ui, l("Market close"), Look::Danger, H_SM, Some(w), can_trade).on_hover_text(l("Close this position at market")).clicked() { act = Some(((*p).clone(), true)); }
+            });
+        }
+        match act {
+            Some((p, true)) if st["prefs"]["confirm"].as_bool().unwrap_or(true) => self.flatten = Some(vec![p]),
+            Some((p, true)) => { self.sent_ms = depth::now_ms(); flatten(&[p], call, &mut self.error); }
+            Some((p, false)) => self.prefill_close(&p, st),
+            None => {}
+        }
+    }
+
     fn flatten_modal(&mut self, ui: &mut Ui, call: &mut Call) {
         let Some(ps) = &self.flatten else { return };
         let mut done = None;
         dialog("flatten_confirm").show(ui.ctx(), |ui| {
             ui.set_width(380.0);
             ui.spacing_mut().item_spacing.y = 10.0;
-            dialog_title(ui, l("Close all positions of this symbol on the trading venue at market?"), "", None);
+            dialog_title(ui, if ps.len() == 1 { l("Close this position at market?") } else { l("Close all positions of this symbol on the trading venue at market?") }, "", None);
             for p in ps {
                 let long = s(&p["side"]) == "long";
                 kit::kv(ui, &format!("{} · {}", s(&p["ex"]), if long { l("Long") } else { l("Short") }), fmt_qty(f(&p["qty"]).unwrap_or(0.0)), if long { up() } else { dn() });

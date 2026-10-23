@@ -14,7 +14,8 @@ use std::collections::HashMap;
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Tab { Positions, Orders, TpSl, Signals, OrderHist, TradeHist, PosHist, Log, Assets }
 
-const TABS: [Tab; 9] = [Tab::Positions, Tab::Orders, Tab::TpSl, Tab::Signals, Tab::OrderHist, Tab::TradeHist, Tab::PosHist, Tab::Log, Tab::Assets];
+// account first, the market's signals last (they are not part of the account)
+const TABS: [Tab; 9] = [Tab::Positions, Tab::Orders, Tab::TpSl, Tab::OrderHist, Tab::TradeHist, Tab::PosHist, Tab::Log, Tab::Assets, Tab::Signals];
 
 impl Tab {
     fn title(self) -> &'static str {

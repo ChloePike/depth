@@ -233,3 +233,7 @@ Size in the coin or in USDT = 數量按幣或按 USDT
 Sent, waiting for the venue… = 已發送，等待交易所回應…
 Market data works without keys. A key with trade permission enables the order panel; a read-only key shows the account. = 行情無需 API key。有交易權限的 key 才能下單；唯讀 key 只顯示帳戶。
 no key = 無 key
+Liq. = 強平
+Close this position at market? = 市價平掉這個倉位？
+Close this position at market = 市價平掉這個倉位
+Fill the form with a limit close of the whole position at the touch = 在盤口價填入整個倉位的限價平倉單
