@@ -67,12 +67,14 @@ fn cmd() -> Modifiers { if cfg!(target_os = "macos") { Modifiers::MAC_CMD } else
 /// The shortcuts the app always had; trading keys start unbound (opt in, after setting a size).
 pub fn defaults() -> Vec<Binding> {
     let c = cmd();
+    // intervals: ⌃1-6 on macOS; elsewhere Ctrl is the command key (markets on Ctrl+1-4), so Alt+1-6
+    let tf = if cfg!(target_os = "macos") { Modifiers::CTRL } else { Modifiers::ALT };
     let k = |m: Modifiers, key: Key| Some(Combo::new(m, key));
     Act::ALL.iter().map(|&act| Binding { act, key: match act {
         Act::Picker => k(c, Key::K), Act::PrevFav => k(c, Key::OpenBracket), Act::NextFav => k(c, Key::CloseBracket), Act::Star => k(c, Key::D),
         Act::Spot => k(c, Key::Num1), Act::Margin => k(c, Key::Num2), Act::Perp => k(c, Key::Num3), Act::Option => k(c, Key::Num4),
-        Act::Tf1m => k(Modifiers::CTRL, Key::Num1), Act::Tf5m => k(Modifiers::CTRL, Key::Num2), Act::Tf15m => k(Modifiers::CTRL, Key::Num3),
-        Act::Tf1h => k(Modifiers::CTRL, Key::Num4), Act::Tf4h => k(Modifiers::CTRL, Key::Num5), Act::Tf1d => k(Modifiers::CTRL, Key::Num6),
+        Act::Tf1m => k(tf, Key::Num1), Act::Tf5m => k(tf, Key::Num2), Act::Tf15m => k(tf, Key::Num3),
+        Act::Tf1h => k(tf, Key::Num4), Act::Tf4h => k(tf, Key::Num5), Act::Tf1d => k(tf, Key::Num6),
         Act::OrderPanel => k(c | Modifiers::ALT, Key::I), Act::Settings => k(c, Key::Comma), Act::Command => k(Modifiers::NONE, Key::Slash),
         _ => None,
     } }).collect()
