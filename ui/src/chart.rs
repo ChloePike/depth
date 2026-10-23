@@ -2658,7 +2658,7 @@ fn pill(ui: &mut Ui, text: &str, on: bool) -> egui::Response {
     let w = if text.is_empty() { 22.0 } else { ui.painter().layout_no_wrap(text.to_string(), prop_s(12.5), fg()).size().x + 16.0 };
     let (r, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click());
     let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() && !on, 0.1);
-    if on { ui.painter().rect_filled(r, kit::R, hl()); } else if hv > 0.0 { ui.painter().rect_filled(r, kit::R, hl().gamma_multiply(0.6 * hv)); }
+    if on { ui.painter().rect_filled(r, kit::rad(), hl()); } else if hv > 0.0 { ui.painter().rect_filled(r, kit::rad(), hl().gamma_multiply(0.6 * hv)); }
     if !text.is_empty() { ui.painter().text(r.center(), Align2::CENTER_CENTER, text, font, if on { fg_strong() } else { lerp(mu(), fg(), hv) }); }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -2681,7 +2681,7 @@ fn tb_button(ui: &mut Ui, text: &str, look: Tb, badge: usize, chev: bool) -> egu
         Tb::Ghost => (hl().gamma_multiply(0.7 * hv), Stroke::NONE, lerp(mu(), fg_strong(), hv)),
         Tb::Tint => (accent().gamma_multiply(0.16 + 0.06 * hv), Stroke::NONE, accent()),
     };
-    p.rect(r, kit::R, fill, stroke, egui::StrokeKind::Inside);
+    p.rect(r, kit::rad(), fill, stroke, egui::StrokeKind::Inside);
     let mut x = r.left() + 10.0;
     p.text(pos2(x, r.center().y), Align2::LEFT_CENTER, text, if look == Tb::Tint { prop_s(12.0) } else { prop_m(12.5) }, col);
     x += g.size().x;
@@ -2738,7 +2738,7 @@ fn menu_row(ui: &mut Ui, on: bool, text: &str, glyph: Option<Glyph>) -> egui::Re
     let (r, resp) = ui.allocate_exact_size(vec2(ui.min_rect().width().max(tw), 26.0), Sense::click());
     let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered(), 0.08);
     let p = ui.painter();
-    if hv > 0.0 { p.rect_filled(r, kit::R, hl().gamma_multiply(hv)); }
+    if hv > 0.0 { p.rect_filled(r, kit::rad(), hl().gamma_multiply(hv)); }
     let lead = Rect::from_center_size(pos2(r.left() + 17.0, r.center().y), vec2(18.0, 18.0));
     match glyph {
         Some(g) => paint_glyph(p, lead, g, if on { accent() } else { mu() }),
@@ -2758,7 +2758,7 @@ fn tool_button(ui: &mut Ui, g: Glyph, on: bool) -> egui::Response {
     let (r, resp) = ui.allocate_exact_size(vec2(28.0, 24.0), Sense::click());
     let hv = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered() && !on, 0.1);
     let p = ui.painter();
-    if on { p.rect_filled(r, kit::R, hl()); } else if hv > 0.0 { p.rect_filled(r, kit::R, hl().gamma_multiply(0.7 * hv)); }
+    if on { p.rect_filled(r, kit::rad(), hl()); } else if hv > 0.0 { p.rect_filled(r, kit::rad(), hl().gamma_multiply(0.7 * hv)); }
     paint_glyph(p, r, g, if on { fg_strong() } else { lerp(mu(), fg_strong(), hv) });
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }

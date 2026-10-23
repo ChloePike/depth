@@ -651,7 +651,7 @@ fn pill_in(ui: &mut Ui, r: Rect, text: &str, on: bool, id: impl std::hash::Hash 
     let s = ui.ctx().animate_bool_with_time(resp.id.with("on"), on, 0.15);
     let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() && !on, 0.1);
     let fill = if s > 0.0 { hl().gamma_multiply(s.max(hv * 0.5)) } else { hl().gamma_multiply(0.5 * hv) };
-    if fill.a() > 0 { ui.painter().rect_filled(r, kit::R, fill); }
+    if fill.a() > 0 { ui.painter().rect_filled(r, kit::rad(), fill); }
     let font = if on { prop_s(size) } else { prop_m(size) };
     ui.painter().text(r.center(), Align2::CENTER_CENTER, text, font, lerp(mu(), fg_strong(), s.max(hv * 0.6)));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -670,7 +670,7 @@ fn dropdown(ui: &mut Ui, w: f32, text: &str, font: egui::FontId, logo: Option<Ex
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
     let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() || open, 0.1);
     let p = ui.painter();
-    p.rect(r, kit::R, lerp(panel2(), hl(), hv * 0.5), Stroke::new(1.0, lerp(line(), edge(), hv)), egui::StrokeKind::Inside);
+    p.rect(r, kit::rad(), lerp(panel2(), hl(), hv * 0.5), Stroke::new(1.0, lerp(line(), edge(), hv)), egui::StrokeKind::Inside);
     let cy = r.center().y;
     let mut x = r.left() + 8.0;
     if let Some(e) = logo { icon(p, e, Rect::from_center_size(pos2(x + 7.0, cy), vec2(14.0, 14.0)), false); x += 20.0; }
@@ -698,7 +698,7 @@ fn dropdown(ui: &mut Ui, w: f32, text: &str, font: egui::FontId, logo: Option<Ex
 fn menu_item(ui: &mut Ui, text: &str, on: bool, logo: Option<Exchange>) -> bool {
     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
     let p = ui.painter();
-    if resp.hovered() || on { p.rect_filled(r, kit::R, if on { hl() } else { hl().gamma_multiply(0.7) }); }
+    if resp.hovered() || on { p.rect_filled(r, kit::rad(), if on { hl() } else { hl().gamma_multiply(0.7) }); }
     let cy = r.center().y;
     if on { p.text(pos2(r.left() + 10.0, cy), Align2::LEFT_CENTER, "✓", prop(12.0), accent()); }
     let mut x = r.left() + 28.0;

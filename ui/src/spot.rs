@@ -195,10 +195,11 @@ impl SpotPanel {
 
     /// A trading hotkey in Spot / Margin mode, on this panel's venue: buy / sell `usdt` notional at
     /// the venue's own touch (a limit joining the queue) or at market, through the same confirmation
-    /// as the button (margin orders keep the panel's loan setting); cancel the symbol's orders.
+    /// as the button; margin orders use the hotkeys' own `loan` (Settings, Normal by default), never
+    /// the panel's Borrow default; cancel the symbol's orders.
     /// Close-all has no spot meaning (it would sell the coin) and does nothing here.
     #[allow(clippy::too_many_arguments)]
-    pub fn hotkey(&mut self, act: Act, usdt: f64, a: &Agg, eng: &Engine, base: &str, market: Market, confirm: bool, ctx: &egui::Context) {
+    pub fn hotkey(&mut self, act: Act, usdt: f64, loan: u8, a: &Agg, eng: &Engine, base: &str, market: Market, confirm: bool, ctx: &egui::Context) {
         if self.confirm.is_some() { return; }
         let symbol = trade::symbol(base);
         let margin = market == Market::Margin;
@@ -219,7 +220,7 @@ impl SpotPanel {
         // limit: join our own side; market: priced at the side it takes
         let p = if mkt == buy { k } else { b };
         let kind = if mkt { Kind::Market } else { Kind::Limit { price: p, tif: Tif::Gtc } };
-        let tk = Ticket { ex: self.ex, symbol, buy, kind, qty: parse(&trim(usdt / p, 8)).unwrap_or(0.0), ref_px: p, margin: margin.then_some(self.effect) };
+        let tk = Ticket { ex: self.ex, symbol, buy, kind, qty: parse(&trim(usdt / p, 8)).unwrap_or(0.0), ref_px: p, margin: margin.then_some(match loan { 1 => Effect::Borrow, 2 => Effect::Repay, _ => Effect::Plain }) };
         if tk.qty <= 0.0 { return; }
         if confirm { self.confirm = Some(tk); } else { self.send(&tk, eng, ctx); }
     }

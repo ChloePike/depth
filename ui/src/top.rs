@@ -118,7 +118,7 @@ impl TopBar {
         if let Some(t) = self.flash {
             let k = 1.0 - t.elapsed().as_secs_f32() / FLASH;
             if k > 0.0 {
-                p.rect_filled(Rect::from_min_size(r.min, vec2(w + 30.0, r.height())), kit::R, col.gamma_multiply(0.18 * k));
+                p.rect_filled(Rect::from_min_size(r.min, vec2(w + 30.0, r.height())), kit::rad(), col.gamma_multiply(0.18 * k));
                 // bounded fade: ~30 fps for at most FLASH seconds after a tick, never every frame
                 ui.ctx().request_repaint_after(Duration::from_millis(33));
             } else { self.flash = None; }
@@ -273,7 +273,7 @@ impl TopBar {
         let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
         let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() || open, 0.1);
         let p = ui.painter();
-        if hv > 0.0 { p.rect_filled(r, kit::R, hl().gamma_multiply(0.7 * hv)); }
+        if hv > 0.0 { p.rect_filled(r, kit::rad(), hl().gamma_multiply(0.7 * hv)); }
         let x = r.left() + 8.0;
         p.galley(pos2(x, r.center().y - lg.size().y / 2.0), lg.clone(), lerp(mu(), fg(), hv));
         p.galley(pos2(x + lg.size().x + gap, r.center().y - cg.size().y / 2.0), cg, fg());
@@ -341,7 +341,7 @@ pub fn pills(ui: &mut Ui, id: &str, labels: &[&str], sel: usize, h: f32, size: f
     let total = w.iter().sum::<f32>() + gap * (w.len().max(1) - 1) as f32 + 2.0 * pad;
     let (r, _) = ui.allocate_exact_size(vec2(total, h + 2.0 * pad), Sense::hover());
     let en = ui.is_enabled();
-    ui.painter().rect_filled(r, kit::R + 1, panel2());
+    ui.painter().rect_filled(r, kit::rad() + 1, panel2());
     let mut xs = Vec::with_capacity(w.len());
     let mut x = r.left() + pad;
     for wi in &w { xs.push(x); x += wi + gap; }
@@ -350,8 +350,8 @@ pub fn pills(ui: &mut Ui, id: &str, labels: &[&str], sel: usize, h: f32, size: f
         let tx = ui.ctx().animate_value_with_time(id.with("x"), sx, 0.15);
         let tw = ui.ctx().animate_value_with_time(id.with("w"), sw, 0.15);
         let thumb = Rect::from_min_size(pos2(tx, r.top() + pad), vec2(tw, h));
-        ui.painter().rect_filled(thumb.translate(vec2(0.0, 1.0)), kit::R, Color32::from_black_alpha(if light() { 18 } else { 60 }));
-        ui.painter().rect_filled(thumb, kit::R, if light() { Color32::WHITE } else { hl() });
+        ui.painter().rect_filled(thumb.translate(vec2(0.0, 1.0)), kit::rad(), Color32::from_black_alpha(if light() { 18 } else { 60 }));
+        ui.painter().rect_filled(thumb, kit::rad(), if light() { Color32::WHITE } else { hl() });
     }
     let mut out = None;
     for (i, t) in labels.iter().enumerate() {

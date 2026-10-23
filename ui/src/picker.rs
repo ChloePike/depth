@@ -134,8 +134,8 @@ impl Picker {
                 let (fr, _) = ui.allocate_exact_size(vec2(W, 32.0), Sense::hover());
                 let fid = ui.id().with("pick_q");
                 let f = ui.ctx().animate_bool_with_time(fid.with("f"), ui.memory(|m| m.has_focus(fid)), 0.12);
-                if f > 0.0 { ui.painter().rect_filled(fr.expand(2.5 * f), kit::R + 2, accent().gamma_multiply(0.14 * f)); }
-                ui.painter().rect(fr, kit::R, well(), egui::Stroke::new(1.0, lerp(line(), accent(), f)), egui::StrokeKind::Inside);
+                if f > 0.0 { ui.painter().rect_filled(fr.expand(2.5 * f), kit::rad() + 2, accent().gamma_multiply(0.14 * f)); }
+                ui.painter().rect(fr, kit::rad(), well(), egui::Stroke::new(1.0, lerp(line(), accent(), f)), egui::StrokeKind::Inside);
                 search_glyph(ui.painter(), pos2(fr.left() + 15.0, fr.center().y), mu());
                 let q = ui.put(Rect::from_min_max(pos2(fr.left() + 30.0, fr.top() + 4.0), pos2(fr.right() - 10.0, fr.bottom() - 4.0)),
                     egui::TextEdit::singleline(&mut self.query).id(fid).frame(egui::Frame::NONE).hint_text(RichText::new(l("Search pairs")).color(dim()))
@@ -166,7 +166,7 @@ impl Picker {
                             let g = ui.painter().layout_no_wrap(b.clone(), prop_m(12.0), fg());
                             let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 32.0, kit::H_SM), Sense::click());
                             let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered(), 0.1);
-                            ui.painter().rect(r, kit::R, lerp(panel2(), hl(), hv), egui::Stroke::new(1.0, lerp(line(), edge(), hv)), egui::StrokeKind::Inside);
+                            ui.painter().rect(r, kit::rad(), lerp(panel2(), hl(), hv), egui::Stroke::new(1.0, lerp(line(), edge(), hv)), egui::StrokeKind::Inside);
                             coin_icon(ui, b, Rect::from_center_size(pos2(r.left() + 13.0, r.center().y), vec2(14.0, 14.0)));
                             ui.painter().galley(pos2(r.left() + 24.0, r.center().y - g.size().y / 2.0), g, fg());
                             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { chosen = Some(b.clone()); }
@@ -227,7 +227,7 @@ impl Picker {
                         let (rect, resp) = ui.allocate_exact_size(vec2(W, ROW_H), Sense::click());
                         let sel = self.sel.as_deref() == Some(t.base.as_str());
                         let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered(), 0.1);
-                        if sel { ui.painter().rect_filled(rect, kit::R, hl()); } else if hv > 0.0 { ui.painter().rect_filled(rect, kit::R, hl().gamma_multiply(0.6 * hv)); }
+                        if sel { ui.painter().rect_filled(rect, kit::rad(), hl()); } else if hv > 0.0 { ui.painter().rect_filled(rect, kit::rad(), hl().gamma_multiply(0.6 * hv)); }
                         let y = rect.center().y;
                         let fav = self.favs.contains(&t.base);
                         let star = Rect::from_center_size(pos2(rect.left() + 13.0, y), vec2(20.0, 20.0));
@@ -265,7 +265,7 @@ fn pair_button(ui: &mut Ui, base: &str, open: bool) -> egui::Response {
     let (r, resp) = ui.allocate_exact_size(vec2(6.0 + 20.0 + 8.0 + g.size().x + 8.0 + 10.0 + 10.0, 30.0), Sense::click());
     let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() || open, 0.1);
     let p = ui.painter();
-    p.rect(r, kit::R + 1, lerp(panel2(), hl(), hv), egui::Stroke::new(1.0, lerp(line(), edge(), hv)), egui::StrokeKind::Inside);
+    p.rect(r, kit::rad() + 1, lerp(panel2(), hl(), hv), egui::Stroke::new(1.0, lerp(line(), edge(), hv)), egui::StrokeKind::Inside);
     coin_icon(ui, base, Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(20.0, 20.0)));
     let p = ui.painter();
     let tx = r.left() + 34.0;

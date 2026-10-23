@@ -10,7 +10,8 @@ use eframe::egui::{self, Align2, Color32, Rect, Response, Sense, Stroke, Ui};
 pub const H_SM: f32 = 24.0;
 pub const H: f32 = 28.0;
 pub const H_LG: f32 = 36.0;
-pub const R: u8 = 4;
+/// Corner radius of controls and panels: the Appearance preference (0 in the terminal style).
+pub fn rad() -> u8 { radius() }
 
 /// Button looks: `Fill(c)` solid (buy / sell / accent), `Secondary` outlined, `Ghost` text only
 /// until hovered, `Danger` tinted red, `Link` accent text.
@@ -36,7 +37,7 @@ pub fn button(ui: &mut Ui, text: &str, look: Look, h: f32, w: Option<f32>, enabl
         Look::Link => (Color32::TRANSPARENT, Stroke::NONE, lerp(accent(), accent().gamma_multiply(1.2), hv)),
     };
     let a = if enabled { 1.0 } else { 0.35 };
-    p.rect(r, R, fill.gamma_multiply(a), stroke, egui::StrokeKind::Inside);
+    p.rect(r, rad(), fill.gamma_multiply(a), stroke, egui::StrokeKind::Inside);
     let g = p.layout_no_wrap(text.to_string(), font, text_c.gamma_multiply(if enabled { 1.0 } else { 0.5 }));
     p.galley(r.center() - g.size() / 2.0, g, text_c);
     if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
@@ -47,7 +48,7 @@ pub fn icon_button(ui: &mut Ui, size: f32, on: bool, paint: impl FnOnce(&egui::P
     let (r, resp) = ui.allocate_exact_size(egui::vec2(size, size), Sense::click());
     let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered(), 0.1);
     let p = ui.painter();
-    if on { p.rect_filled(r, R, hl()); } else if hv > 0.0 { p.rect_filled(r, R, hl().gamma_multiply(0.7 * hv)); }
+    if on { p.rect_filled(r, rad(), hl()); } else if hv > 0.0 { p.rect_filled(r, rad(), hl().gamma_multiply(0.7 * hv)); }
     paint(p, r, if on { accent() } else { lerp(mu(), fg_strong(), hv) });
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -61,9 +62,9 @@ pub fn field(ui: &mut Ui, label: &str, text: &mut String, unit: &str, id: impl s
     let focused = ui.memory(|m| m.has_focus(eid));
     let f = ui.ctx().animate_bool_with_time(eid.with("f"), focused, 0.12);
     let p = ui.painter();
-    if f > 0.0 { p.rect_filled(rect.expand(2.5 * f), R + 2, accent().gamma_multiply(0.14 * f)); }
+    if f > 0.0 { p.rect_filled(rect.expand(2.5 * f), rad() + 2, accent().gamma_multiply(0.14 * f)); }
     let border = if error { dn() } else { lerp(line(), accent(), f) };
-    p.rect(rect, R, if ui.is_enabled() { well() } else { panel2() }, Stroke::new(1.0, border), egui::StrokeKind::Inside);
+    p.rect(rect, rad(), if ui.is_enabled() { well() } else { panel2() }, Stroke::new(1.0, border), egui::StrokeKind::Inside);
     let lw = p.text(rect.left_center() + egui::vec2(10.0, 0.0), Align2::LEFT_CENTER, label, prop(12.0), mu()).width();
     let uw = p.text(rect.right_center() - egui::vec2(10.0, 0.0), Align2::RIGHT_CENTER, unit, prop(12.0), dim()).width();
     let edit = Rect::from_min_max(egui::pos2(rect.left() + lw + 18.0, rect.top() + 4.0), egui::pos2(rect.right() - uw - 18.0, rect.bottom() - 4.0));
@@ -76,14 +77,14 @@ pub fn field(ui: &mut Ui, label: &str, text: &mut String, unit: &str, id: impl s
 /// Segmented control filling the width; the selected thumb slides. Returns true when changed.
 pub fn segments<T: PartialEq + Copy>(ui: &mut Ui, sel: &mut T, items: &[(T, &str)], h: f32) -> bool {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), Sense::hover());
-    ui.painter().rect_filled(rect, R + 1, panel2());
+    ui.painter().rect_filled(rect, rad() + 1, panel2());
     let w = (rect.width() - 4.0) / items.len() as f32;
     let cell = |i: f32| Rect::from_min_size(egui::pos2(rect.left() + 2.0 + w * i, rect.top() + 2.0), egui::vec2(w, rect.height() - 4.0));
     if let Some(k) = items.iter().position(|(v, _)| *v == *sel) {
         let x = ui.ctx().animate_value_with_time(ui.id().with(("kit_seg", items.len(), items[0].1)), k as f32, 0.15);
         let r = cell(x);
-        ui.painter().rect_filled(r.translate(egui::vec2(0.0, 1.0)), R, Color32::from_black_alpha(60));
-        ui.painter().rect_filled(r, R, hl());
+        ui.painter().rect_filled(r.translate(egui::vec2(0.0, 1.0)), rad(), Color32::from_black_alpha(60));
+        ui.painter().rect_filled(r, rad(), hl());
     }
     let mut changed = false;
     for (i, (v, name)) in items.iter().enumerate() {
@@ -167,12 +168,16 @@ pub fn kv(ui: &mut Ui, k: &str, v: String, col: Color32) -> Response {
 /// Hint / note text: 11.5, wraps.
 pub fn note(ui: &mut Ui, text: &str, col: Color32) { ui.add(egui::Label::new(egui::RichText::new(text).font(prop(11.5)).color(col)).wrap()); }
 
-/// Flat panel (radius 4, no border: the black gutters separate panels).
-pub fn panel_frame(margin: i8) -> egui::Frame { egui::Frame::new().fill(panel()).corner_radius(R).inner_margin(egui::Margin::same(margin)) }
+/// Flat panel (the preference radius; no border: the black gutters separate panels, except in the terminal style).
+pub fn panel_frame(margin: i8) -> egui::Frame {
+    // terminal style: panels are as black as the base, so the hairline is what separates them
+    let stroke = if term() { Stroke::new(1.0, line()) } else { Stroke::NONE };
+    egui::Frame::new().fill(panel()).corner_radius(rad()).stroke(stroke).inner_margin(egui::Margin::same(margin))
+}
 
 /// A group inside a panel: panel2 fill, hairline, radius 4.
 pub fn group<T>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> T) -> T {
-    egui::Frame::new().fill(panel2()).stroke(Stroke::new(1.0, line())).corner_radius(R).inner_margin(12).show(ui, |ui| {
+    egui::Frame::new().fill(panel2()).stroke(Stroke::new(1.0, line())).corner_radius(rad()).inner_margin(12).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 8.0;
         add(ui)

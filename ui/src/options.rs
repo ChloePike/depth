@@ -310,7 +310,7 @@ impl OptView {
         for p in held {
             let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), Sense::click());
             let pnt = ui.painter();
-            if resp.hovered() { pnt.rect_filled(r, kit::R, hl()); }
+            if resp.hovered() { pnt.rect_filled(r, kit::rad(), hl()); }
             let y = r.center().y;
             let long = p.side == Side::Buy;
             pnt.text(pos2(r.left() + 4.0, y), Align2::LEFT_CENTER, format!("{} {} {}", if long { "+" } else { "−" }, fmt_qty(p.qty), p.symbol.trim_end_matches("-USDT")), mono_m(11.0), if long { up() } else { dn() });

@@ -300,8 +300,8 @@ fn cell_field(ui: &mut Ui, r: Rect, text: &mut String, id: impl std::hash::Hash 
     let eid = ui.id().with(id);
     let focused = ui.memory(|m| m.has_focus(eid));
     let f = ui.ctx().animate_bool_with_time(eid.with("f"), focused, 0.12);
-    if f > 0.0 { ui.painter().rect_filled(r.expand(2.0 * f), kit::R + 2, accent().gamma_multiply(0.14 * f)); }
-    ui.painter().rect(r, kit::R, well(), egui::Stroke::new(1.0, lerp(line(), accent(), f)), egui::StrokeKind::Inside);
+    if f > 0.0 { ui.painter().rect_filled(r.expand(2.0 * f), kit::rad() + 2, accent().gamma_multiply(0.14 * f)); }
+    ui.painter().rect(r, kit::rad(), well(), egui::Stroke::new(1.0, lerp(line(), accent(), f)), egui::StrokeKind::Inside);
     ui.put(r.shrink2(egui::vec2(8.0, 2.0)), egui::TextEdit::singleline(text).id(eid).frame(egui::Frame::NONE).font(mono_m(12.5)).text_color(fg_strong())
         .horizontal_align(egui::Align::RIGHT).vertical_align(egui::Align::Center))
 }

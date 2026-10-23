@@ -38,11 +38,16 @@ pub struct Prefs {
     pub hotkeys: Vec<super::hotkeys::Binding>,
     /// order size of the trading hotkeys, USDT notional (0 = trading hotkeys off)
     pub hot_usdt: f64,
+    /// what margin-mode trading hotkeys do with loans: 0 none (only what the account holds), 1 borrow, 2 repay
+    pub hot_loan: u8,
+    /// terminal style: pure black, hairlines between panels instead of gutters (choosing it also
+    /// sets the amber accent, square corners and the dark theme)
+    pub terminal: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 5, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0 }
+        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false }
     }
 }
 
@@ -55,6 +60,8 @@ const GREEN: Color32 = Color32::from_rgb(0x26, 0xa6, 0x9a);
 const RED: Color32 = Color32::from_rgb(0xef, 0x53, 0x50);
 const ACCENTS: [(&str, [u8; 3]); 6] = [("Blue", [0x4c, 0x9e, 0xeb]), ("Gold", [0xf0, 0xb9, 0x0b]), ("Violet", [0x9b, 0x8c, 0xf0]),
     ("Teal", [0x2e, 0xc4, 0xb6]), ("Orange", [0xf5, 0x8a, 0x3d]), ("Pink", [0xe0, 0x5b, 0xc4])];
+/// Bloomberg-like amber of the terminal style
+const AMBER: [u8; 3] = [0xfb, 0x8b, 0x1e];
 const DEFAULT_FEES: (f64, f64) = (0.055, 0.02);
 
 static FEES: Mutex<BTreeMap<String, (f64, f64)>> = Mutex::new(BTreeMap::new());
@@ -74,11 +81,16 @@ impl Prefs {
         ctx.set_theme(match self.theme { ThemePref::System => egui::ThemePreference::System, ThemePref::Dark => egui::ThemePreference::Dark, ThemePref::Light => egui::ThemePreference::Light });
         ctx.set_zoom_factor(self.zoom.clamp(0.85, 1.3));
         let rad = self.radius.min(12);
+        set_radius(rad);
+        set_term(self.terminal);
         ctx.all_styles_mut(|s| {
             for w in [&mut s.visuals.widgets.noninteractive, &mut s.visuals.widgets.inactive, &mut s.visuals.widgets.hovered, &mut s.visuals.widgets.active, &mut s.visuals.widgets.open] {
                 w.corner_radius = rad.into();
             }
             s.visuals.selection.bg_fill = Color32::from_rgb(r, g, b).linear_multiply(0.35);
+            // menus keep their margin + item radius (concentric); dialogs follow the radius too
+            s.visuals.menu_corner_radius = (rad + 4).into();
+            s.visuals.window_corner_radius = (rad + 2).into();
             s.visuals.widgets.active.bg_stroke.color = Color32::from_rgb(r, g, b);
         });
         *FEES.lock().unwrap() = self.fees.clone();
@@ -88,7 +100,7 @@ impl Prefs {
     /// Theme, accent, price colors, size and radius are all at their defaults.
     fn default_look(&self) -> bool {
         let d = Prefs::default();
-        self.theme == d.theme && self.accent == d.accent && self.red_up == d.red_up && self.zoom == d.zoom && self.radius == d.radius
+        !self.terminal && self.theme == d.theme && self.accent == d.accent && self.red_up == d.red_up && self.zoom == d.zoom && self.radius == d.radius
     }
 }
 
@@ -174,7 +186,7 @@ impl SettingsView {
             let resp = ui.interact(r, ui.id().with(("set_tab", i)), egui::Sense::click());
             let on = self.tab == i as u8;
             let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() && !on, 0.1);
-            if on { p.rect_filled(r, kit::R, hl()); } else if hv > 0.0 { p.rect_filled(r, kit::R, hl().gamma_multiply(0.6 * hv)); }
+            if on { p.rect_filled(r, kit::rad(), hl()); } else if hv > 0.0 { p.rect_filled(r, kit::rad(), hl().gamma_multiply(0.6 * hv)); }
             let col = if on { fg_strong() } else { lerp(mu(), fg(), hv) };
             pane_icon(&p, egui::Rect::from_center_size(r.left_center() + egui::vec2(18.0, 0.0), egui::vec2(16.0, 16.0)), i, if on { accent() } else { col });
             p.text(r.left_center() + egui::vec2(36.0, 0.0), egui::Align2::LEFT_CENTER, l(title), if on { prop_s(12.5) } else { prop_m(12.5) }, col);
@@ -269,13 +281,18 @@ impl SettingsView {
                     let on = rec == Some(b.act);
                     let text = if on { l("Press keys…").to_string() } else { b.key.as_ref().map_or("—".into(), |c| c.label()) };
                     let r = kit::button(ui, &text, kit::Look::Secondary, kit::H_SM, Some(120.0), true);
-                    if on { ui.painter().rect_stroke(r.rect, kit::R, egui::Stroke::new(1.0, accent()), egui::StrokeKind::Inside); }
+                    if on { ui.painter().rect_stroke(r.rect, kit::rad(), egui::Stroke::new(1.0, accent()), egui::StrokeKind::Inside); }
                     if r.clicked() { rec = if on { None } else { Some(b.act) }; }
                 });
             }
         };
         section(ui, l("Trading"), l("The order panel on screen (Perp, Spot, Margin), on its venue. Buy / sell send the size below at the venue's own bid / ask (a limit that joins the queue) or at market, through the same confirmation as the buttons; TP/SL is not attached. Cancel-all and close-all act only on that venue, never on positions or orders held on other venues; close-all is perp only and asks first when order confirmation is on."), |ui| {
             number(ui, l("Order size"), &mut p.hot_usdt, 0, "USDT");
+            row_sep(ui);
+            // never the margin panel's own setting (Borrow by default): a sell key would open a short on borrowed coin
+            row(ui, l("Loans in Margin mode"), |ui| {
+                seg(ui, &mut p.hot_loan, &[(0, l("Normal")), (1, l("Borrow")), (2, l("Repay"))]);
+            });
             row_sep(ui);
             rows(ui, true);
         });
@@ -294,7 +311,7 @@ impl SettingsView {
     fn api_keys(&mut self, ui: &mut Ui, st: &Value, call: &mut Call) {
         ui.add_space(8.0);
         // the withdrawal warning is the first thing on the page, in a tinted callout
-        egui::Frame::new().fill(WARN.gamma_multiply(0.10)).stroke(egui::Stroke::new(1.0, WARN.gamma_multiply(0.35))).corner_radius(kit::R)
+        egui::Frame::new().fill(WARN.gamma_multiply(0.10)).stroke(egui::Stroke::new(1.0, WARN.gamma_multiply(0.35))).corner_radius(kit::rad())
             .inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -359,7 +376,7 @@ impl SettingsView {
         // OKX and Bitget keys are unusable without their passphrase
         let needs_extra = matches!(ex, Exchange::Okx | Exchange::Bitget);
         let (mut save, mut cancel) = (false, false);
-        egui::Frame::new().fill(well()).stroke(egui::Stroke::new(1.0, line())).corner_radius(kit::R).inner_margin(12).outer_margin(egui::Margin { left: 0, right: 0, top: 0, bottom: 10 }).show(ui, |ui| {
+        egui::Frame::new().fill(well()).stroke(egui::Stroke::new(1.0, line())).corner_radius(kit::rad()).inner_margin(12).outer_margin(egui::Margin { left: 0, right: 0, top: 0, bottom: 10 }).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 4.0;
             let field = |ui: &mut Ui, label: &str, v: &mut String, secret: bool| {
@@ -490,6 +507,16 @@ fn set_prefs(before: &Prefs, p: &Prefs, call: &mut Call) {
 fn appearance(ui: &mut Ui, st: &Value, call: &mut Call) {
     let mut p = prefs(st);
     let before = p.clone();
+    section(ui, l("Style"), l("Terminal: pure black, panels joined by hairlines instead of gaps, square corners, amber accent (the accent and radius can still be changed below)."), |ui| {
+        row(ui, l("Style"), |ui| {
+            let was = p.terminal;
+            seg(ui, &mut p.terminal, &[(false, l("Standard")), (true, l("Terminal"))]);
+            if p.terminal != was {
+                let d = Prefs::default();
+                (p.theme, p.accent, p.radius) = if p.terminal { (ThemePref::Dark, AMBER, 0) } else { (d.theme, d.accent, d.radius) };
+            }
+        });
+    });
     section(ui, l("Colors"), l("The accent marks selection and highlights in the chart and book. Price colors apply to candles, the order book, PnL and buy/sell buttons."), |ui| {
         row(ui, l("Theme"), |ui| {
             seg(ui, &mut p.theme, &[(ThemePref::System, l("System")), (ThemePref::Dark, l("Dark")), (ThemePref::Light, l("Light"))]);
@@ -646,7 +673,7 @@ fn section(ui: &mut Ui, header: &str, foot: &str, rows: impl FnOnce(&mut Ui)) {
         kit::overline(ui, header);
         ui.add_space(6.0);
     }
-    egui::Frame::new().fill(panel2()).corner_radius(kit::R).stroke(egui::Stroke::new(1.0, line())).inner_margin(egui::Margin::symmetric(14, 2)).show(ui, |ui| {
+    egui::Frame::new().fill(panel2()).corner_radius(kit::rad()).stroke(egui::Stroke::new(1.0, line())).inner_margin(egui::Margin::symmetric(14, 2)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         rows(ui);
     });

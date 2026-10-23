@@ -257,7 +257,7 @@ fn pill(ui: &mut Ui, text: &str, on: bool) -> Response {
     let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() && !on, 0.1);
     let t = ui.ctx().animate_bool_with_time(resp.id.with("on"), on, 0.12);
     let fill = if t > 0.0 { hl().gamma_multiply(t.max(0.6 * hv)) } else { hl().gamma_multiply(0.6 * hv) };
-    ui.painter().rect_filled(r, kit::R, fill);
+    ui.painter().rect_filled(r, kit::rad(), fill);
     ui.painter().text(r.center(), Align2::CENTER_CENTER, text, font, lerp(mu(), fg_strong(), t.max(hv * 0.7)));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -283,7 +283,7 @@ fn switch_row(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
 /// Secondary button that reads as active (accent border) when `on`.
 fn secondary(ui: &mut Ui, text: &str, h: f32, w: Option<f32>, on: bool, enabled: bool) -> Response {
     let r = kit::button(ui, text, Look::Secondary, h, w, enabled);
-    if on { ui.painter().rect_stroke(r.rect, kit::R, Stroke::new(1.0, accent()), egui::StrokeKind::Inside); }
+    if on { ui.painter().rect_stroke(r.rect, kit::rad(), Stroke::new(1.0, accent()), egui::StrokeKind::Inside); }
     r
 }
 
@@ -462,13 +462,13 @@ impl OrderPanel {
             // puts that price in the limit field
             if let (Some(b), Some(k)) = (bid, ask) {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), Sense::hover());
-                ui.painter().rect_filled(r, kit::R, panel2());
+                ui.painter().rect_filled(r, kit::rad(), panel2());
                 let half = r.width() / 2.0;
                 for (i, (lab, v, col)) in [(l("Bid"), b, up()), (l("Ask"), k, dn())].into_iter().enumerate() {
                     let cell = Rect::from_min_size(egui::pos2(r.left() + half * i as f32, r.top()), egui::vec2(half, r.height()));
                     let resp = ui.interact(cell, ui.id().with(("touch", i)), Sense::click());
                     let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered(), 0.1);
-                    if hv > 0.0 { ui.painter().rect_filled(cell.shrink(2.0), kit::R, hl().gamma_multiply(0.7 * hv)); }
+                    if hv > 0.0 { ui.painter().rect_filled(cell.shrink(2.0), kit::rad(), hl().gamma_multiply(0.7 * hv)); }
                     let (al, x) = if i == 0 { (Align2::LEFT_CENTER, cell.left() + 10.0) } else { (Align2::RIGHT_CENTER, cell.right() - 10.0) };
                     let w = ui.painter().text(egui::pos2(x, cell.center().y), al, lab, prop(11.0), dim()).width();
                     let vx = if i == 0 { x + w + 5.0 } else { x - w - 5.0 };
@@ -669,7 +669,7 @@ impl OrderPanel {
             let r = kit::button(ui, &label, Look::Secondary, 28.0, Some(mw), true);
             // selected: drawn like a lit segment, not an outlined (focus-looking) button
             if in_more {
-                ui.painter().rect_filled(r.rect, kit::R, hl());
+                ui.painter().rect_filled(r.rect, kit::rad(), hl());
                 ui.painter().text(r.rect.center(), Align2::CENTER_CENTER, &label, prop_s(12.5), fg_strong());
             }
             egui::Popup::menu(&r).show(|ui| {

@@ -77,7 +77,7 @@ impl TradeView {
             let picked = self.ins_pick.as_ref().is_some_and(|(e, s)| *e == q.ex && **s == *q.symbol);
             let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() || picked, 0.1);
             let p = ui.painter();
-            if hv > 0.0 { p.rect_filled(r, kit::R, hl().gamma_multiply(0.7 * hv)); }
+            if hv > 0.0 { p.rect_filled(r, kit::rad(), hl().gamma_multiply(0.7 * hv)); }
             if resp.clicked() {
                 self.ins_pick = Some((q.ex, q.symbol.to_string()));
                 if trade::OPTION_VENUES.contains(&q.ex) && rest > 0.0 { eng.plan_option(q.ex, q.symbol.to_string(), rest, ui.ctx()); }

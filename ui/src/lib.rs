@@ -439,7 +439,7 @@ impl App {
                 let (r, resp) = ui.allocate_exact_size(egui::vec2(g.size().x + 26.0, 20.0), egui::Sense::click());
                 let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
                 let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() || open, 0.1);
-                if hv > 0.0 { ui.painter().rect_filled(r, kit::R, hl().gamma_multiply(0.7 * hv)); }
+                if hv > 0.0 { ui.painter().rect_filled(r, kit::rad(), hl().gamma_multiply(0.7 * hv)); }
                 let col = lerp(mu(), fg(), hv);
                 ui.painter().galley(egui::pos2(r.left() + 7.0, r.center().y - g.size().y / 2.0), g, col);
                 chevron(ui, egui::Rect::from_center_size(egui::pos2(r.right() - 9.0, r.center().y), egui::vec2(8.0, 8.0)), &ui.visuals().widgets.inactive, open);
@@ -450,7 +450,7 @@ impl App {
                         // fixed width: available_width here is the whole status bar
                         let (r, row) = ui.allocate_exact_size(egui::vec2(160.0, 28.0), egui::Sense::click());
                         let on = i == cur;
-                        if on || row.hovered() { ui.painter().rect_filled(r, kit::R, hl()); }
+                        if on || row.hovered() { ui.painter().rect_filled(r, kit::rad(), hl()); }
                         if on { ui.painter().text(egui::pos2(r.left() + 13.0, r.center().y), egui::Align2::CENTER_CENTER, "✓", prop(12.0), accent()); }
                         ui.painter().text(egui::pos2(r.left() + 28.0, r.center().y), egui::Align2::LEFT_CENTER, *name, prop(12.5), if on { fg_strong() } else { fg() });
                         if row.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !on { set_lang(code); }
@@ -698,8 +698,10 @@ impl App {
             // panels are rounded cards on the darker base: 8 px black gutters, a faint hairline edge
             // (none hosted: the native window shows through transparent panels)
             let edge_c = if theme::native() { Color32::TRANSPARENT } else { line().gamma_multiply(0.8) };
-            let card = |m: i8| Frame::new().fill(panel()).corner_radius(kit::R).stroke(egui::Stroke::new(1.0, edge_c))
-                .inner_margin(Margin::symmetric(m, 5)).outer_margin(Margin::same(4));
+            // terminal style: no gutters, the cards' own hairlines (overlapping by one pixel) separate them
+            let gap: i8 = if theme::term() { 0 } else { 4 };
+            let card = |m: i8| Frame::new().fill(panel()).corner_radius(kit::rad()).stroke(egui::Stroke::new(1.0, if theme::term() { line() } else { edge_c }))
+                .inner_margin(Margin::symmetric(m, 5)).outer_margin(Margin::same(gap));
             // title bar + stats strip, status bar: on the base, 14 px sides, 4 px towards the cards
             let flat = |top: i8, bottom: i8| Frame::new().fill(bg()).inner_margin(Margin { left: 14, right: 14, top, bottom });
 
@@ -750,7 +752,7 @@ impl App {
                         if self.mode == Market::Option { self.opt.ticket(ui, &g, &self.eng, &base, self.prefs.confirm); }
                         else {
                             self.spot.show(ui, &g, &self.eng, &base, self.mode, self.trade.fill, self.prefs.confirm);
-                            for a in hot.iter().copied() { self.spot.hotkey(a, self.prefs.hot_usdt, &g, &self.eng, &base, self.mode, self.prefs.confirm, ui.ctx()); }
+                            for a in hot.iter().copied() { self.spot.hotkey(a, self.prefs.hot_usdt, self.prefs.hot_loan, &g, &self.eng, &base, self.mode, self.prefs.confirm, ui.ctx()); }
                         }
                     }));
             }

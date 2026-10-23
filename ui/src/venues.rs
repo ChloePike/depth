@@ -45,7 +45,7 @@ fn card(ui: &mut Ui, title: &str, sub: &str, add: impl FnOnce(&mut Ui)) {
 fn venue_row(ui: &mut Ui, ex: &str) -> (Rect, egui::Response) {
     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
     let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered(), 0.1);
-    if hv > 0.0 { ui.painter().rect_filled(r, kit::R, hl().gamma_multiply(0.7 * hv)); }
+    if hv > 0.0 { ui.painter().rect_filled(r, kit::rad(), hl().gamma_multiply(0.7 * hv)); }
     let r = r.shrink2(vec2(2.0, 0.0));
     if let Some(e) = Exchange::parse(ex) { icon(ui.painter(), e, Rect::from_center_size(pos2(r.left() + 7.0, r.center().y), vec2(14.0, 14.0)), false); }
     ui.painter().text(pos2(r.left() + 21.0, r.center().y), Align2::LEFT_CENTER, ex, prop_m(12.0), fg());

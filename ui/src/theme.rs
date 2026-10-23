@@ -10,13 +10,20 @@ static LIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new
 /// system / dark / light).
 pub fn set_light(on: bool) { LIGHT.store(on, Relaxed); }
 pub fn light() -> bool { LIGHT.load(Relaxed) }
+/// Terminal style (Settings > Appearance): pure black, panels joined by hairlines instead of gutters.
+static TERM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_term(on: bool) { TERM.store(on, Relaxed); }
+pub fn term() -> bool { TERM.load(Relaxed) && !light() }
+static RADIUS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(4);
+pub fn set_radius(r: u8) { RADIUS.store(r.min(12), Relaxed); }
+pub fn radius() -> u8 { RADIUS.load(Relaxed) }
 const fn pick(d: Color32, l: Color32, light: bool) -> Color32 { if light { l } else { d } }
 /// Translucent overlays (white on dark, black on light): they read the same on the solid egui
 /// panel and on the native window.
 const fn veil(a: u8, light: bool) -> Color32 { if light { Color32::from_rgba_premultiplied(0, 0, 0, a) } else { Color32::from_rgba_premultiplied(a, a, a, a) } }
 pub fn panel2() -> Color32 { veil(if light() { 8 } else { 13 }, light()) }
 pub fn hl() -> Color32 { veil(if light() { 14 } else { 23 }, light()) }
-pub fn line() -> Color32 { veil(if light() { 22 } else { 28 }, light()) }
+pub fn line() -> Color32 { veil(if light() { 22 } else if term() { 40 } else { 28 }, light()) }
 pub fn grid() -> Color32 { veil(if light() { 10 } else { 14 }, light()) }
 /// stronger hairline (selected segment, hovered widget)
 pub fn edge() -> Color32 { veil(if light() { 38 } else { 46 }, light()) }
@@ -32,12 +39,12 @@ pub fn label_bg() -> Color32 { pick(Color32::from_rgb(0x1c, 0x1c, 0x1c), Color32
 /// off-state track of switches and sliders
 pub fn track() -> Color32 { pick(Color32::from_rgb(0x38, 0x38, 0x38), Color32::from_rgb(0xd1, 0xd1, 0xd6), light()) }
 /// the window behind the panels: the gutters between them read as black seams
-fn bg_c() -> Color32 { pick(Color32::from_rgb(0x05, 0x05, 0x05), Color32::from_rgb(0xe9, 0xe9, 0xec), light()) }
+fn bg_c() -> Color32 { pick(if term() { Color32::BLACK } else { Color32::from_rgb(0x05, 0x05, 0x05) }, Color32::from_rgb(0xe9, 0xe9, 0xec), light()) }
 /// Opaque fill of popups, menus and windows (the panel veils are translucent and would show what is under them).
 pub fn popup_bg() -> Color32 { pick(Color32::from_rgb(0x1c, 0x1c, 0x1c), Color32::from_rgb(0xff, 0xff, 0xff), light()) }
-pub fn panel_c() -> Color32 { pick(Color32::from_rgb(0x0f, 0x0f, 0x0f), Color32::WHITE, light()) }
+pub fn panel_c() -> Color32 { pick(if term() { Color32::BLACK } else { Color32::from_rgb(0x0f, 0x0f, 0x0f) }, Color32::WHITE, light()) }
 /// input wells (text fields): a step darker than controls
-pub fn well() -> Color32 { pick(Color32::from_rgb(0x12, 0x12, 0x12), Color32::from_rgb(0xf6, 0xf6, 0xf8), light()) }
+pub fn well() -> Color32 { pick(if term() { Color32::from_rgb(0x0b, 0x0b, 0x0b) } else { Color32::from_rgb(0x12, 0x12, 0x12) }, Color32::from_rgb(0xf6, 0xf6, 0xf8), light()) }
 
 static NATIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Hosted in the SwiftUI window: egui leaves its backgrounds transparent and the native window
