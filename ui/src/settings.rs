@@ -340,38 +340,48 @@ impl SettingsView {
                 let Some(name) = k["ex"].as_str() else { continue };
                 let Some(ex) = Exchange::parse(name) else { continue };
                 if i > 0 { row_sep(ui); }
+                let configured = k["configured"].as_bool() == Some(true);
                 ui.horizontal(|ui| {
-                    ui.set_min_height(42.0);
+                    ui.set_min_height(46.0);
                     let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
                     icon(ui.painter(), ex, r, false);
                     ui.add_space(8.0);
-                    ui.label(RichText::new(name).font(prop_s(12.5)).color(fg_strong()));
-                    if !k["verified"].as_bool().unwrap_or(true) {
-                        ui.add_space(6.0);
-                        kit::chip(ui, &l("Untested").to_uppercase(), kit::Tone::Warn).on_hover_text(l("Implemented and unit-tested, but not yet run against a live account. Test with a read-only key first, then trade the minimum size."));
-                    }
+                    // buttons first (right to left) so the name / status column gets what is left and never wraps
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        if k["configured"].as_bool() == Some(true) {
+                        if configured {
                             if kit::button(ui, l("Remove"), kit::Look::Danger, kit::H_SM + 2.0, None, true).clicked() { self.removing = Some(name.to_string()); }
                             if kit::button(ui, l("Replace"), kit::Look::Secondary, kit::H_SM + 2.0, None, true).clicked() { self.close_form(); self.edit = Some(name.to_string()); }
                             if kit::button(ui, l("Test"), kit::Look::Secondary, kit::H_SM + 2.0, None, true).on_hover_text(l("Read-only check: balances and permissions")).clicked() {
                                 if let Err(e) = call(json!({"op": "test_keys", "ex": name})) { self.key_err = Some(e); }
                             }
-                            ui.add_space(6.0);
-                            ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-                                ui.spacing_mut().item_spacing.y = 2.0;
-                                ui.add_space(4.0);
-                                ui.label(RichText::new(format!("✓ {} ••••{}", l("Configured"), k["tail"].as_str().unwrap_or(""))).font(mono_m(11.5)).color(up()));
+                        } else if kit::button(ui, l("Add…"), kit::Look::Secondary, kit::H_SM + 2.0, None, true).clicked() { self.close_form(); self.edit = Some(name.to_string()); }
+                        ui.add_space(6.0);
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                            ui.spacing_mut().item_spacing.y = 3.0;
+                            ui.add_space(5.0);
+                            ui.horizontal(|ui| {
+                                let shown = match ex { Exchange::Okx => "OKX", Exchange::Mexc => "MEXC", _ => name };
+                                ui.label(RichText::new(shown).font(prop_s(12.5)).color(fg_strong()));
+                                if !k["verified"].as_bool().unwrap_or(true) {
+                                    ui.add_space(4.0);
+                                    kit::chip(ui, &l("Untested").to_uppercase(), kit::Tone::Warn).on_hover_text(l("Implemented and unit-tested, but not yet run against a live account. Test with a read-only key first, then trade the minimum size."));
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                if !configured {
+                                    ui.label(RichText::new(l("Not configured")).font(prop(11.0)).color(dim()));
+                                    return;
+                                }
+                                ui.label(RichText::new(format!("✓ {} ••••{}", l("Configured"), k["tail"].as_str().unwrap_or(""))).font(mono_m(11.0)).color(up()));
                                 if let Some(msg) = k["test"]["msg"].as_str() {
                                     let (txt, col) = if msg == "…" { (l("Testing…").to_string(), mu()) } else { (msg.to_string(), if k["test"]["ok"].as_bool() == Some(true) { up() } else { dn() }) };
+                                    ui.label(RichText::new("  ·  ").font(prop(11.0)).color(dim()));
                                     ui.add(egui::Label::new(RichText::new(&txt).font(prop(11.0)).color(col)).truncate()).on_hover_text(txt);
                                 }
                             });
-                        } else {
-                            if kit::button(ui, l("Add…"), kit::Look::Secondary, kit::H_SM + 2.0, None, true).clicked() { self.close_form(); self.edit = Some(name.to_string()); }
-                            ui.label(RichText::new(l("Not configured")).font(prop(12.0)).color(dim()));
-                        }
+                        });
                     });
                 });
                 if self.edit.as_deref() == Some(name) { self.key_form(ui, ex, name, call); }
