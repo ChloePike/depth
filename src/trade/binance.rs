@@ -33,6 +33,7 @@ fn pm_path(fapi: &str) -> &str {
         "/fapi/v3/account" => "/papi/v1/account",
         "/fapi/v3/positionRisk" => "/papi/v1/um/positionRisk",
         "/fapi/v1/openOrders" => "/papi/v1/um/openOrders",
+        "/fapi/v1/allOpenOrders" => "/papi/v1/um/allOpenOrders",
         "/fapi/v1/order" => "/papi/v1/um/order",
         "/fapi/v1/positionSide/dual" => "/papi/v1/um/positionSide/dual",
         "/fapi/v1/symbolConfig" => "/papi/v1/um/symbolConfig",
@@ -212,6 +213,35 @@ pub async fn cancel(k: &Keys, symbol: &str, id: &str) -> Result<()> {
 /// Algo-service rows (trigger Some: conditional and trailing orders) cancel by algoId, the rest by orderId.
 pub async fn cancel_order(k: &Keys, o: &OpenOrder) -> Result<()> {
     if o.trigger.is_some() { tpsl::binance_cancel(k, &o.id).await } else { cancel(k, &o.symbol, &o.id).await }
+}
+
+/// Distinct symbols in first-seen order, with how many of the orders each has.
+fn by_symbol<'a>(orders: impl Iterator<Item = &'a OpenOrder>) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = vec![];
+    for o in orders { match out.iter_mut().find(|(s, _)| *s == o.symbol) { Some(e) => e.1 += 1, None => out.push((o.symbol.clone(), 1)) } }
+    out
+}
+
+/// One bulk call per symbol; a refused symbol is reported and the others still go out. `sent` counts
+/// the given orders of each accepted symbol (the venue does not say how many it cancelled).
+async fn per_symbol<F, Fut>(rep: &mut CancelReport, groups: Vec<(String, usize)>, mut call: F)
+where F: FnMut(String) -> Fut, Fut: std::future::Future<Output = Result<()>> {
+    for (sym, n) in groups {
+        match call(sym.clone()).await { Ok(()) => rep.sent += n, Err(e) => rep.failed.push(format!("binance {sym} all open orders: {e:#}")) }
+    }
+}
+
+/// Every resting order of each symbol in `orders` (DELETE allOpenOrders, weight 1 per symbol; PM
+/// /papi/v1/um/allOpenOrders; symbols not in `orders` are not touched), then each algo row
+/// (conditional / trailing) by algoId, weight 1 each. TP/SL stay (tpsl::cancel_all): the venue's
+/// per-symbol algo cancel-all would take them too.
+pub async fn cancel_all(k: &Keys, orders: &[OpenOrder]) -> Result<CancelReport> {
+    let mut rep = CancelReport::default();
+    per_symbol(&mut rep, by_symbol(orders.iter().filter(|o| o.trigger.is_none())), |s| async move {
+        binance(k, reqwest::Method::DELETE, "/fapi/v1/allOpenOrders", &[("symbol", s)]).await.map(|_| ())
+    }).await;
+    for o in orders.iter().filter(|o| o.trigger.is_some()) { rep.add(format!("{} {}", o.symbol, o.id), tpsl::binance_cancel(k, &o.id).await); }
+    Ok(rep)
 }
 
 pub async fn positions(k: &Keys) -> Result<Vec<Position>> {
@@ -571,5 +601,23 @@ mod tests {
         assert_eq!((get(&w, "side").as_deref(), get(&w, "reduceOnly").as_deref(), get(&w, "positionSide")), (Some("BUY"), Some("true"), None));
         assert_eq!(native_twap(Exchange::Bybit), None);
         assert_eq!(native_twap(Exchange::Binance), Some((5, 1440)));
+    }
+
+    #[test]
+    fn cancel_all_groups_symbols_and_reports_each() {
+        use futures_util::FutureExt;
+        let row = |sym: &str, trigger: Option<f64>| OpenOrder { ex: Exchange::Binance, symbol: sym.into(), id: "1".into(), side: Side::Buy, price: 1.0, qty: 1.0, filled: 0.0,
+            kind: "LIMIT".into(), tif: "GTC".into(), reduce_only: false, ts: 0, pos: None, client_id: None, trigger };
+        let orders = [row("BTCUSDT", None), row("ETHUSDT", None), row("BTCUSDT", None), row("SOLUSDT", Some(150.0)), row("XRPUSDT", None)];
+        let groups = by_symbol(orders.iter().filter(|o| o.trigger.is_none()));
+        assert_eq!(groups, [("BTCUSDT".to_string(), 2), ("ETHUSDT".to_string(), 1), ("XRPUSDT".to_string(), 1)]);
+        // ETH is refused: BTC and XRP still go out and count, ETH is named
+        let mut rep = CancelReport::default();
+        let calls = std::cell::RefCell::new(vec![]);
+        per_symbol(&mut rep, groups, |s| { calls.borrow_mut().push(s.clone()); async move { if s == "ETHUSDT" { Err(anyhow!("binance /fapi/v1/allOpenOrders: busy (-1008)")) } else { Ok(()) } } })
+            .now_or_never().unwrap();
+        assert_eq!(calls.into_inner(), ["BTCUSDT", "ETHUSDT", "XRPUSDT"]);
+        assert_eq!((rep.sent, rep.failed), (3, vec!["binance ETHUSDT all open orders: binance /fapi/v1/allOpenOrders: busy (-1008)".to_string()]));
+        assert_eq!(pm_path("/fapi/v1/allOpenOrders"), "/papi/v1/um/allOpenOrders");
     }
 }

@@ -576,12 +576,22 @@ impl CancelReport {
     }
 }
 
-/// Cancels every given order, one request after another (the rate-limit pause applies to each).
-/// ponytail: a loop of single cancels; native cancel-all endpoints come with the kill switch.
+/// Cancels the venue's resting and conditional orders, never its TP/SL (`tpsl::cancel_all`); every
+/// refusal is a line in the report and the rest still go out. Bybit: two account-wide cancel-all
+/// calls (USDT linear, also orders missing from `orders`), then the given trailing stops one by one.
+/// Binance: one cancel-all per symbol of `orders`, then its algo rows by id. Elsewhere one request
+/// per given order (the rate-limit pause applies to each).
+// ponytail: other venues loop single cancels; wire their cancel-all endpoints once they are verified on a real account
 pub async fn cancel_all(ex: Exchange, k: &Keys, orders: &[OpenOrder]) -> Result<CancelReport> {
-    let mut rep = CancelReport::default();
-    for o in orders { rep.add(format!("{} {}", o.symbol, o.id), cancel_order(ex, k, o).await); }
-    Ok(rep)
+    match ex {
+        Exchange::Bybit => bybit::cancel_all(k, orders).await,
+        Exchange::Binance => binance::cancel_all(k, orders).await,
+        _ => {
+            let mut rep = CancelReport::default();
+            for o in orders { rep.add(format!("{} {}", o.symbol, o.id), cancel_order(ex, k, o).await); }
+            Ok(rep)
+        }
+    }
 }
 
 pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {

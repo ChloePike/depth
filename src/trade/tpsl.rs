@@ -333,7 +333,8 @@ pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()
     }
 }
 
-/// Cancels every given TP/SL, one request after another.
+/// Cancels every given TP/SL, one request after another. By id on purpose: the bulk endpoints
+/// (Bybit cancel-all StopOrder, Binance algoOpenOrders) also take conditional entries and trailing stops.
 pub async fn cancel_all(ex: Exchange, k: &Keys, list: &[TpSl]) -> Result<CancelReport> {
     let mut rep = CancelReport::default();
     for t in list { rep.add(format!("{} {}", t.symbol, t.id), cancel(ex, k, &t.symbol, &t.id).await); }
