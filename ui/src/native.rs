@@ -280,14 +280,15 @@ impl App {
                         if !same { return Err("the route changed since the preview; review it again".into()); }
                     }
                     // TP/SL: attached to the order where the venue takes it (protected at fill), else set by the
-                    // engine once this very order has filled (`TpSlWait`)
+                    // engine once this very order has filled (`TpSlWait`); always the latter in demo mode, whose
+                    // simulator ignores an attached TP/SL
                     let trigger = if s("tpsl_trigger") == "last" { trade::tpsl::Trigger::Last } else { trade::tpsl::Trigger::Mark };
                     let attach = (f("tp").is_some() || f("sl").is_some()).then_some(trade::tpsl::Attach { tp: f("tp"), sl: f("sl"), trigger }).filter(|_| !req.close);
                     self.eng.account.lock().unwrap().record_plan(&plan.legs);
                     for leg in &plan.legs {
                         let mut r = leg.req.clone();
                         match attach {
-                            Some(at) if trade::caps(leg.ex).attach_tpsl => r.attach = Some(at),
+                            Some(at) if trade::caps(leg.ex).attach_tpsl && !depth::demo::on() => r.attach = Some(at),
                             Some(at) => { if let Some(w) = super::engine::TpSlWait::new(leg.ex, &r, at, now_ms()) { self.eng.account.lock().unwrap().tpsl_wait.push(w); } }
                             None => {}
                         }
