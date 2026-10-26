@@ -198,6 +198,15 @@ struct Prefs: Codable, Equatable {
     var tz_min: Int?
     var accent: [Int] = [76, 158, 235]; var red_up = false; var zoom = 1.0; var radius = 5; var confirm = true
     var fees: [String: [Double]] = [:]
+
+    /// tz_min goes out as an explicit null when nil: the synthesized encoder omits it, and the engine
+    /// merges only the keys it receives, so "System" would never replace a chosen zone.
+    func encode(to e: Encoder) throws {
+        var c = e.container(keyedBy: CodingKeys.self)
+        try c.encode(theme, forKey: .theme); try c.encode(tz_min, forKey: .tz_min); try c.encode(accent, forKey: .accent)
+        try c.encode(red_up, forKey: .red_up); try c.encode(zoom, forKey: .zoom); try c.encode(radius, forKey: .radius)
+        try c.encode(confirm, forKey: .confirm); try c.encode(fees, forKey: .fees)
+    }
 }
 
 /// Smart order routing policy (round-trips through set_route).
