@@ -895,7 +895,11 @@ impl AccountPanel {
                 ui.add_space(6.0);
                 for v in st["kill"]["plan"].as_array().into_iter().flatten() {
                     let n = |k: &str| v[k].as_u64().unwrap_or(0).to_string();
-                    kit::kv(ui, s(&v["ex"]), lf("%d orders · %d TP/SL · %d algos · %d positions", &[n("orders"), n("tpsl"), n("algos"), n("positions")]), fg());
+                    if v["perps"] != false { kit::kv(ui, s(&v["ex"]), lf("%d orders · %d TP/SL · %d algos · %d positions", &[n("orders"), n("tpsl"), n("algos"), n("positions")]), fg()); }
+                    // options stay as they are: said per venue wherever there are any (always on an options-only venue)
+                    if v["perps"] == false || n("opt_orders") != "0" || n("opts") != "0" {
+                        kit::kv(ui, s(&v["ex"]), lf("options not touched: %d resting orders · %d held", &[n("opt_orders"), n("opts")]), WARN);
+                    }
                 }
                 ui.add_space(6.0);
                 kit::note(ui, l("Positions of the symbol on screen close through the slippage cap and what is left at market; every other position at market. Nothing is undone."), WARN);

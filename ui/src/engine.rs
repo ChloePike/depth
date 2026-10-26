@@ -193,15 +193,27 @@ async fn look_up(account: &Arc<Mutex<Account>>, ex: Exchange, symbol: String, ci
 pub struct KillReport { pub started_ms: i64, pub venues: Vec<(Exchange, Vec<(String, bool)>, bool)> }
 
 /// What the kill switch will act on, per keyed venue: (venue, orders, TP/SL, algorithms with the
-/// waiting TP/SL, positions).
-pub(crate) fn kill_plan(a: &Account) -> Vec<(Exchange, usize, usize, usize, usize)> {
+/// waiting TP/SL, positions), then what it leaves alone there (`kill_opts`).
+pub(crate) fn kill_plan(a: &Account) -> Vec<(Exchange, usize, usize, usize, usize, (usize, usize))> {
     let mut v: Vec<_> = a.keys.keys().map(|&e| (e,
         a.orders.iter().filter(|o| o.ex == e).count(),
         a.tpsl.iter().filter(|t| t.ex == e).count(),
         a.algos.iter().filter(|j| j.ex == e && !j.cancelled && j.status != "done").count() + a.tpsl_wait.iter().filter(|w| w.ex == e).count(),
-        a.positions.iter().filter(|p| p.ex == e && p.qty > 0.0).count())).collect();
+        a.positions.iter().filter(|p| p.ex == e && p.qty > 0.0).count(),
+        kill_opts(a, e))).collect();
     v.sort_by_key(|x| x.0 as u8);
     v
+}
+
+/// The kill switch never touches options: what it leaves on `ex`, (resting option orders, held options).
+fn kill_opts(a: &Account, ex: Exchange) -> (usize, usize) {
+    (a.opt_orders.iter().filter(|o| o.ex == ex).count(), a.opts.iter().filter(|p| p.ex == ex && p.qty > 0.0).count())
+}
+
+/// The kill switch's last line on an option venue: the options it left alone, not ok while there are any.
+fn kill_opts_line(a: &Account, ex: Exchange) -> Option<(String, bool)> {
+    let (o, p) = kill_opts(a, ex);
+    trade::OPTION_VENUES.contains(&ex).then(|| (format!("options not touched by the kill switch: {o} resting option orders, {p} held options left as they are"), o + p == 0))
 }
 
 fn market_close(p: &Position) -> (OrderReq, f64) {
@@ -276,7 +288,6 @@ async fn kill_venue(account: &Arc<Mutex<Account>>, ex: Exchange, k: &Keys, twaps
             Err(e) => line(format!("positions after the capped closes: {e:#}; check the venue"), false),
         }
     }
-    if let Some(v) = account.lock().unwrap().kill.as_mut().and_then(|k| k.venues.iter_mut().find(|v| v.0 == ex)) { v.2 = true; }
 }
 
 /// A TP/SL sent with an opening order on a venue that cannot attach it to the order
@@ -1296,7 +1307,8 @@ impl Engine {
     /// The kill switch: stop every client TWAP, scaled ladder, sequential order and waiting TP/SL, then
     /// on every keyed venue at once (`kill_venue`) cancel its orders, TP/SL and venue-run TWAPs and close
     /// every position it reports: `capped` (the planner's slippage-capped closes of the symbol on
-    /// screen) first and their rest at market, every other position at market. Every step is in the
+    /// screen) first and their rest at market, every other position at market. Options are never
+    /// touched: each option venue's report ends with what it left (`kill_opts_line`). Every step is in the
     /// report and the order log, a notification says when it is over; running it again repeats it.
     pub fn kill(&self, capped: Vec<(Exchange, OrderReq, f64)>, ctx: &eframe::egui::Context) {
         let Some(rt) = self.acct_rt.as_ref() else { return };
@@ -1323,7 +1335,14 @@ impl Engine {
                 let tw = twaps.iter().filter(|t| t.0 == ex).map(|t| (t.1, t.2.clone(), t.3.clone())).collect();
                 let cap = capped.iter().filter(|c| c.0 == ex).map(|c| (c.1.clone(), c.2)).collect();
                 let (account, ctx) = (account.clone(), ctx.clone());
-                hs.push(tokio::spawn(async move { kill_venue(&account, ex, &k, tw, cap).await; ctx.request_repaint(); }));
+                hs.push(tokio::spawn(async move {
+                    // Deribit trades options only: no perp step there
+                    if trade::TRADABLE.contains(&ex) { kill_venue(&account, ex, &k, tw, cap).await; }
+                    let opts = kill_opts_line(&account.lock().unwrap(), ex);
+                    if let Some((msg, ok)) = opts { kill_line(&account, ex, msg, ok); }
+                    if let Some(v) = account.lock().unwrap().kill.as_mut().and_then(|k| k.venues.iter_mut().find(|v| v.0 == ex)) { v.2 = true; }
+                    ctx.request_repaint();
+                }));
             }
             for h in hs { let _ = h.await; }
             let (ok, bad) = account.lock().unwrap().kill.as_ref().map_or((0, 0), |r| r.venues.iter().flat_map(|v| &v.1).fold((0, 0), |(o, b), l| if l.1 { (o + 1, b) } else { (o, b + 1) }));
@@ -2558,7 +2577,18 @@ mod tests {
         a.algos.push(AlgoJob { id: 1, ex: Exchange::Bybit, symbol: "BTCUSDT".into(), buy: true, close: false, total: 1.0, sent: 0.0, slices: 2, done: 0, started_ms: 0, end_ms: 1, status: "running".into(), cancelled: false, venue_id: None });
         // a venue without keys is not touched
         a.orders.push(OpenOrder { ex: Exchange::Okx, ..order("3", None, 0.0) });
-        assert_eq!(kill_plan(&a), vec![(Exchange::Binance, 2, 0, 1, 1), (Exchange::Bybit, 0, 0, 1, 1)]);
+        assert_eq!(kill_plan(&a), vec![(Exchange::Binance, 2, 0, 1, 1, (0, 0)), (Exchange::Bybit, 0, 0, 1, 1, (0, 0))]);
+        // options are never touched, and the report says so on every option venue (not ok while any are there)
+        let d = Exchange::Deribit;
+        a.keys.insert(d, Keys { key: "k".into(), secret: "s".into(), extra: None, demo: false });
+        a.opt_orders.push(OpenOrder { ex: d, ..order("4", None, 0.0) });
+        a.opts.push(trade::OptPos { ex: Exchange::Bybit, symbol: "BTC-6NOV26-60000-P-USDT".into(), base: "BTC".into(), expiry: "6NOV26".into(), strike: 60000.0, call: false,
+            side: Side::Buy, qty: 1.0, avg: 0.0, mark: 0.0, upnl: 0.0, delta: 0.0, gamma: 0.0, vega: 0.0, theta: 0.0 });
+        assert_eq!(kill_plan(&a).iter().map(|v| (v.0, v.5)).collect::<Vec<_>>(), vec![(Exchange::Binance, (0, 0)), (Exchange::Bybit, (0, 1)), (d, (1, 0))]);
+        assert_eq!(kill_opts_line(&a, d), Some(("options not touched by the kill switch: 1 resting option orders, 0 held options left as they are".into(), false)));
+        assert!(kill_opts_line(&a, Exchange::Binance).is_none());
+        a.opts.clear();
+        assert!(kill_opts_line(&a, Exchange::Bybit).is_some_and(|l| l.1));
     }
 
     #[test]

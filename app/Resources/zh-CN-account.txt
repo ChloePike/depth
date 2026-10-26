@@ -305,5 +305,6 @@ Kill switch: cancel every order, TP/SL and algorithm on every venue with keys an
 Every venue = 所有交易所
 Cancels every order, TP/SL and algorithm on every venue with keys, then closes every position. = 撤销所有已配置 API key 的交易所上的全部订单、止盈止损和算法单，然后平掉所有仓位。
 %d orders · %d TP/SL · %d algos · %d positions = %d 个订单 · %d 个止盈止损 · %d 个算法单 · %d 个仓位
+options not touched: %d resting orders · %d held = 期权不受影响：%d 个挂单 · %d 个持仓
 Positions of the symbol on screen close through the slippage cap and what is left at market; every other position at market. Nothing is undone. = 当前币种的仓位按滑点上限平仓，剩余部分市价平仓；其他所有仓位市价平仓。操作无法撤回。
 Running… = 执行中…
