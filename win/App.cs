@@ -33,6 +33,10 @@ sealed class App : Application, IXamlMetadataProvider
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        // a second Depth would fight the first over the account streams and settings.json: the Rust side has
+        // already told the user, so quit before any window exists (a missing DLL is reported by the panel)
+        try { if (Native.t1_instance_lock() == 0) { Exit(); return; } }
+        catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException) { }
         Resources ??= new ResourceDictionary();
         Resources.MergedDictionaries.Add(new XamlControlsResources());
         window = new MainWindow();

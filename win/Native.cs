@@ -10,6 +10,9 @@ static unsafe class Native
     const string Dll = "t1_ffi.dll";
     const CallingConvention C = CallingConvention.Cdecl;
 
+    /// 1 for the first Depth of this user, 0 when another one runs (the user is already told): call before the window exists
+    [DllImport(Dll, CallingConvention = C)] public static extern int t1_instance_lock();
+
     /// native: the SwapChainPanel's IInspectable*; null when no GPU device / surface could be created
     [DllImport(Dll, CallingConvention = C)] public static extern IntPtr t1_view_new(IntPtr native, float w, float h, float scale);
     [DllImport(Dll, CallingConvention = C)] public static extern void t1_view_free(IntPtr v);
