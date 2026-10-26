@@ -37,6 +37,7 @@ pub struct Prefs {
     pub proxy: ProxyMode,
     pub proxy_url: String,
     /// keyboard shortcuts (hotkeys::complete fills in actions added later)
+    #[serde(deserialize_with = "super::lenient_vec")]
     pub hotkeys: Vec<super::hotkeys::Binding>,
     /// order size of the trading hotkeys, USDT notional (0 = trading hotkeys off)
     pub hot_usdt: f64,

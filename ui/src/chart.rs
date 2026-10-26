@@ -137,9 +137,11 @@ pub struct Chart {
     heat: bool,
     /// estimated liquidation map, drawn as a profile on the right edge (perp)
     liqmap: bool,
+    #[serde(deserialize_with = "crate::lenient_vec")]
     panes: Vec<(Pane, bool)>,
     bar_w: f32,
     /// drawings per base asset
+    #[serde(deserialize_with = "crate::lenient_map_vec")]
     drawings: std::collections::HashMap<String, Vec<Drawing>>,
     /// moving averages on the price chart (master toggle, then each line)
     ma: bool,
