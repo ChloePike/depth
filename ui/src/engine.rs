@@ -1450,10 +1450,12 @@ fn wants_liq_refetch(ex: Exchange, p: &Position) -> bool { ex == Exchange::Binan
 
 /// A REST position snapshot replaces the venue's rows but keeps what the snapshot leaves out
 /// (Kraken: mark, liq, margin) from the rows pushed so far.
+/// Kraken's REST rows carry no mark / liq / margin, so they merge into the pushed rows; every other venue's
+/// snapshot is authoritative (a missing liq there means the position has none, e.g. well-funded cross).
 fn replace_positions(a: &mut Account, ex: Exchange, new: Vec<Position>) {
     let old: Vec<Position> = a.positions.iter().filter(|x| x.ex == ex).cloned().collect();
     a.positions.retain(|x| x.ex != ex);
-    a.positions.extend(trade::merge_snapshot(&old, new));
+    a.positions.extend(if ex == Exchange::Kraken { trade::merge_snapshot(&old, new) } else { new });
 }
 
 async fn reload_wallets(account: &Arc<Mutex<Account>>, ex: Exchange, k: &Keys) {
