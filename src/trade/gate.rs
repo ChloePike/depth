@@ -1,5 +1,5 @@
 //! Gate.io v4 USDT perpetual futures (settle usdt, e.g. BTC_USDT; sizes in contracts via quanto_multiplier).
-//! Same contract as the Bybit/Binance code in trade.rs: unified symbols ("BTCUSDT") and base-unit
+//! Same contract as every venue module trade.rs dispatches to: unified symbols ("BTCUSDT") and base-unit
 //! sizes in and out; native symbols / contracts only inside this file.
 //!
 //! Orders: `size` is a signed integer number of contracts (positive buys, negative sells). Per Gate's

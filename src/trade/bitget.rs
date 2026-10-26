@@ -1,5 +1,5 @@
 //! Bitget v2 USDT-M futures (productType USDT-FUTURES, marginCoin USDT).
-//! Same contract as the Bybit/Binance code in trade.rs: unified symbols ("BTCUSDT") and base-unit
+//! Same contract as every venue module trade.rs dispatches to: unified symbols ("BTCUSDT") and base-unit
 //! sizes in and out. Bitget already uses "BTCUSDT" and base-coin sizes, so no mapping is needed.
 //! Docs: https://www.bitget.com/docs/catalog/classic-contract-trade/classic-contract-trade (and
 //! -market, -position, -account), private WS https://www.bitget.com/docs/classic/websocket/intro.

@@ -17,7 +17,7 @@
 //!   modify: a whole-position TP/SL is replaced by cancel + place (Binance allows only one
 //!   closePosition order per direction and type, -4130), restoring the old one if placing fails.
 //!
-//! Live updates (wiring belongs in trade.rs streams, parsers live here):
+//! Live updates (wiring belongs in the trade/bybit.rs / trade/binance.rs streams, parsers live here):
 //! - Bybit `order.linear` rows have the REST shape: `bybit_row(o)`; open while `Untriggered`.
 //! - Binance user data `{"e":"ALGO_UPDATE"}` (USD-M payload in `o`, PM in `ao` with `fs`):
 //!   `binance_algo_update(v)`; open while `X == "NEW"`.
