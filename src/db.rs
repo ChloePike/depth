@@ -60,10 +60,11 @@ pub fn hist_clear(days: Option<u64>) -> u64 {
 
 // ---------------------------------------------------------------- own fills
 
-/// Insert fills; ones already stored (same venue and fill id) are left as they are.
-pub fn fills_put(fills: &[Fill]) {
+/// Insert fills; ones already stored (same venue and fill id) are left as they are. `demo`: they come
+/// from the demo account (the keys they were read with), whatever the mode is by the time they arrive.
+pub fn fills_put(fills: &[Fill], demo: bool) {
     // demo fills live in the demo log only, never among the real ones
-    if crate::demo::on() { return; }
+    if demo || crate::demo::on() { return; }
     let Some(mut c) = db() else { return };
     let Ok(tx) = c.transaction() else { return };
     {
@@ -157,7 +158,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("depth-db-{}", std::process::id()));
         unsafe { std::env::set_var("T1_DB", dir.join("t.db")); }
         let f = |id: &str, ts| Fill { ex: Exchange::Bybit, id: id.into(), symbol: "XUSDT".into(), side: Side::Sell, price: 2.0, qty: 3.0, fee: 0.1, realized: None, ts };
-        fills_put(&[f("a", 10), f("b", 20), f("a", 10)]);
+        fills_put(&[f("a", 10), f("b", 20), f("a", 10)], false);
         assert_eq!(fills("XUSDT", 0).len(), 2);
         assert_eq!(fills("XUSDT", 15).len(), 1);
         assert_eq!(fills_last(Exchange::Bybit, "XUSDT"), Some(20));
@@ -176,10 +177,13 @@ mod tests {
         assert_eq!((id.len(), device_id()), (36, id));
         // demo mode keeps its fills out of the real table
         crate::demo::set_on(true);
-        fills_put(&[f("demo", 30)]);
+        fills_put(&[f("demo", 30)], false);
         // and reads only the demo account's (a fresh one here: none)
         assert!(fills("XUSDT", 0).is_empty());
         crate::demo::set_on(false);
+        assert_eq!(fills("XUSDT", 0).len(), 2);
+        // read with demo keys, arriving after demo mode was switched off: still not real
+        fills_put(&[f("late-demo", 40)], true);
         assert_eq!(fills("XUSDT", 0).len(), 2);
         let _ = std::fs::remove_dir_all(dir);
     }

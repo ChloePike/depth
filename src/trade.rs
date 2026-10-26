@@ -902,7 +902,7 @@ pub async fn history(ex: Exchange, k: &Keys, symbols: &[String]) -> Result<Histo
         Exchange::Binance => binance::history(k, symbols, side, &mut h).await?,
         _ => bail!("{ex:?} history not implemented"),
     }
-    crate::db::fills_put(&h.fills);
+    crate::db::fills_put(&h.fills, k.demo);
     h.orders.sort_by(|a, b| b.ts.cmp(&a.ts));
     h.fills.sort_by(|a, b| b.ts.cmp(&a.ts));
     h.closed.sort_by(|a, b| b.ts.cmp(&a.ts));

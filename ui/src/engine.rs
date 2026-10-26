@@ -1117,7 +1117,8 @@ impl Engine {
                             tokio::spawn(async move {
                                 let Some(k) = acc.lock().unwrap().keys.get(&ex).cloned() else { return };
                                 if let Ok(p) = trade::positions(ex, &k).await {
-                                    replace_positions(&mut acc.lock().unwrap(), ex, p);
+                                    let mut a = acc.lock().unwrap();
+                                    if same_keys(&a, ex, &k) { replace_positions(&mut a, ex, p); }
                                     ctx.request_repaint();
                                 }
                             });
@@ -1137,7 +1138,7 @@ impl Engine {
                             tokio::spawn(async move {
                                 let Some(k) = acc.lock().unwrap().keys.get(&ex).cloned() else { return };
                                 if let Ok(b) = trade::balance(ex, &k).await {
-                                    let need = { let mut a = acc.lock().unwrap(); a.balances.insert(ex, b); auto_due(&mut a, ex) };
+                                    let need = { let mut a = acc.lock().unwrap(); if !same_keys(&a, ex, &k) { return; } a.balances.insert(ex, b); auto_due(&mut a, ex) };
                                     if let Some(need) = need { spawn_top_up(&acc, ex, need, &ctx); }
                                     ctx.request_repaint();
                                 }
@@ -1899,7 +1900,7 @@ impl Engine {
         rt.spawn(async move {
             let (w, notes) = trade::wallets(ex, &k).await;
             let mut a = account.lock().unwrap();
-            a.wallets.insert(ex, (w, notes, now_ms()));
+            if same_keys(&a, ex, &k) { a.wallets.insert(ex, (w, notes, now_ms())); }
             a.wallets_loading.remove(&ex);
             ctx.request_repaint();
         });
@@ -1924,6 +1925,7 @@ impl Engine {
                 let r = trade::history(ex, &k, &symbols).await;
                 let mut a = account.lock().unwrap();
                 match r {
+                    _ if !same_keys(&a, ex, &k) => {}
                     Ok(h) => { a.history.insert(ex, (h, now_ms())); a.fills_ver += 1; }
                     Err(e) => a.note(format!("{ex:?} history: {e:#}"), false),
                 }
@@ -1947,7 +1949,7 @@ impl Engine {
             rt.spawn(async move {
                 let since = depth::db::fills_last(ex, &symbol).map_or(0, |t| t + 1);
                 match trade::fills_since(ex, &k, &symbol, since).await {
-                    Ok(f) => { depth::db::fills_put(&f); account.lock().unwrap().fills_ver += 1; ctx.request_repaint(); }
+                    Ok(f) => { depth::db::fills_put(&f, k.demo); account.lock().unwrap().fills_ver += 1; ctx.request_repaint(); }
                     Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} {symbol} fills: {e:#}\n")),
                 }
             });
@@ -2018,6 +2020,7 @@ async fn refresh_spot(account: &Arc<Mutex<Account>>, ex: Exchange) {
     let (o, b) = tokio::join!(trade::spot::open_orders(ex, &k), trade::spot::balances(ex, &k));
     {
         let mut a = account.lock().unwrap();
+        if !same_keys(&a, ex, &k) { return; }
         match o { Ok(o) => { a.spot_orders.retain(|x| x.ex != ex); a.spot_orders.extend(o); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} spot orders: {e:#}\n")) }
         match b { Ok(b) => { a.spot_bal.insert(ex, b); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} spot balances: {e:#}\n")) }
     }
@@ -2025,6 +2028,7 @@ async fn refresh_spot(account: &Arc<Mutex<Account>>, ex: Exchange) {
     let Some(sym) = account.lock().unwrap().margin_sym.clone() else { return };
     let (o, b) = tokio::join!(trade::spot::margin_orders(ex, &k, &sym), trade::spot::margin_balances(ex, &k));
     let mut a = account.lock().unwrap();
+    if !same_keys(&a, ex, &k) { return; }
     match o { Ok(o) => { a.margin_orders.retain(|x| x.ex != ex); a.margin_orders.extend(o); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} margin orders: {e:#}\n")) }
     match b { Ok(b) => { a.margin_bal.insert(ex, b); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} margin balances: {e:#}\n")) }
 }
@@ -2039,12 +2043,17 @@ fn note_opt(a: &mut Account, what: &str, res: anyhow::Result<String>) -> bool {
     }
 }
 
+/// Whether `k` still is the account `ex` trades with (same key, same demo flag). A REST answer read
+/// with keys switched meanwhile (demo on / off, other keys) is dropped, never written into the other account.
+fn same_keys(a: &Account, ex: Exchange, k: &Keys) -> bool { a.keys.get(&ex).is_some_and(|x| x.key == k.key && x.demo == k.demo) }
+
 /// REST snapshot of one venue's option orders and positions (option venues only).
 async fn refresh_opts(account: &Arc<Mutex<Account>>, ex: Exchange) {
     if !trade::OPTION_VENUES.contains(&ex) { return; }
     let Some(k) = account.lock().unwrap().keys.get(&ex).cloned() else { return };
     let (o, p) = tokio::join!(trade::option_orders(ex, &k), trade::option_positions(ex, &k));
     let mut a = account.lock().unwrap();
+    if !same_keys(&a, ex, &k) { return; }
     match o { Ok(o) => { a.opt_orders.retain(|x| x.ex != ex); a.opt_orders.extend(o); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} option orders: {e:#}\n")) }
     if let Ok(p) = p { a.opts.retain(|x| x.ex != ex); a.opts.extend(p); }
 }
@@ -2058,11 +2067,13 @@ async fn refresh_venue(account: &Arc<Mutex<Account>>, ex: Exchange) {
     if matches!(ex, Exchange::Bybit | Exchange::Binance) {
         if let Ok(t) = trade::tpsl::list(ex, &k).await {
             let mut a = account.lock().unwrap();
+            if !same_keys(&a, ex, &k) { return; }
             a.tpsl.retain(|x| x.ex != ex);
             a.tpsl.extend(t);
         }
     }
     let mut a = account.lock().unwrap();
+    if !same_keys(&a, ex, &k) { return; }
     // each part applies on its own: a failing orders or balance call must not freeze positions
     let mut err = None;
     match p { Ok(p) => replace_positions(&mut a, ex, p), Err(e) => err = err.or(Some(e)) }
@@ -2240,7 +2251,9 @@ fn apply(a: &mut Account, ex: Exchange, ev: trade::AccEvent) -> bool {
         E::TpSl(t) => { a.tpsl.retain(|x| !(x.ex == ex && x.id == t.id)); a.tpsl.push(t); true }
         E::TpSlDone { id } => { a.tpsl.retain(|x| !(x.ex == ex && x.id == id)); true }
         E::Fill(f) => {
-            depth::db::fills_put(std::slice::from_ref(&f));
+            // ponytail: a push carries no account, so a fill already queued from the stream of the account
+            // just switched away from is judged by the current one; tag AccEvent with its keys if that matters
+            depth::db::fills_put(std::slice::from_ref(&f), a.keys.get(&ex).is_some_and(|k| k.demo));
             a.fills_ver += 1;
             a.fill_seq += 1;
             a.last_fill = Some(FillNote { ex, symbol: f.symbol, buy: f.side == depth::Side::Buy, qty: f.qty, price: Some(f.price) });
@@ -2452,6 +2465,21 @@ mod tests {
         assert!(a.tpsl_wait[0].armed && !a.tpsl_wait[0].restored);
         wait_touch(&mut a, ex, &E::Order(order("55", Some("t1al0"), 1.0)), 13);
         assert_eq!(fired(&settle(&mut a, 14)), 1);
+    }
+
+    #[test]
+    fn answers_for_switched_keys_are_dropped() {
+        let mut a = Account::default();
+        let ex = Exchange::Bybit;
+        let real = Keys { key: "k".into(), secret: "s".into(), extra: None, demo: false };
+        assert!(!same_keys(&a, ex, &real), "no keys now");
+        a.keys.insert(ex, real.clone());
+        assert!(same_keys(&a, ex, &real) && !same_keys(&a, Exchange::Okx, &real));
+        // demo switched on, or other keys saved, while the request was out
+        a.keys.insert(ex, Keys { demo: true, ..real.clone() });
+        assert!(!same_keys(&a, ex, &real));
+        a.keys.insert(ex, Keys { key: "k2".into(), ..real.clone() });
+        assert!(!same_keys(&a, ex, &real));
     }
 
     #[test]
