@@ -68,7 +68,8 @@ fn hmac512(secret: &str, msg: &str) -> String {
 /// Orders and cancels expire after this (X-Gate-Exptime), like Bybit's write receive window.
 const EXPIRE_WRITE_MS: i64 = 5_000;
 
-async fn gate(k: &Keys, method: reqwest::Method, path: &str, query: &str, body: Option<&Value>) -> Result<Value> {
+pub(super) async fn gate(k: &Keys, method: reqwest::Method, path: &str, query: &str, body: Option<&Value>) -> Result<Value> {
+    super::no_demo(k)?;
     let body = body.map(|b| b.to_string()).unwrap_or_default();
     let ts = crate::now_ms() / 1000;
     let sig = sign(&k.secret, method.as_str(), &format!("/api/v4{path}"), query, &body, ts);
@@ -324,6 +325,7 @@ fn on_frame(v: &Value, subscribed: &mut usize) -> Vec<Out> {
 }
 
 pub async fn stream(k: Keys, tx: AccTx) {
+    if k.demo { return; }
     let ex = Exchange::Gate;
     loop {
         let mut auth_failed = false;

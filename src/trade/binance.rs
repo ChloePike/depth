@@ -51,6 +51,7 @@ async fn binance(k: &Keys, method: reqwest::Method, path: &str, params: &[(&str,
 }
 
 pub(super) async fn binance_at(k: &Keys, base: &str, method: reqwest::Method, path: &str, params: &[(&str, String)]) -> Result<Value> {
+    super::no_demo(k)?;
     let mut q: Vec<String> = params.iter().map(|(a, b)| format!("{a}={b}")).collect();
     q.push(format!("recvWindow={}", if method == reqwest::Method::GET { RECV_READ } else { RECV_WRITE }));
     q.push(format!("timestamp={}", crate::now_ms()));
@@ -329,7 +330,8 @@ pub async fn balance(k: &Keys) -> Result<Balance> {
 fn binance_ws() -> &'static str { if testnet() { "wss://stream.binancefuture.com" } else { "wss://fstream.binance.com" } }
 
 /// listenKey create (POST) / keepalive (PUT): API key header only, no signature.
-async fn listen_key(k: &Keys, pm: bool, method: reqwest::Method) -> Result<String> {
+pub(super) async fn listen_key(k: &Keys, pm: bool, method: reqwest::Method) -> Result<String> {
+    super::no_demo(k)?;
     let url = if pm { format!("{}/papi/v1/listenKey", papi_url()) } else { format!("{}/fapi/v1/listenKey", binance_url()) };
     ws::check_paused(&url)?;
     let r = ws::http().request(method, &url).header("X-MBX-APIKEY", &k.key).send().await?;
@@ -342,6 +344,7 @@ async fn listen_key(k: &Keys, pm: bool, method: reqwest::Method) -> Result<Strin
 }
 
 pub async fn stream(k: Keys, tx: AccTx) {
+    if k.demo { return; }
     let ex = Exchange::Binance;
     // mark prices of every USD-M symbol, for live upnl of any open position (public, no weight)
     // ponytail: the all-symbol array (~600 rows/s); subscribe per position symbol if bandwidth matters

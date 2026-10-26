@@ -8,6 +8,10 @@
 //!
 //! Prices and sizes are always sent as strings rounded to the instrument's tick / step, never as
 //! raw f64 formatting.
+//!
+//! Demo: every keyed function's first statement hands a call made with `Keys::demo()` to the
+//! simulated account (`crate::demo`), and every venue's signed request helper and private stream
+//! refuses demo keys (`no_demo`), so a demo key can never produce a request to a real venue.
 use crate::{ws, Exchange, Side};
 use anyhow::{anyhow, bail, Result};
 use hmac::{Hmac, KeyInit, Mac};
@@ -41,6 +45,18 @@ pub const VERIFIED: [Exchange; 2] = [Exchange::Bybit, Exchange::Binance];
 pub struct Keys { pub key: String, pub secret: String, pub extra: Option<String>,
     /// simulated venue account: never reaches a real exchange (default false; Debug still redacts everything)
     pub demo: bool }
+
+impl Keys {
+    /// The simulated account's keys (no Keychain item, no secret).
+    pub fn demo() -> Keys { Keys { key: "demo".into(), secret: String::new(), extra: None, demo: true } }
+}
+
+/// First statement of every venue's signed request helper: the dispatch above it routes demo keys
+/// to the simulated account, so reaching here with one is a bug that must fail before any request.
+pub(crate) fn no_demo(k: &Keys) -> Result<()> { if k.demo { bail!("demo keys never reach a venue") } Ok(()) }
+
+/// What every option function answers in demo mode.
+pub const NO_DEMO_OPTIONS: &str = "options are not simulated in demo";
 
 impl std::fmt::Debug for Keys {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "Keys({}…)", &self.key[..self.key.len().min(4)]) }
@@ -334,6 +350,7 @@ pub fn native_twap(ex: Exchange) -> Option<(u32, u32)> {
 /// Start a venue-run TWAP; returns the id to cancel it with. Binance: notional at least 1,000
 /// USDT, weight 3000 (UID), so it is placed once and never polled.
 pub async fn place_twap(ex: Exchange, k: &Keys, req: &OrderReq, r: &Rules, ref_px: f64, mode: Mode, minutes: u32, limit: Option<f64>, randomize: bool) -> Result<String> {
+    if k.demo { bail!("demo: venue-run TWAP is not simulated; the client-side TWAP works"); }
     let Some((lo, hi)) = native_twap(ex) else { bail!("{ex:?} has no native TWAP") };
     if !(lo..=hi).contains(&minutes) { bail!("{ex:?}: TWAP duration must be {lo} to {hi} minutes"); }
     match ex {
@@ -344,6 +361,7 @@ pub async fn place_twap(ex: Exchange, k: &Keys, req: &OrderReq, r: &Rules, ref_p
 }
 
 pub async fn cancel_twap(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {
+    if k.demo { bail!("demo: venue-run TWAP is not simulated"); }
     match ex {
         Exchange::Binance => binance::cancel_twap(k, symbol, id).await,
         Exchange::Hyperliquid => hyperliquid::cancel_twap(k, symbol, id).await,
@@ -353,6 +371,7 @@ pub async fn cancel_twap(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Resu
 
 /// Position mode of the account for `symbol` (read only; never changed from here).
 pub async fn mode(ex: Exchange, k: &Keys, symbol: &str) -> Result<Mode> {
+    if k.demo { return Ok(crate::demo::mode()); }
     match ex {
         Exchange::Bybit => bybit::mode(k, symbol).await,
         Exchange::Binance => binance::mode(k, symbol).await,
@@ -369,6 +388,7 @@ pub async fn mode(ex: Exchange, k: &Keys, symbol: &str) -> Result<Mode> {
 /// Highest leverage the venue allows for `symbol` at the smallest position size.
 /// Bybit: public instrument info. Binance: leverage brackets (signed, weight 1).
 pub async fn max_leverage(ex: Exchange, k: &Keys, symbol: &str) -> Result<f64> {
+    if k.demo { return Ok(crate::demo::max_leverage()); }
     match ex {
         Exchange::Bybit => bybit::max_leverage(symbol).await,
         Exchange::Binance => binance::max_leverage(k, symbol).await,
@@ -379,6 +399,7 @@ pub async fn max_leverage(ex: Exchange, k: &Keys, symbol: &str) -> Result<f64> {
 /// Change the account's leverage for `symbol` (both sides on Bybit). This changes an exchange
 /// setting, so it is only called after the user confirms.
 pub async fn set_leverage(ex: Exchange, k: &Keys, symbol: &str, lev: u32) -> Result<()> {
+    if k.demo { return crate::demo::set_leverage(ex, symbol, lev as f64); }
     if lev == 0 { bail!("leverage must be at least 1x"); }
     match ex {
         Exchange::Bybit => bybit::set_leverage(k, symbol, lev).await,
@@ -389,6 +410,7 @@ pub async fn set_leverage(ex: Exchange, k: &Keys, symbol: &str, lev: u32) -> Res
 
 /// The account's leverage setting for `symbol` (weight 5 on Binance; read once per symbol).
 pub async fn leverage(ex: Exchange, k: &Keys, symbol: &str) -> Result<f64> {
+    if k.demo { return Ok(crate::demo::leverage(ex, symbol)); }
     match ex {
         Exchange::Bybit => bybit::leverage(k, symbol).await,
         Exchange::Binance => binance::leverage(k, symbol).await,
@@ -424,6 +446,7 @@ pub fn accepts(ex: Exchange, req: &OrderReq) -> Result<()> {
 }
 
 pub async fn place(ex: Exchange, k: &Keys, req: &OrderReq, r: &Rules, ref_px: f64, mode: Mode) -> Result<String> {
+    if k.demo { return crate::demo::place(ex, crate::Market::Perp, req, r, ref_px); }
     let (qty, px) = checked(req, r, ref_px)?;
     accepts(ex, req)?;
     match ex {
@@ -475,6 +498,7 @@ pub fn ceil_step(qty: f64, step: f64, min: f64) -> f64 { ((qty / step - 1e-9).ce
 
 /// Tick, size step and minimum size of one option.
 pub async fn option_rules(ex: Exchange, symbol: &str) -> Result<Rules> {
+    if crate::demo::on() { bail!("{NO_DEMO_OPTIONS}"); }
     match ex {
         Exchange::Bybit => bybit::option_rules(symbol).await,
         _ => bail!("{ex:?}: option orders not supported yet"),
@@ -482,6 +506,7 @@ pub async fn option_rules(ex: Exchange, symbol: &str) -> Result<Rules> {
 }
 
 pub async fn option_plan(ex: Exchange, symbol: &str, qty: f64) -> Result<OptBuy> {
+    if crate::demo::on() { bail!("{NO_DEMO_OPTIONS}"); }
     match ex {
         Exchange::Bybit => bybit::option_plan(symbol, qty).await,
         _ => bail!("{ex:?}: option orders not supported yet"),
@@ -496,6 +521,7 @@ pub struct OptPos { pub ex: Exchange, pub symbol: String, pub base: String, pub 
 
 /// Open option positions on a venue (empty where option trading is not built).
 pub async fn option_positions(ex: Exchange, k: &Keys) -> Result<Vec<OptPos>> {
+    if k.demo { bail!("{NO_DEMO_OPTIONS}"); }
     match ex {
         Exchange::Bybit => bybit::option_positions(k).await,
         _ => Ok(vec![]),
@@ -504,6 +530,7 @@ pub async fn option_positions(ex: Exchange, k: &Keys) -> Result<Vec<OptPos>> {
 
 /// Buy the planned options: limit IOC at `p.limit`, so nothing rests and nothing fills above it.
 pub async fn buy_option(k: &Keys, p: &OptBuy) -> Result<String> {
+    if k.demo { bail!("{NO_DEMO_OPTIONS}"); }
     let r = Rules { tick: p.tick, step: p.step, min_qty: 0.0, min_notional: 0.0 };
     option_order(k, p.ex, &p.symbol, Side::Buy, p.qty, p.limit, Tif::Ioc, false, &r).await
 }
@@ -511,6 +538,7 @@ pub async fn buy_option(k: &Keys, p: &OptBuy) -> Result<String> {
 /// One option limit order; size floored and price rounded to the venue grid.
 #[allow(clippy::too_many_arguments)]
 pub async fn option_order(k: &Keys, ex: Exchange, symbol: &str, side: Side, qty: f64, price: f64, tif: Tif, reduce_only: bool, r: &Rules) -> Result<String> {
+    if k.demo { bail!("{NO_DEMO_OPTIONS}"); }
     let q = fmt_step(qty, r.step, true);
     if q.parse::<f64>().unwrap_or(0.0) < r.min_qty.max(1e-12) { bail!("size {qty} below minimum {}", r.min_qty); }
     let px = fmt_step(price, r.tick, false);
@@ -522,6 +550,7 @@ pub async fn option_order(k: &Keys, ex: Exchange, symbol: &str, side: Side, qty:
 }
 
 pub async fn option_cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {
+    if k.demo { bail!("{NO_DEMO_OPTIONS}"); }
     match ex {
         Exchange::Bybit => bybit::option_cancel(k, symbol, id).await,
         _ => bail!("{ex:?}: option orders not supported yet"),
@@ -530,6 +559,7 @@ pub async fn option_cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Re
 
 /// Resting option orders (empty where option trading is not built).
 pub async fn option_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
+    if k.demo { bail!("{NO_DEMO_OPTIONS}"); }
     match ex {
         Exchange::Bybit => bybit::option_orders(k).await,
         _ => Ok(vec![]),
@@ -540,6 +570,7 @@ pub async fn option_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
 /// has no way to ask (Gate, Kraken, Hyperliquid, Lighter, Bitget) or the answer is unclear.
 /// Read once per key (stream start, key change), never polled.
 pub async fn can_trade(ex: Exchange, k: &Keys) -> Result<Option<bool>> {
+    if k.demo { return Ok(Some(true)); }
     Ok(match ex {
         Exchange::Bybit => bybit::can_trade(k).await?,
         Exchange::Binance => binance::can_trade(k).await?,
@@ -555,6 +586,7 @@ pub fn can_amend(ex: Exchange) -> bool { matches!(ex, Exchange::Bybit | Exchange
 /// Re-price a resting limit order in place, keeping its size left and its id. Binance's modify
 /// needs side and quantity again (it rejects a quantity below what already filled).
 pub async fn amend(ex: Exchange, k: &Keys, o: &OpenOrder, price: f64, r: &Rules) -> Result<()> {
+    if k.demo { return crate::demo::amend(o, price, r.tick); }
     let px = fmt_step(price, r.tick, false);
     if !(px.parse::<f64>().is_ok_and(|p| p > 0.0)) { bail!("invalid price {price}"); }
     match ex {
@@ -568,6 +600,7 @@ pub async fn amend(ex: Exchange, k: &Keys, o: &OpenOrder, price: f64, r: &Rules)
 /// Cancels one resting order row. Binance trigger rows (`o.trigger`, algo service) go to the algo
 /// cancel; everywhere else a plain cancel by id (Bybit cancels conditional rows the same way).
 pub async fn cancel_order(ex: Exchange, k: &Keys, o: &OpenOrder) -> Result<()> {
+    if k.demo { return crate::demo::cancel(&o.id); }
     match ex {
         Exchange::Binance => binance::cancel_order(k, o).await,
         _ => cancel(ex, k, &o.symbol, &o.id).await,
@@ -591,6 +624,7 @@ impl CancelReport {
 /// per given order (the rate-limit pause applies to each).
 // ponytail: other venues loop single cancels; wire their cancel-all endpoints once they are verified on a real account
 pub async fn cancel_all(ex: Exchange, k: &Keys, orders: &[OpenOrder]) -> Result<CancelReport> {
+    if k.demo { let mut rep = CancelReport::default(); for o in orders { rep.add(format!("{} {}", o.symbol, o.id), crate::demo::cancel(&o.id)); } return Ok(rep); }
     match ex {
         Exchange::Bybit => bybit::cancel_all(k, orders).await,
         Exchange::Binance => binance::cancel_all(k, orders).await,
@@ -611,6 +645,7 @@ pub enum Found { Open(OpenOrder), Done { id: String, filled: f64, status: String
 /// (`is_unknown_outcome`): Some when the venue knows the order, None when it does not. Never looped.
 /// Venues without a lookup answer an error rather than None, which would read as "not placed".
 pub async fn order_by_client_id(ex: Exchange, k: &Keys, symbol: &str, client_id: &str) -> Result<Option<Found>> {
+    if k.demo { return Ok(crate::demo::order_by_client_id(ex, client_id)); }
     match ex {
         Exchange::Bybit => bybit::order_by_client_id(k, symbol, client_id).await,
         Exchange::Binance => binance::order_by_client_id(k, symbol, client_id).await,
@@ -632,6 +667,7 @@ pub fn is_unknown_outcome(e: &anyhow::Error) -> bool {
 }
 
 pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {
+    if k.demo { return crate::demo::cancel(id); }
     match ex {
         Exchange::Bybit => { bybit::cancel(k, symbol, id).await?; }
         Exchange::Binance => { binance::cancel(k, symbol, id).await?; }
@@ -647,6 +683,7 @@ pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()
 }
 
 pub async fn positions(ex: Exchange, k: &Keys) -> Result<Vec<Position>> {
+    if k.demo { return Ok(crate::demo::positions(ex)); }
     match ex {
         Exchange::Bybit => bybit::positions(k).await,
         Exchange::Binance => binance::positions(k).await,
@@ -679,6 +716,7 @@ pub fn merge_snapshot(old: &[Position], new: Vec<Position>) -> Vec<Position> {
 }
 
 pub async fn open_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
+    if k.demo { return Ok(crate::demo::open_orders(ex, crate::Market::Perp)); }
     match ex {
         Exchange::Bybit => bybit::open_orders(k).await,
         Exchange::Binance => binance::open_orders(k).await,
@@ -693,6 +731,7 @@ pub async fn open_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
 }
 
 pub async fn balance(ex: Exchange, k: &Keys) -> Result<Balance> {
+    if k.demo { return Ok(crate::demo::balance()); }
     match ex {
         Exchange::Bybit => bybit::balance(k).await,
         Exchange::Binance => binance::balance(k).await,
@@ -746,6 +785,7 @@ pub type AccTx = tokio::sync::mpsc::UnboundedSender<(Exchange, AccEvent)>;
 
 /// Runs a venue's private account stream forever (reconnecting, re-snapshotting).
 pub async fn stream(ex: Exchange, k: Keys, tx: AccTx) {
+    if k.demo { return crate::demo::stream(ex, tx).await; }
     match ex {
         Exchange::Bybit => bybit::stream(k, tx).await,
         Exchange::Binance => binance::stream(k, tx).await,
@@ -766,6 +806,7 @@ pub async fn stream(ex: Exchange, k: Keys, tx: AccTx) {
 /// the span is walked in week windows, each paged. Bybit / Binance only (others: empty).
 /// ponytail: at most the last 30 days (what the chart shows); older gaps stay empty
 pub async fn fills_since(ex: Exchange, k: &Keys, symbol: &str, since: i64) -> Result<Vec<Fill>> {
+    if k.demo { return Ok(crate::demo::fills_since(ex, symbol, since)); }
     if !matches!(ex, Exchange::Bybit | Exchange::Binance) { return Ok(vec![]); }
     let now = crate::now_ms();
     let binance = if ex == Exchange::Binance {
@@ -802,6 +843,7 @@ pub struct History { pub orders: Vec<HistOrder>, pub fills: Vec<Fill>, pub close
 /// Recent order / trade / closed-PnL history (last ~7 days). Never on a timer: Binance needs a
 /// symbol per query, so `symbols` (unified) bounds the weight (10 per symbol + 30).
 pub async fn history(ex: Exchange, k: &Keys, symbols: &[String]) -> Result<History> {
+    if k.demo { return Ok(crate::demo::history(ex)); }
     let side = |s: &Value| if s.as_str().is_some_and(|x| x.eq_ignore_ascii_case("sell")) { Side::Sell } else { Side::Buy };
     let mut h = History::default();
     match ex {
@@ -848,6 +890,7 @@ const WEEK_MS: i64 = 7 * 86_400_000;
 /// transaction-log, a few pages per 7-day window. Ok(None) on venues that do not report it.
 /// `known`: the open time found by an earlier call for this same position (the fill walk is skipped).
 pub async fn funding_paid(ex: Exchange, k: &Keys, p: &Position, known: Option<i64>) -> Result<Option<FundingPaid>> {
+    if k.demo { return Ok(crate::demo::funding_paid(ex, &p.symbol, p.side)); }
     let cur = if p.side == Side::Buy { p.qty } else { -p.qty };
     let now = crate::now_ms();
     match ex {
@@ -917,6 +960,7 @@ pub struct Wallet { pub id: String, pub usd: f64, pub coins: Vec<Coin> }
 /// position = 150 weight): call on demand only, never on a timer. Per-account failures (missing
 /// permission) are returned as notes so the other accounts still show.
 pub async fn wallets(ex: Exchange, k: &Keys) -> (Vec<Wallet>, Vec<String>) {
+    if k.demo { return (crate::demo::wallets(ex), vec![]); }
     let (mut out, mut notes) = (vec![], vec![]);
     let mut add = |id: &str, coins: Result<Vec<Coin>>, px: &std::collections::HashMap<String, f64>| match coins {
         Ok(mut cs) => {
@@ -960,6 +1004,7 @@ fn amount_str(x: f64) -> String {
 /// Routes without a direct API go through SPOT (Binance PM <-> FUNDING, EARN -> PM), step by
 /// step; the returned lines say what happened, and a failed later step names where the funds are.
 pub async fn transfer(ex: Exchange, k: &Keys, from: &str, to: &str, coin: &str, amount: f64, product: Option<&str>) -> Result<Vec<String>> {
+    if k.demo { bail!("demo: transfers are not simulated (one shared demo balance)"); }
     if !(amount > 0.0) { bail!("amount must be positive"); }
     let amt = amount_str(amount);
     let mut log = vec![];
@@ -1302,6 +1347,116 @@ mod tests {
         // the demo flag never shows in Debug
         let k = Keys { key: "ABCDEFGH".into(), secret: "s".into(), extra: None, demo: true };
         assert_eq!(format!("{k:?}"), "Keys(ABCD…)");
+    }
+
+    /// Polled once: a demo call answers at once (nothing to wait for on a network).
+    fn now<T>(f: impl std::future::Future<Output = T>) -> T { use futures_util::FutureExt; f.now_or_never().expect("answered without a request") }
+
+    #[test]
+    fn demo_keys_go_to_the_sim_for_every_function() {
+        let k = Keys::demo();
+        let r = Rules { tick: 0.1, step: 0.001, min_qty: 0.001, min_notional: 5.0 };
+        let p = Position { ex: Exchange::Okx, symbol: "BTCUSDT".into(), side: Side::Buy, qty: 1.0, entry: 1.0, mark: 1.0, liq: None, upnl: 0.0, lev: 1.0, margin: 1.0, cross: None };
+        let mut ids = vec![];
+        for ex in TRADABLE {
+            assert!(now(positions(ex, &k)).is_ok() && now(open_orders(ex, &k)).is_ok(), "{ex:?}");
+            assert!(now(balance(ex, &k)).unwrap().equity > 0.0);
+            assert_eq!((now(mode(ex, &k, "BTCUSDT")).unwrap(), now(max_leverage(ex, &k, "BTCUSDT")).unwrap()), (Mode::OneWay, crate::demo::MAX_LEV));
+            assert!(now(leverage(ex, &k, "BTCUSDT")).unwrap() >= 1.0);
+            assert_eq!(now(can_trade(ex, &k)).unwrap(), Some(true));
+            assert!(now(history(ex, &k, &[])).is_ok() && now(fills_since(ex, &k, "BTCUSDT", 0)).is_ok() && now(funding_paid(ex, &k, &p, None)).is_ok());
+            assert_eq!(now(wallets(ex, &k)).0[0].id, "DEMO");
+            assert!(now(order_by_client_id(ex, &k, "BTCUSDT", "none")).unwrap().is_none());
+            assert_eq!(now(cancel_all(ex, &k, &[])).unwrap(), CancelReport::default());
+            assert!(now(tpsl::list(ex, &k)).is_ok() && now(tpsl::cancel_all(ex, &k, &[])).is_ok());
+            // a resting limit far from the price needs no book; a market order does (none streams here)
+            let o = |kind| OrderReq { symbol: "DEMOTESTUSDT".into(), pos: Side::Buy, close: false, kind, qty: 0.01, client_id: Some(format!("c{ex:?}")), attach: None };
+            let id = now(place(ex, &k, &o(Kind::Limit { price: 1_000.0, tif: Tif::Gtc }), &r, 2_000.0, Mode::OneWay)).unwrap();
+            assert!(now(open_orders(ex, &k)).unwrap().iter().any(|x| x.id == id));
+            assert!(matches!(now(order_by_client_id(ex, &k, "DEMOTESTUSDT", &format!("c{ex:?}"))).unwrap(), Some(Found::Open(_))));
+            assert!(now(place(ex, &k, &o(Kind::Market), &r, 2_000.0, Mode::OneWay)).unwrap_err().to_string().contains("no live"));
+            ids.push((ex, id));
+        }
+        for (ex, id) in ids {
+            let row = now(open_orders(ex, &k)).unwrap().into_iter().find(|x| x.id == id).unwrap();
+            if can_amend(ex) {
+                // the Sim re-prices against the live price; none streams here
+                assert!(now(amend(ex, &k, &row, 1_000.5, &r)).unwrap_err().to_string().contains("no live"));
+                now(cancel_order(ex, &k, &row)).unwrap();
+            } else {
+                now(cancel(ex, &k, "DEMOTESTUSDT", &id)).unwrap();
+            }
+            assert!(!now(open_orders(ex, &k)).unwrap().iter().any(|x| x.id == id));
+            assert!(now(cancel_order(ex, &k, &row)).is_err(), "{ex:?}: a cancelled order is gone");
+            assert!(matches!(now(order_by_client_id(ex, &k, "DEMOTESTUSDT", &format!("c{ex:?}"))).unwrap(), Some(Found::Done { .. })));
+        }
+        now(set_leverage(Exchange::Bybit, &k, "DEMOLEVUSDT", 7)).unwrap();
+        assert_eq!(now(leverage(Exchange::Bybit, &k, "DEMOLEVUSDT")).unwrap(), 7.0);
+        // spot on the spot venues; margin, transfers, venue TWAP and options are refused or empty
+        for ex in spot::VENUES {
+            assert!(now(spot::balances(*ex, &k)).unwrap()[0].coin == "USDT" && now(spot::open_orders(*ex, &k)).is_ok());
+            assert!(now(spot::margin_orders(*ex, &k, "BTCUSDT")).unwrap().is_empty() && now(spot::margin_balances(*ex, &k)).unwrap().is_empty());
+            assert!(now(spot::borrow_rates(*ex, &k, &["BTC"])).unwrap().is_empty());
+            let sr = Rules { min_notional: 0.0, ..r };
+            let id = now(spot::place(*ex, &k, "DEMOTESTUSDT", Side::Buy, Kind::Limit { price: 1_000.0, tif: Tif::Gtc }, 0.01, &sr, 2_000.0, None)).unwrap();
+            now(spot::cancel(*ex, &k, "DEMOTESTUSDT", &id, false)).unwrap();
+            assert!(now(spot::place(*ex, &k, "DEMOTESTUSDT", Side::Buy, Kind::Market, 0.01, &sr, 2_000.0, Some(spot::Effect::Borrow))).unwrap_err().to_string().contains("demo"));
+        }
+        let req = OrderReq { symbol: "BTCUSDT".into(), pos: Side::Buy, close: false, kind: Kind::Market, qty: 1.0, client_id: None, attach: None };
+        assert!(now(transfer(Exchange::Bybit, &k, "FUND", "UNIFIED", "USDT", 1.0, None)).unwrap_err().to_string().contains("demo"));
+        assert!(now(place_twap(Exchange::Binance, &k, &req, &r, 1.0, Mode::OneWay, 10, None, false)).unwrap_err().to_string().contains("demo"));
+        assert!(now(cancel_twap(Exchange::Binance, &k, "BTCUSDT", "1")).unwrap_err().to_string().contains("demo"));
+        let plan = OptBuy { ex: Exchange::Bybit, symbol: "X".into(), qty: 1.0, limit: 1.0, tick: 0.1, step: 0.1, fill: 1.0, avg: 1.0, cost: 1.0 };
+        for e in [now(option_positions(Exchange::Bybit, &k)).map(|_| ()), now(option_orders(Exchange::Bybit, &k)).map(|_| ()), now(buy_option(&k, &plan)).map(|_| ()),
+                  now(option_order(&k, Exchange::Bybit, "X", Side::Buy, 1.0, 1.0, Tif::Ioc, false, &r)).map(|_| ()), now(option_cancel(Exchange::Bybit, &k, "X", "1"))] {
+            assert_eq!(e.unwrap_err().to_string(), NO_DEMO_OPTIONS);
+        }
+        // a demo refusal is never an unknown outcome: nothing could have reached a venue
+        assert!(!is_unknown_outcome(&now(place(Exchange::Bybit, &k, &req, &r, 1.0, Mode::OneWay)).unwrap_err()));
+        assert!(now(tpsl::cancel(Exchange::Bybit, &k, "BTCUSDT", "none")).unwrap_err().to_string().contains("demo"));
+        assert!(now(tpsl::clear_position_tpsl(Exchange::Bybit, &k, "BTCUSDT", Side::Buy, Mode::OneWay, true, true)).is_ok());
+    }
+
+    #[test]
+    fn real_keys_never_reach_the_sim() {
+        let k = Keys { key: "k".into(), secret: "s".into(), extra: None, demo: false };
+        let r = Rules { tick: 0.1, step: 0.001, min_qty: 0.001, min_notional: 0.0 };
+        let req = OrderReq { symbol: "BTCUSDT".into(), pos: Side::Buy, close: false, kind: Kind::Limit { price: 1.0, tif: Tif::Gtc }, qty: 1.0, client_id: None, attach: None };
+        // where the Sim would answer, a real key gets the venue match's answer
+        assert!(now(positions(Exchange::Deribit, &k)).unwrap_err().to_string().contains("not implemented"));
+        assert!(now(place(Exchange::Mexc, &k, &req, &r, 1.0, Mode::OneWay)).unwrap_err().to_string().contains("not implemented"));
+        assert!(now(transfer(Exchange::Okx, &k, "A", "B", "USDT", 1.0, None)).unwrap_err().to_string().contains("not implemented"));
+        assert!(now(wallets(Exchange::Okx, &k)).0.is_empty());
+        assert_eq!(now(can_trade(Exchange::Gate, &k)).unwrap(), None);
+        assert!(now(option_orders(Exchange::Okx, &k)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn demo_keys_never_sign_a_request() {
+        let k = Keys::demo();
+        let refused = |r: Result<Value>| r.unwrap_err().to_string() == "demo keys never reach a venue";
+        assert!(refused(now(bybit::bybit(&k, true, "/v5/account/wallet-balance", json!({})))));
+        assert!(refused(now(binance::binance_at(&k, binance_url(), reqwest::Method::GET, "/fapi/v2/account", &[]))));
+        assert!(now(binance::listen_key(&k, false, reqwest::Method::POST)).is_err());
+        assert!(refused(now(okx::okx(&k, None, "/api/v5/account/balance"))));
+        assert!(refused(now(bitget::bitget(&k, false, "/api/v2/mix/account/accounts", &[], None))));
+        assert!(refused(now(gate::gate(&k, reqwest::Method::GET, "/futures/usdt/accounts", "", None))));
+        assert!(refused(now(kraken::call(&k, false, "/derivatives/api/v3/accounts", &[]))));
+        assert!(refused(now(hyperliquid::exchange(&k, &json!({})))));
+        assert!(lighter::account(&k).is_err());
+        // keyed reads that sign nothing refuse as well
+        assert!(refused(now(hyperliquid::positions(&k)).map(|_| Value::Null)));
+        assert!(refused(now(binance::pm_account(&k))));
+        // private streams return at once instead of logging in
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        now(bybit::stream(k.clone(), tx.clone()));
+        now(binance::stream(k.clone(), tx.clone()));
+        now(okx::stream(k.clone(), tx.clone()));
+        now(bitget::stream(k.clone(), tx.clone()));
+        now(gate::stream(k.clone(), tx.clone()));
+        now(kraken::stream(k.clone(), tx.clone()));
+        now(hyperliquid::stream(k.clone(), tx.clone()));
+        now(lighter::stream(k, tx));
     }
 
     #[test]
