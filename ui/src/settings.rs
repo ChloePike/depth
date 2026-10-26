@@ -50,11 +50,13 @@ pub struct Prefs {
     pub fill_sound: String,
     /// demo trading: every venue trades the simulated account (`depth::demo`), no API keys needed
     pub demo: bool,
+    /// USDT the demo account starts with after a reset
+    pub demo_balance: f64,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into(), demo: false }
+        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into(), demo: false, demo_balance: depth::demo::START_BALANCE }
     }
 }
 
@@ -135,6 +137,8 @@ pub struct SettingsView {
     proxy_url: Option<String>,
     /// hotkey being recorded (the next key press becomes its binding)
     recording: Option<Act>,
+    /// the demo account's Reset is waiting for its confirmation
+    resetting: bool,
 }
 
 impl SettingsView {
@@ -168,7 +172,7 @@ impl SettingsView {
                             match self.tab {
                                 0 => self.general(ui, st, call),
                                 1 => appearance(ui, st, call),
-                                2 => trading(ui, st, call),
+                                2 => trading(ui, st, call, &mut self.resetting),
                                 3 => self.api_keys(ui, st, call),
                                 4 => self.hotkeys(ui, st, call),
                                 _ => self.about(ui),
@@ -179,8 +183,9 @@ impl SettingsView {
             });
         });
         // Escape while recording a hotkey cancels the recording, not the dialog
-        if m.should_close() && self.removing.is_none() && !was_recording { self.open = false; }
+        if m.should_close() && self.removing.is_none() && !self.resetting && !was_recording { self.open = false; }
         self.confirm_remove(ctx, call);
+        self.confirm_reset(ctx, call);
     }
 
     fn sidebar(&mut self, ui: &mut Ui) {
@@ -464,6 +469,29 @@ impl SettingsView {
         if done || m.should_close() { self.removing = None; }
     }
 
+    fn confirm_reset(&mut self, ctx: &egui::Context, call: &mut Call) {
+        if !self.resetting { return; }
+        let frame = egui::Frame::new().fill(popup_bg()).corner_radius(6).stroke(egui::Stroke::new(1.0, line())).inner_margin(20);
+        let mut done = false;
+        let m = egui::Modal::new(egui::Id::new("reset_demo")).frame(frame).show(ctx, |ui| {
+            ui.set_width(300.0);
+            ui.vertical_centered(|ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.label(RichText::new(l("Reset demo account?")).font(prop_s(13.5)).color(fg_strong()));
+                ui.add(egui::Label::new(RichText::new(l("Its positions, orders and history are cleared and it starts again with the starting balance.")).font(prop(12.0)).color(mu())).wrap());
+                ui.add_space(6.0);
+            });
+            ui.columns(2, |c| {
+                if kit::button(&mut c[0], l("Cancel"), kit::Look::Secondary, kit::H, Some(f32::INFINITY), true).clicked() { done = true; }
+                if kit::button(&mut c[1], l("Reset"), kit::Look::Fill(dn()), kit::H, Some(f32::INFINITY), true).clicked() {
+                    let _ = call(json!({"op": "demo_reset"}));
+                    done = true;
+                }
+            });
+        });
+        if done || m.should_close() { self.resetting = false; }
+    }
+
     // ------------------------------------------------------------------ About
 
     fn about(&mut self, ui: &mut Ui) {
@@ -598,7 +626,7 @@ fn appearance(ui: &mut Ui, st: &Value, call: &mut Call) {
         ui.horizontal(|ui| {
             ui.set_min_height(36.0);
             if kit::button(ui, l("Restore Default Appearance"), kit::Look::Secondary, kit::H, None, !p.default_look()).clicked() {
-                p = Prefs { tz_min: p.tz_min, confirm: p.confirm, fees: p.fees.clone(), demo: p.demo, ..Prefs::default() };
+                p = Prefs { tz_min: p.tz_min, confirm: p.confirm, fees: p.fees.clone(), demo: p.demo, demo_balance: p.demo_balance, ..Prefs::default() };
             }
         });
     });
@@ -607,13 +635,22 @@ fn appearance(ui: &mut Ui, st: &Value, call: &mut Call) {
 
 // ---------------------------------------------------------------------- Trading
 
-fn trading(ui: &mut Ui, st: &Value, call: &mut Call) {
+fn trading(ui: &mut Ui, st: &Value, call: &mut Call, resetting: &mut bool) {
     let mut r: Policy = serde_json::from_value(st["route"].clone()).unwrap_or_default();
     let r0 = r.clone();
     let mut p = prefs(st);
     let p0 = p.clone();
     let venue = st["trade"]["venue"].as_str().unwrap_or("").to_string();
     let tradable: Vec<String> = st["tradable"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+    section(ui, l("Demo trading"), l("A simulated account on every venue, no API keys needed. Market orders walk the venue's own live book; a limit order fills only when the price trades through it (you are last in the queue). Funding at the venue's own rate, liquidation at 0.5% maintenance margin, fees from the table below. Nothing is sent to an exchange. The starting balance applies from the next reset."), |ui| {
+        row(ui, l("Demo account"), |ui| { kit::switch(ui, &mut p.demo); });
+        row_sep(ui);
+        number(ui, l("Starting balance"), &mut p.demo_balance, 0, "USDT");
+        row_sep(ui);
+        row(ui, l("Reset demo account"), |ui| {
+            if kit::button(ui, l("Reset"), kit::Look::Danger, kit::H_SM + 2.0, None, true).clicked() { *resetting = true; }
+        });
+    });
     let foot = if r.smart {
         l("Smart routing picks venues by fee-adjusted price from each venue's own book and can split large orders. The preferred venue drives the order panel's book and limits.")
     } else { l("Every order goes to the trading venue.") };
@@ -828,5 +865,11 @@ mod tests {
         assert!(m.hotkeys == cur.hotkeys && m.proxy == ProxyMode::Custom && m.fill_sound == "none");
         // a value that does not parse is refused whole
         assert!(merge_prefs(&cur, &json!({"zoom": "x"})).is_err() && merge_prefs(&cur, &json!([1])).is_err());
+        // demo is off by default, and settings saved before it existed load with it off
+        let d = Prefs::default();
+        assert!(!d.demo && d.demo_balance == 10_000.0);
+        let old: Prefs = serde_json::from_value(json!({"theme": "dark"})).unwrap();
+        assert!(!old.demo && old.demo_balance == 10_000.0);
+        assert!(merge_prefs(&Prefs { demo: true, ..d }, &json!({"theme": "light"})).unwrap().demo);
     }
 }

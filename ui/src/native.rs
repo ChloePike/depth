@@ -76,7 +76,8 @@ impl App {
         let mode_s = mode.map(|m| if m == trade::Mode::Hedge { "hedge" } else { "oneway" });
         let (fee_t, fee_m) = super::settings::fee(ex);
         let trade_v = json!({
-            "venue": ex_name(ex), "symbol": symbol, "has_key": has_key, "verified": trade::VERIFIED.contains(&ex),
+            // a simulated venue needs no "untested" warning
+            "venue": ex_name(ex), "symbol": symbol, "has_key": has_key, "verified": trade::VERIFIED.contains(&ex) || depth::demo::on(), "demo": depth::demo::on(),
             "mode": mode_s, "lev": acc.levs.get(&key),
             "available": bal.as_ref().map(|b| b.available), "equity": bal.as_ref().map(|b| b.equity),
             "uni_mmr": bal.as_ref().and_then(|b| b.uni_mmr), "mm_rate": bal.as_ref().and_then(|b| b.mm_rate),
@@ -153,7 +154,7 @@ impl App {
             // the Keychain's keys, never the demo ones
             let tail: Option<String> = self.eng.real_keys.get(&e).map(|k| k.key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect());
             let (lk, ls, lx) = trade::key_fields(e);
-            json!({"ex": ex_name(e), "configured": tail.is_some(), "tail": tail, "verified": trade::VERIFIED.contains(&e),
+            json!({"ex": ex_name(e), "configured": tail.is_some(), "tail": tail, "verified": trade::VERIFIED.contains(&e) || depth::demo::on(),
                    "test": tests.get(&e).map(|(ok, m)| json!({"ok": ok, "msg": m})), "labels": [lk, ls, lx]})
         }).collect();
         let pm = trade::is_pm();
@@ -192,7 +193,7 @@ impl App {
             (c, b)
         };
         json!({
-            "base": self.eng.base, "mode": format!("{:?}", self.mode), "lang": super::lang_code(), "langs": super::LANGS,
+            "base": self.eng.base, "mode": format!("{:?}", self.mode), "lang": super::lang_code(), "langs": super::LANGS, "demo": depth::demo::on(),
             "header": header, "venues": venues, "stats": stats, "trade": trade_v,
             "positions": positions, "opt_positions": opt_positions, "orders": orders, "tpsl": tpsl,
             "history": {"orders": hist.0, "fills": hist.1, "closed": hist.2, "updated_ms": (hist.3 != i64::MAX).then_some(hist.3),
@@ -369,7 +370,8 @@ impl App {
                 let req = self.order_req(&json!({"pos": v["pos"], "close": v["close"], "qty": v["qty"], "kind": "market"}))?;
                 let ex = self.trade.ex;
                 let minutes = f("minutes").ok_or("duration")?;
-                let id = if v["native"].as_bool() == Some(true) && trade::native_twap(ex).is_some() {
+                // venue-run TWAP is not simulated: the client-side one runs on the demo account
+                let id = if v["native"].as_bool() == Some(true) && trade::native_twap(ex).is_some() && !depth::demo::on() {
                     let ref_px = self.eng.agg.lock().unwrap().venues.get(&(ex, Market::Perp)).and_then(|v| v.mid()).unwrap_or(0.0);
                     self.eng.start_native_twap(ex, req, minutes.round() as u32, f("limit").filter(|l| *l > 0.0), v["randomize"].as_bool().unwrap_or(false), ref_px, ctx)?
                 } else {
@@ -404,6 +406,11 @@ impl App {
                 self.eng.set_keys(e, k);
             }
             "delete_keys" => { let e = exv()?; trade::delete_keys(e); self.eng.set_keys(e, None); }
+            "demo_reset" => {
+                depth::demo::reset(self.prefs.demo_balance.max(1.0));
+                // a clean snapshot of the new account on every venue
+                if depth::demo::on() { self.eng.set_demo(true); }
+            }
             "test_keys" => { let e = exv()?; let k = self.eng.real_keys.get(&e).cloned().ok_or("no keys")?; self.eng.test_keys(e, k, ctx); }
             other => return Err(format!("unknown op {other:?}")),
         }

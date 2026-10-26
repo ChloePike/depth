@@ -487,6 +487,7 @@ impl AccountPanel {
                 let n = match t { Tab::Positions => Some(arr("positions")), Tab::Orders => Some(arr("orders")), Tab::TpSl => Some(arr("tpsl")), Tab::Signals => Some(arr("signals")), _ => None };
                 if tab_n(ui, t.title(), n.filter(|n| *n > 0), self.tab == t).clicked() { self.tab = t; }
             }
+            if st["demo"] == true { ui.add_space(6.0); kit::chip(ui, "DEMO", kit::Tone::Warn).on_hover_text(l("Simulated account: no real order is sent")); }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 ui.add_space(4.0);
@@ -505,7 +506,7 @@ impl AccountPanel {
             self.hist_requested = true;
             if st["history"]["updated_ms"].is_null() && st["history"]["loading"] != true { acts.push(Act::Op(json!({"op": "load_history"}))); }
         }
-        let no_keys = st["keys"].as_array().is_none_or(|k| k.iter().all(|k| k["configured"] != true));
+        let no_keys = st["demo"] != true && st["keys"].as_array().is_none_or(|k| k.iter().all(|k| k["configured"] != true));
         if self.tab == Tab::Signals { self.signals(ui, st); }
         else if no_keys && self.tab != Tab::Log {
             if empty_state(ui, l("No API keys"), l("Add an API key to see positions, orders and balances."), Some(l("Open API Keys"))) { acts.push(Act::Keys); }
@@ -578,7 +579,9 @@ impl AccountPanel {
         let (k, v) = (|t: &str| Seg::T(t.to_string(), prop(12.0), dim()), |t: String, c: Color32| Seg::T(t, mono_s(12.0), c));
         // what differs per venue is only its liquidation metric: one small group each (venues with
         // money only), right-most; equity and available are summed across venues, per venue in the tooltip
-        let funded: Vec<&Value> = bals.into_iter().filter(|b| f(&b["equity"]) > 0.0).collect();
+        let mut funded: Vec<&Value> = bals.into_iter().filter(|b| f(&b["equity"]) > 0.0).collect();
+        // demo: every venue reports the one shared pool
+        if st["demo"] == true { funded.truncate(1); }
         for b in &funded {
             let mut segs = vec![];
             if let Some(e) = Exchange::parse(s(&b["ex"])) { segs.push(Seg::I(e)); }

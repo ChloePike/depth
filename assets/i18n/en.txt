@@ -153,6 +153,7 @@ tr.lev_unknown = Leverage not read: max size and cost assume 1x
 ins.title = Position Insurance (options hedge)
 ins.sim_qty = Simulated long
 ins.loading = Loading option quotes…
+ins.demo = Options are not simulated in demo mode.
 ins.hint = 4 option venues compared, sorted by annualized cost
 ins.venue = Venue
 ins.exp = Expiry

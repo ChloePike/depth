@@ -37,6 +37,7 @@ impl TradeView {
     /// Cheapest option protection across option venues for the open position on this base
     /// (or a hypothetical long of `ins_qty` when there is none).
     fn insurance(&mut self, ui: &mut Ui, a: &Agg, eng: &Engine, base: &str, pos: Option<Position>) {
+        if depth::demo::on() { kit::note(ui, t("ins.demo"), WARN); return; }
         // the floor and max loss are measured from the position's own mark on its venue; the composite
         // only stands in when there is no position (or the venue reports no mark yet)
         let comp = a.mid(Market::Perp).unwrap_or(0.0);
