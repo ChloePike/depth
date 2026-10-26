@@ -3019,10 +3019,10 @@ fn picker_mini(tickers: Arc<Mutex<Vec<Ticker>>>) -> impl std::future::Future<Out
 
 /// The Hunter's REST polls per venue: (payload, every n slots of 15 s). One request per slot, so a
 /// venue never sees two at once nor more than one every 15 s; meta (funding intervals, contract
-/// sizes) first, then hourly. Perps every 30 s (Hyperliquid 15 s), spot every 60 s, OKX OI and funding every 2 min.
+/// sizes, TradFi flags) first, then hourly. Perps every 30 s (Hyperliquid 15 s), spot every 60 s, OKX OI and funding every 2 min.
 const HUNT_JOBS: [(Exchange, &[(Src, u32)]); 6] = [
-    (Exchange::Bybit, &[(Src::BybitPerp, 2), (Src::BybitSpot, 4)]),
-    (Exchange::Okx, &[(Src::OkxPerp, 2), (Src::OkxOi, 8), (Src::OkxFunding, 8), (Src::OkxSpot, 4)]),
+    (Exchange::Bybit, &[(Src::BybitInfo, 240), (Src::BybitPerp, 2), (Src::BybitSpot, 4)]),
+    (Exchange::Okx, &[(Src::OkxInfo, 240), (Src::OkxPerp, 2), (Src::OkxOi, 8), (Src::OkxFunding, 8), (Src::OkxSpot, 4)]),
     (Exchange::Bitget, &[(Src::BitgetMeta, 240), (Src::BitgetPerp, 2), (Src::BitgetSpot, 4)]),
     (Exchange::Gate, &[(Src::GateMeta, 240), (Src::GatePerp, 2), (Src::GateSpot, 4)]),
     (Exchange::Mexc, &[(Src::MexcMeta, 240), (Src::MexcPerp, 2)]),
@@ -3085,31 +3085,7 @@ fn spawn_hunter(rt: &tokio::runtime::Runtime, off: &std::collections::HashSet<Ex
     }
     // set when the klines bootstrap stored hours: score again
     let boot = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    if binance {
-        let (hunt, boot) = (hunt.clone(), boot.clone());
-        rt.spawn(async move {
-            // strictly one at a time, one request every 2 s at most, each coin once per run
-            let mut done = std::collections::HashSet::new();
-            let mut tick = tokio::time::interval(Duration::from_secs(2));
-            loop {
-                tick.tick().await;
-                let next = {
-                    let h = hunt.lock().unwrap();
-                    h.want.iter().find(|b| !done.contains(*b) && h.rows.iter().any(|r| &r.base == *b && r.venues.contains(&Exchange::Binance) && matches!(r.op, Some(Op::Collecting(_))))).cloned()
-                };
-                let Some(b) = next else { continue };
-                done.insert(b.clone());
-                match depth::ws::get_json(&format!("https://fapi.binance.com/fapi/v1/klines?symbol={b}USDT&interval=1h&limit=720")).await {
-                    Ok(v) => {
-                        let bars: Vec<_> = depth::hunter::kline_bars(&v, now_ms()).into_iter().map(|x| (Exchange::Binance, b.clone(), x)).collect();
-                        let _ = tokio::task::spawn_blocking(move || depth::db::hunt_put(&bars)).await;
-                        boot.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    Err(e) => eprintln!("[hunter klines {b}] {e:#}"),
-                }
-            }
-        });
-    }
+    if binance { rt.spawn(hunt_binance(scan.clone(), hunt.clone(), boot.clone())); }
     rt.spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         let (mut cool, mut spot_at) = (HashMap::new(), 0);
@@ -3163,6 +3139,45 @@ fn spawn_hunter(rt: &tokio::runtime::Runtime, off: &std::collections::HashSet<Ex
     });
 }
 
+/// The Hunter's own Binance REST calls: one at a time, one request every 2 s at most. Each tick sends
+/// the first that is due: the contract list (its TradFi flags; hourly), or 1h klines of a top-row coin
+/// still collecting hours (each coin once per run).
+async fn hunt_binance(scan: Arc<Mutex<Scan>>, hunt: Arc<Mutex<Hunt>>, boot: Arc<std::sync::atomic::AtomicBool>) {
+    let (mut done, mut info_due) = (std::collections::HashSet::new(), std::time::Instant::now());
+    let mut tick = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        tick.tick().await;
+        if std::time::Instant::now() >= info_due {
+            // a failed read is tried again in a minute
+            info_due = std::time::Instant::now() + Duration::from_secs(60);
+            match depth::ws::get_json_slow(Src::BinanceInfo.url(), 40).await {
+                Ok(v) => {
+                    info_due = std::time::Instant::now() + Duration::from_secs(3600);
+                    let mut sc = scan.lock().unwrap();
+                    depth::hunter::parse(Src::BinanceInfo, &v, &mut sc.meta);
+                    sc.ingest(now_ms(), vec![]);
+                }
+                Err(e) => eprintln!("[hunter binance info] {e:#}"),
+            }
+            continue;
+        }
+        let next = {
+            let h = hunt.lock().unwrap();
+            h.want.iter().find(|b| !done.contains(*b) && h.rows.iter().any(|r| &r.base == *b && r.venues.contains(&Exchange::Binance) && matches!(r.op, Some(Op::Collecting(_))))).cloned()
+        };
+        let Some(b) = next else { continue };
+        done.insert(b.clone());
+        match depth::ws::get_json(&format!("https://fapi.binance.com/fapi/v1/klines?symbol={b}USDT&interval=1h&limit=720")).await {
+            Ok(v) => {
+                let bars: Vec<_> = depth::hunter::kline_bars(&v, now_ms()).into_iter().map(|x| (Exchange::Binance, b.clone(), x)).collect();
+                let _ = tokio::task::spawn_blocking(move || depth::db::hunt_put(&bars)).await;
+                boot.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(e) => eprintln!("[hunter klines {b}] {e:#}"),
+        }
+    }
+}
+
 /// One venue's polls (`HUNT_JOBS`): each 15 s slot sends the most overdue payload's request, if any is due.
 async fn hunt_venue(ex: Exchange, jobs: &'static [(Src, u32)], delay: Duration, scan: Arc<Mutex<Scan>>, hunt: Arc<Mutex<Hunt>>) {
     tokio::time::sleep(delay).await;
@@ -3179,7 +3194,7 @@ async fn hunt_venue(ex: Exchange, jobs: &'static [(Src, u32)], delay: Duration, 
             Src::BybitPerp | Src::OkxPerp => shared(src.url(), 14_000, depth::ws::get_json(src.url())).await,
             Src::HlPerp => shared(src.url(), 14_000, depth::ws::post_json(src.url(), &hl_body)).await,
             // all-contract lists: up to 1.4 MB, uncompressed on Gate
-            Src::GateMeta | Src::BitgetMeta | Src::MexcMeta => depth::ws::get_json_slow(src.url(), 40).await.map(|v| (now_ms(), Arc::new(v))),
+            Src::GateMeta | Src::BitgetMeta | Src::MexcMeta | Src::BybitInfo | Src::OkxInfo => depth::ws::get_json_slow(src.url(), 40).await.map(|v| (now_ms(), Arc::new(v))),
             _ => depth::ws::get_json(src.url()).await.map(|v| (now_ms(), Arc::new(v))),
         };
         // a failed read is tried again within a minute, a meta one too

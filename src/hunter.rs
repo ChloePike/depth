@@ -8,7 +8,7 @@
 //! `Scan::rows` assembles one `Row` per coin listed as a perp somewhere.
 use crate::{alias, num, opt_num, Exchange, Market};
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// The venues scanned: REST all-ticker polls, Binance over its all-market streams.
 pub const VENUES: [Exchange; 7] = [Exchange::Binance, Exchange::Bybit, Exchange::Okx, Exchange::Bitget, Exchange::Gate, Exchange::Mexc, Exchange::Hyperliquid];
@@ -55,11 +55,19 @@ pub struct Tick { pub ex: Exchange, pub spot: bool, pub base: String, pub px: f6
 fn tick(ex: Exchange, spot: bool, base: String) -> Tick { Tick { ex, spot, base, px: 0.0, qvol: None, bvol: None, oi: None, fund: None } }
 
 /// Per native symbol: funding interval (hours) and contract size (base units per contract); per
-/// coin: its oldest perp listing (ms) on the venues whose contract lists carry one (Gate, MEXC, Bitget).
+/// coin: its oldest perp listing (ms) on the venues whose contract lists carry one (Gate, MEXC, Bitget),
+/// and `tradfi`: the coins any venue's own metadata marks as a tokenized stock, ETF, commodity, index or
+/// currency (Binance contractType / underlyingSubType, Bybit symbolType, OKX instCategory, Bitget isRwa,
+/// Gate contract_type, MEXC conceptPlate). They are left out on every venue.
+/// ponytail: a coin sharing its ticker with a stock (PURR) is left out too; the flag is per name
 #[derive(Default)]
-pub struct Meta { pub hours: HashMap<(Exchange, String), f64>, pub size: HashMap<(Exchange, String), f64>, pub listed: HashMap<String, i64> }
+pub struct Meta { pub hours: HashMap<(Exchange, String), f64>, pub size: HashMap<(Exchange, String), f64>, pub listed: HashMap<String, i64>, pub tradfi: HashSet<String> }
 
 impl Meta {
+    fn flag(&mut self, ex: Exchange, native: Option<&str>) {
+        if let Some(b) = native.filter(|b| ok(b)) { self.tradfi.insert(alias::unified_base(ex, b)); }
+    }
+
     fn listed_at(&mut self, base: Option<String>, ms: Option<f64>) {
         let (Some(b), Some(ms)) = (base, ms.filter(|x| *x > 0.0)) else { return };
         let t = self.listed.entry(b).or_insert(ms as i64);
@@ -138,13 +146,21 @@ pub struct Row {
 }
 
 #[derive(Default)]
-pub struct Scan { coins: HashMap<String, Vec<Venue>>, liq: HashMap<String, VecDeque<(i64, f64)>>, pub meta: Meta }
+pub struct Scan { coins: HashMap<String, Vec<Venue>>, liq: HashMap<String, VecDeque<(i64, f64)>>, pub meta: Meta,
+    /// `meta.tradfi` size when the coins were last cleared of it
+    cleared: usize }
 
 impl Scan {
     /// Records `ticks` read at `ts` (local ms). Spot venues are kept only for coins with a perp.
     pub fn ingest(&mut self, ts: i64, ticks: Vec<Tick>) {
+        if self.meta.tradfi.len() != self.cleared {
+            self.cleared = self.meta.tradfi.len();
+            let tf = &self.meta.tradfi;
+            self.coins.retain(|b, _| !tf.contains(b));
+            self.liq.retain(|b, _| !tf.contains(b));
+        }
         for t in ticks {
-            if t.spot && !self.coins.contains_key(&t.base) { continue; }
+            if self.meta.tradfi.contains(&t.base) || (t.spot && !self.coins.contains_key(&t.base)) { continue; }
             let vs = self.coins.entry(t.base).or_default();
             let i = vs.iter().position(|v| v.ex == t.ex && v.spot == t.spot).unwrap_or_else(|| {
                 vs.push(Venue { ex: t.ex, spot: t.spot, s: VecDeque::new(), qvol: 0.0, bvol: 0.0, oi: 0.0, fund: None });
@@ -162,6 +178,7 @@ impl Scan {
 
     /// A liquidation of `usd` on `base` at `ts`.
     pub fn liq(&mut self, base: String, ts: i64, usd: f64) {
+        if self.meta.tradfi.contains(&base) { return; }
         let q = self.liq.entry(base).or_default();
         q.push_back((ts, usd));
         while q.front().is_some_and(|x| x.0 < ts - 15 * MIN) { q.pop_front(); }
@@ -431,7 +448,9 @@ pub fn check<'a>(a: &Alerts, rows: &'a [Row], now: i64, last: &mut HashMap<Strin
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Src { BybitPerp, BybitSpot, OkxPerp, OkxSpot, OkxOi, OkxFunding, BitgetMeta, BitgetPerp, BitgetSpot, GateMeta, GatePerp, GateSpot, MexcMeta, MexcPerp, HlPerp,
     /// the picker's Binance spot poll (24 h MINI); Binance perps come over the all-market streams
-    BinanceSpot, BinanceMini, BinanceMark }
+    BinanceSpot, BinanceMini, BinanceMark,
+    /// contract lists read for their TradFi flags only (hourly)
+    BinanceInfo, BybitInfo, OkxInfo }
 
 impl Src {
     /// REST URL (Hyperliquid: POST {"type":"metaAndAssetCtxs"}); "" for stream frames.
@@ -454,6 +473,10 @@ impl Src {
             Src::HlPerp => "https://api.hyperliquid.xyz/info",
             Src::BinanceSpot => "https://api.binance.com/api/v3/ticker/24hr?type=MINI",
             Src::BinanceMini | Src::BinanceMark => "",
+            Src::BinanceInfo => "https://fapi.binance.com/fapi/v1/exchangeInfo",
+            // ponytail: one page (limit 1000, about 920 listed); follow nextPageCursor when Bybit passes 1000
+            Src::BybitInfo => "https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000",
+            Src::OkxInfo => "https://www.okx.com/api/v5/public/instruments?instType=SWAP",
         }
     }
 }
@@ -478,7 +501,8 @@ pub fn parse(src: Src, v: &Value, meta: &mut Meta) -> Vec<Tick> {
     use Exchange as E;
     use Src::*;
     let rows = match src {
-        BybitPerp | BybitSpot => arr(&v["result"]["list"]),
+        BybitPerp | BybitSpot | BybitInfo => arr(&v["result"]["list"]),
+        BinanceInfo => arr(&v["symbols"]),
         GateMeta | GatePerp | GateSpot | BinanceSpot | BinanceMini | BinanceMark => arr(v),
         HlPerp => return hl(v),
         _ => arr(&v["data"]),
@@ -511,7 +535,21 @@ pub fn parse(src: Src, v: &Value, meta: &mut Meta) -> Vec<Tick> {
                 let h = if prev > 0.0 && at > prev { at - prev } else { next - at } / 3.6e6;
                 Tick { fund: f("fundingRate").filter(|_| h > 0.0).map(|r| r / h), ..tick(E::Okx, false, b) }
             }),
+            BinanceInfo => {
+                if s("contractType") == "TRADIFI_PERPETUAL" || arr(&x["underlyingSubType"]).iter().any(|t| t == "TradFi") { meta.flag(E::Binance, x["baseAsset"].as_str()); }
+                None
+            }
+            BybitInfo => {
+                if matches!(s("symbolType"), "stock" | "ETF" | "commodity" | "forex") { meta.flag(E::Bybit, x["baseCoin"].as_str()); }
+                None
+            }
+            OkxInfo => {
+                // instCategory 1 is crypto; 3 stocks / ETFs, 4 commodities (pre-IPO names are 3)
+                if !matches!(s("instCategory"), "" | "1") { meta.flag(E::Okx, s("instId").split('-').next()); }
+                None
+            }
             BitgetMeta => {
+                if s("isRwa") == "YES" { meta.flag(E::Bitget, s("symbol").strip_suffix("USDT")); }
                 if let Some(h) = f("fundInterval") { meta.hours.insert((E::Bitget, s("symbol").to_string()), h); }
                 meta.listed_at(perp_base(E::Bitget, s("symbol").strip_suffix("USDT")), f("launchTime"));
                 None
@@ -521,6 +559,7 @@ pub fn parse(src: Src, v: &Value, meta: &mut Meta) -> Vec<Tick> {
                 fund: f("fundingRate").zip(hours(E::Bitget, s("symbol"))).map(|(r, h)| r / h), ..tick(E::Bitget, false, b) }),
             BitgetSpot => spot_base(s("symbol").strip_suffix("USDT")).map(|b| Tick { px: f("lastPr").unwrap_or(0.0), qvol: f("quoteVolume"), bvol: f("baseVolume"), ..tick(E::Bitget, true, b) }),
             GateMeta => {
+                if !s("contract_type").is_empty() { meta.flag(E::Gate, s("name").strip_suffix("_USDT")); }
                 if let Some(secs) = f("funding_interval") { meta.hours.insert((E::Gate, s("name").to_string()), secs / 3600.0); }
                 if let Some(m) = f("quanto_multiplier") { meta.size.insert((E::Gate, s("name").to_string()), m); }
                 meta.listed_at(perp_base(E::Gate, s("name").strip_suffix("_USDT")), f("launch_time").or(f("create_time")).map(|x| x * 1000.0));
@@ -533,6 +572,7 @@ pub fn parse(src: Src, v: &Value, meta: &mut Meta) -> Vec<Tick> {
             }),
             GateSpot => spot_base(s("currency_pair").strip_suffix("_USDT")).map(|b| Tick { px: f("last").unwrap_or(0.0), qvol: f("quote_volume"), bvol: f("base_volume"), ..tick(E::Gate, true, b) }),
             MexcMeta => {
+                if arr(&x["conceptPlate"]).iter().any(|p| p == "mc-trade-zone-tradfi" || p == "mc-trade-zone-Stock") { meta.flag(E::Mexc, s("symbol").strip_suffix("_USDT")); }
                 if let Some(c) = f("contractSize") { meta.size.insert((E::Mexc, s("symbol").to_string()), c); }
                 meta.listed_at(perp_base(E::Mexc, s("symbol").strip_suffix("_USDT")), f("createTime"));
                 None
@@ -771,6 +811,43 @@ mod tests {
         assert!(s.hour_bars(h0 + HOUR).is_empty());
         let k = json!([[h0, "1", "2", "0.5", "1.5", "10", h0 + HOUR - 1, "15", 3], [h0 + HOUR, "1.5", "1.6", "1.4", "1.6", "1", h0 + 2 * HOUR - 1, "1.6", 1]]);
         assert_eq!(kline_bars(&k, h0 + HOUR + 1), vec![HourBar { ts: h0, o: 1.0, h: 2.0, l: 0.5, c: 1.5, qv: 15.0 }]);
+    }
+
+    /// Each venue's own flag (canned payloads cut from the live lists) marks its stocks, ETFs and
+    /// commodities; any venue's flag drops the coin everywhere, rows already built included.
+    #[test]
+    fn tradfi_flags_drop_the_coin_on_every_venue() {
+        let mut s = Scan::default();
+        let tick = |ex: E, b: &str| Tick { px: 10.0, qvol: Some(5e6), ..tick(ex, false, b.into()) };
+        s.ingest(0, vec![tick(E::Binance, "XAG"), tick(E::Bybit, "XAG"), tick(E::Binance, "TSLA"), tick(E::Okx, "CL"), tick(E::Gate, "SPY"), tick(E::Binance, "PEPE"),
+            tick(E::Mexc, "AAPL"), tick(E::Bitget, "MU"), tick(E::Bybit, "AMD"), tick(E::Binance, "AMD")]);
+        s.liq("TSLA".into(), 0, 1e6);
+        assert_eq!(s.rows(0).len(), 8);
+        let m = &mut s.meta;
+        parse(Src::BinanceInfo, &json!({"symbols": [
+            {"symbol": "XAGUSDT", "baseAsset": "XAG", "contractType": "TRADIFI_PERPETUAL", "underlyingType": "COMMODITY", "underlyingSubType": ["TradFi"]},
+            {"symbol": "TSLAUSDT", "baseAsset": "TSLA", "contractType": "TRADIFI_PERPETUAL", "underlyingType": "EQUITY", "underlyingSubType": ["TradFi"]},
+            {"symbol": "PEPEUSDT", "baseAsset": "PEPE", "contractType": "PERPETUAL", "underlyingType": "COIN", "underlyingSubType": ["Meme"]},
+            {"symbol": "BTCDOMUSDT", "baseAsset": "BTCDOM", "contractType": "PERPETUAL", "underlyingType": "INDEX", "underlyingSubType": ["Index", "Crypto"]}]}), m);
+        // Bybit: AMDSTOCK is Bybit's name of AMD; innovation-zone coins and untyped ones are crypto
+        parse(Src::BybitInfo, &json!({"result": {"list": [
+            {"symbol": "AMDSTOCKUSDT", "baseCoin": "AMDSTOCK", "symbolType": "stock"}, {"symbol": "KORUUSDT", "baseCoin": "KORU", "symbolType": "ETF"},
+            {"symbol": "BZUSDT", "baseCoin": "BZ", "symbolType": "commodity"}, {"symbol": "EURUSDUSDT", "baseCoin": "EURUSD", "symbolType": "forex"},
+            {"symbol": "AGIUSDT", "baseCoin": "AGI", "symbolType": "innovation"}, {"symbol": "0GUSDT", "baseCoin": "0G", "symbolType": ""}]}}), m);
+        parse(Src::OkxInfo, &json!({"data": [{"instId": "CL-USDT-SWAP", "instCategory": "4"}, {"instId": "NVDA-USDT-SWAP", "instCategory": "3"},
+            {"instId": "BTC-USDT-SWAP", "instCategory": "1"}, {"instId": "BTC-USD-SWAP", "instCategory": "1"}]}), m);
+        parse(Src::BitgetMeta, &json!({"data": [{"symbol": "MUUSDT", "isRwa": "YES"}, {"symbol": "BTCUSDT", "isRwa": "NO"}]}), m);
+        parse(Src::GateMeta, &json!([{"name": "SPY_USDT", "contract_type": "stocks"}, {"name": "XAU_USDT", "contract_type": "metals"}, {"name": "BTC_USDT", "contract_type": ""}]), m);
+        parse(Src::MexcMeta, &json!({"data": [{"symbol": "AAPLSTOCK_USDT", "conceptPlate": ["mc-trade-zone-Stock", "mc-trade-zone-tradfi"]},
+            {"symbol": "BTC_USDT", "conceptPlate": ["mc-trade-zone-mainly"]}, {"symbol": "XAU_USDT", "conceptPlate": ["mc-trade-zone-metals", "mc-trade-zone-tradfi"]}]}), m);
+        let mut flagged: Vec<&str> = m.tradfi.iter().map(|b| b.as_str()).collect();
+        flagged.sort();
+        assert_eq!(flagged, vec!["AAPL", "AMD", "BZ", "CL", "EURUSD", "KORU", "MU", "NVDA", "SPY", "TSLA", "XAG", "XAU"]);
+        // the next payload clears what was already scanned (also the liquidations) and refuses new ticks
+        s.ingest(1000, vec![tick(E::Bybit, "TSLA"), tick(E::Binance, "PEPE")]);
+        s.liq("TSLA".into(), 1000, 1e6);
+        assert_eq!(s.rows(1000).iter().map(|r| r.base.as_str()).collect::<Vec<_>>(), vec!["PEPE"]);
+        assert!(s.liq.is_empty());
     }
 
     #[test]
