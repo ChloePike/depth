@@ -45,8 +45,8 @@ impl TradeView {
         }
         if ip.qty <= 0.0 || mark <= 0.0 { return; }
         let f = Filter { min_days: 2.0, max_days: 60.0, otm_max: 0.12 };
-        // OKX option prices are already USD; the other venues quote USDT
-        let all = insure::quotes(&a.chains, |e| if e == Exchange::Okx { 1.0 } else { a.usdt(e, Market::Perp) }, &ip, &f, now_ms());
+        // OKX and Deribit option prices are already USD; the other venues quote USDT
+        let all = insure::quotes(&a.chains, |e| if matches!(e, Exchange::Okx | Exchange::Deribit) { 1.0 } else { a.usdt(e, Market::Perp) }, &ip, &f, now_ms());
         let mut best = insure::best_per_contract(&all);
         best.retain(|q| q.floor_dist >= 0.02);
         best.sort_by(|x, y| x.cost_apr.total_cmp(&y.cost_apr));

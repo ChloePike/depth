@@ -79,6 +79,7 @@ pub fn ex_color(e: Exchange) -> Color32 {
         Exchange::Gate => Color32::from_rgb(0x2e, 0xbd, 0x85),
         Exchange::Hyperliquid => Color32::from_rgb(0x6f, 0xe0, 0xc8),
         Exchange::Lighter => Color32::from_rgb(0xe8, 0x6a, 0xb8),
+        Exchange::Deribit => Color32::from_rgb(0x2a, 0xa8, 0xff),
     }
 }
 
@@ -94,6 +95,7 @@ fn icon_png(e: Exchange) -> &'static [u8] {
         Exchange::Gate => include_bytes!("../../assets/icons/gate.png"),
         Exchange::Hyperliquid => include_bytes!("../../assets/icons/hyperliquid.png"),
         Exchange::Lighter => include_bytes!("../../assets/icons/lighter.png"),
+        Exchange::Deribit => include_bytes!("../../assets/icons/deribit.png"),
     }
 }
 

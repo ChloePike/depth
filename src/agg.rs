@@ -639,7 +639,7 @@ pub const BIG_USD: f64 = 10_000.0;
 /// Quote currency of a venue's spot/perp book (after the connectors' quote mapping).
 pub fn quote_of(ex: Exchange, _market: Market) -> &'static str {
     match ex {
-        Exchange::Coinbase | Exchange::Kraken => "USD",
+        Exchange::Coinbase | Exchange::Kraken | Exchange::Deribit => "USD",
         Exchange::Hyperliquid | Exchange::Lighter => "USDC",
         _ => "USDT",
     }
@@ -1378,6 +1378,7 @@ mod tests {
         // the cross-venue unit is USDT: USDT venues pass through, USD venues are scaled up
         assert_eq!(a.usdt(Exchange::Binance, Market::Perp), 1.0);
         assert!((a.usdt(Exchange::Kraken, Market::Perp) - 1.0 / 0.9995).abs() < 1e-12);
+        assert_eq!(quote_of(Exchange::Deribit, Market::Perp), "USD");
     }
 
     #[test]

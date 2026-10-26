@@ -50,6 +50,7 @@ fn venue(ex: Exchange) -> &'static str {
     match ex {
         Exchange::Bybit => "bybit", Exchange::Binance => "binance", Exchange::Okx => "okx", Exchange::Bitget => "bitget", Exchange::Gate => "gate",
         Exchange::Kraken => "kraken", Exchange::Hyperliquid => "hyperliquid", Exchange::Lighter => "lighter", Exchange::Coinbase => "coinbase", Exchange::Mexc => "mexc",
+        Exchange::Deribit => "deribit",
     }
 }
 
