@@ -267,3 +267,18 @@ pub fn append_log(name: &str, text: &str) {
     if std::fs::metadata(&p).is_ok_and(|m| m.len() > 1 << 20) { let _ = std::fs::rename(&p, dir.join(format!("{name}.old"))); }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) { let _ = f.write_all(text.as_bytes()); }
 }
+
+/// Panics (any thread, tokio tasks included) go to panic.log in `log_dir()` with location and
+/// backtrace, then on to the previous hook (stderr in a terminal run): a Finder launch has no stderr.
+pub fn install_panic_log() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let bt = std::backtrace::Backtrace::force_capture();
+            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            append_log("panic.log", &format!("{ts} {info}\n{bt}\n"));
+            prev(info);
+        }));
+    });
+}

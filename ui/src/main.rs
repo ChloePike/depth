@@ -2,6 +2,7 @@
 use t1_ui as ui;
 
 fn main() -> eframe::Result<()> {
+    depth::sys::install_panic_log();
     #[cfg(feature = "hotpatch")]
     dioxus_devtools::connect_subsecond();
     // opens where it was closed (settings.json); first launch: the default size, placed by the OS

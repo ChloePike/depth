@@ -140,7 +140,7 @@ fn save_png(device: &wgpu::Device, buf: &wgpu::Buffer, row: u32, w: u32, h: u32,
 /// Returns null when no GPU device / surface could be created.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn t1_view_new(native: *mut c_void, w: f32, h: f32, scale: f32) -> *mut T1View {
-    install_panic_log();
+    depth::sys::install_panic_log();
     let Some(nv) = NonNull::new(native) else { return std::ptr::null_mut() };
     #[cfg(target_os = "macos")]
     let (backends, target) = (wgpu::Backends::METAL, wgpu::SurfaceTargetUnsafe::RawHandle {
@@ -193,21 +193,6 @@ pub unsafe extern "C" fn t1_view_render(v: *mut T1View) -> i32 {
         Ok(r) => r as i32,
         Err(_) => { v.dirty = true; 0 }
     }
-}
-
-/// Panics go to panic.log in `sys::log_dir()` (with location and backtrace): the app is
-/// launched from Finder, so stderr is gone.
-fn install_panic_log() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let bt = std::backtrace::Backtrace::force_capture();
-            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            depth::sys::append_log("panic.log", &format!("{ts} {info}\n{bt}\n"));
-            prev(info);
-        }));
-    });
 }
 
 #[unsafe(no_mangle)]
