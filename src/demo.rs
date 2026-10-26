@@ -24,6 +24,8 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+pub mod fill;
+
 /// Maintenance margin rate of every position. ponytail: flat 0.5% (the first BTC tier on Bybit /
 /// Binance), no risk tiers; read the venue's tier table once positions past tier 1 matter.
 pub const MMR: f64 = 0.005;
@@ -104,6 +106,11 @@ pub struct Sim {
     // live inputs, not part of the fold
     pub marks: HashMap<(Exchange, String), f64>,
     pub lasts: HashMap<(Exchange, Market, String), f64>,
+    /// (taker, maker) fee fractions per venue (the user's fee settings); `route`'s defaults otherwise
+    pub fees: HashMap<Exchange, (f64, f64)>,
+    /// trailing orders' best price since activation. ponytail: not logged, so after a restart it
+    /// starts again from the live price (fires later, never earlier); log it if that matters
+    trail: HashMap<String, f64>,
 }
 
 pub(crate) fn sign(s: Side) -> f64 { if s == Side::Buy { 1.0 } else { -1.0 } }
@@ -346,7 +353,11 @@ impl Sim {
             let (price, trigger, tif) = match o.req.kind {
                 Kind::Limit { price, tif } => (price, None, tif_name(tif)),
                 Kind::Stop { trigger, limit, .. } => (limit.unwrap_or(0.0), Some(trigger), ""),
-                Kind::Trailing { activation, .. } => (0.0, activation, ""),
+                // the level it fires at now; its activation price until it tracks
+                Kind::Trailing { callback_pct, activation } => {
+                    let s = sign(o.req.side()) * callback_pct / 100.0;
+                    (0.0, self.trail.get(&o.id).map(|b| b * (1.0 + s)).or(activation), "")
+                }
                 Kind::Market | Kind::Bbo { .. } => (0.0, None, ""),
             };
             OpenOrder { ex, symbol: o.req.symbol.clone(), id: o.id.clone(), side: o.req.side(), price, qty: o.req.qty, filled: o.filled,

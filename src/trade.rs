@@ -396,16 +396,22 @@ pub async fn leverage(ex: Exchange, k: &Keys, symbol: &str) -> Result<f64> {
     }
 }
 
-pub async fn place(ex: Exchange, k: &Keys, req: &OrderReq, r: &Rules, ref_px: f64, mode: Mode) -> Result<String> {
-    let (qty, px) = checked(req, r, ref_px)?;
+/// Refuses order types `ex` does not take (BBO levels, fill-or-kill, conditional, trailing).
+pub fn accepts(ex: Exchange, req: &OrderReq) -> Result<()> {
     if let Kind::Bbo { level, .. } = req.kind { if !bbo_levels(ex).contains(&level) { bail!("{ex:?} has no BBO level {level}"); } }
     let c = caps(ex);
     match req.kind {
         Kind::Limit { tif: Tif::Fok, .. } if !c.fok => bail!("{ex:?} has no fill-or-kill orders"),
         Kind::Stop { .. } if !c.stop => bail!("{ex:?}: conditional orders are not supported here yet"),
         Kind::Trailing { .. } if !c.trailing => bail!("{ex:?}: trailing stops are not supported here yet"),
-        _ => {}
+        Kind::Trailing { .. } if ex == Exchange::Bybit && !req.close => bail!("bybit: a trailing stop protects an open position: use it from Close"),
+        _ => Ok(()),
     }
+}
+
+pub async fn place(ex: Exchange, k: &Keys, req: &OrderReq, r: &Rules, ref_px: f64, mode: Mode) -> Result<String> {
+    let (qty, px) = checked(req, r, ref_px)?;
+    accepts(ex, req)?;
     match ex {
         Exchange::Bybit if matches!(req.kind, Kind::Trailing { .. }) => {
             bybit::place_trailing(k, req, r, ref_px, mode).await
