@@ -1373,7 +1373,7 @@ impl Engine {
 
     /// Price a protection buy on the venue's ask side (REST book + rules), into `Account::opt_plan`.
     pub fn plan_option(&self, ex: Exchange, symbol: String, qty: f64, ctx: &eframe::egui::Context) {
-        let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
         account.lock().unwrap().opt_plan = None;
         rt.spawn(async move {
             let r = trade::option_plan(ex, &symbol, qty).await.map_err(|e| format!("{e:#}"));
@@ -1384,7 +1384,7 @@ impl Engine {
 
     /// Send a priced protection buy (limit IOC); the result lands in the account log.
     pub fn buy_option(&self, p: trade::OptBuy, ctx: &eframe::egui::Context) {
-        let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
         rt.spawn(async move {
             let Some(k) = account.lock().unwrap().keys.get(&p.ex).cloned() else { return };
             let res = trade::buy_option(&k, &p).await;
@@ -1491,7 +1491,7 @@ impl Engine {
         let rules = self.account.lock().unwrap().rules.get(&(ex, base.symbol.clone())).copied().ok_or("venue rules not loaded yet: try again in a second")?;
         let legs = depth::algo::scaled(base.qty, from, to, n, skew, rules.tick, rules.step);
         if legs.is_empty() { return Err("nothing to place: check size, prices and count".into()); }
-        let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return Err("not connected".into()) };
+        let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return Err("not connected".into()) };
         let count = legs.len();
         let tif = if post_only { trade::Tif::PostOnly } else { trade::Tif::Gtc };
         // the ladder as one order against the limits, and every price against the band, before any is sent
@@ -1708,7 +1708,7 @@ impl Engine {
     }
 
     pub fn cancel(&self, o: &OpenOrder, ctx: &eframe::egui::Context) {
-        let (Some(rt), account, ctx, o) = (self.rt.as_ref(), self.account.clone(), ctx.clone(), o.clone()) else { return };
+        let (Some(rt), account, ctx, o) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone(), o.clone()) else { return };
         rt.spawn(async move {
             let Some(k) = account.lock().unwrap().keys.get(&o.ex).cloned() else { return };
             let res = trade::cancel_order(o.ex, &k, &o).await;
@@ -1724,7 +1724,7 @@ impl Engine {
     /// ponytail: OKX / Bitget / Gate / Kraken / Hyperliquid have amend endpoints too; wire them once
     /// those venues are verified on a real account.
     pub fn replace_order(&self, o: &OpenOrder, price: f64, ctx: &eframe::egui::Context) {
-        let (Some(rt), account, ctx, o, agg, base) = (self.rt.as_ref(), self.account.clone(), ctx.clone(), o.clone(), self.agg.clone(), self.base.clone()) else { return };
+        let (Some(rt), account, ctx, o, agg, base) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone(), o.clone(), self.agg.clone(), self.base.clone()) else { return };
         let opp = |s: depth::Side| if s == depth::Side::Buy { depth::Side::Sell } else { depth::Side::Buy };
         let req = OrderReq {
             symbol: o.symbol.clone(), close: o.reduce_only, kind: trade::Kind::Limit { price, tif: trade::Tif::Gtc }, qty: o.qty - o.filled, client_id: None, attach: None,
