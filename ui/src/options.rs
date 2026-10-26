@@ -13,7 +13,8 @@ use depth::{now_ms, Exchange, Side};
 #[derive(Clone, PartialEq)]
 struct Pick { ex: Exchange, symbol: String }
 
-struct OptTicket { ex: Exchange, symbol: String, buy: bool, px: f64, qty: f64, tif: Tif, reduce: bool }
+/// `fx`: USD per unit of the order's quote when the ticket was sent (the coin's index on Deribit, 1 for USDT)
+struct OptTicket { ex: Exchange, symbol: String, buy: bool, px: f64, qty: f64, tif: Tif, reduce: bool, fx: Option<f64> }
 
 pub struct OptView {
     venue: Option<Exchange>, expiry: Option<i64>,
@@ -35,6 +36,31 @@ impl Default for OptView {
 }
 
 fn days(exp: i64) -> f64 { (exp - now_ms()) as f64 / 86_400_000.0 }
+
+/// The coin an option's order price and premium are in (Deribit's inverse options), None for USDT / USDC quotes.
+pub(crate) fn coin_quote(ex: Exchange, symbol: &str) -> Option<&'static str> {
+    Some(trade::option_quote(ex, symbol)).filter(|q| !matches!(*q, "USDT" | "USDC"))
+}
+
+/// A chain price (USD) as the venue takes it: coin per coin at the chain's index for a coin-quoted option (None
+/// while the index is unknown), unchanged otherwise.
+fn venue_px(ex: Exchange, symbol: &str, usd: f64, index: Option<f64>) -> Option<f64> {
+    if coin_quote(ex, symbol).is_none() { return Some(usd); }
+    index.filter(|i| *i > 0.0).map(|i| usd / i)
+}
+
+/// Order price text: coin prices to the 0.0001 grid, USD / USDT prices as everywhere else.
+fn px_text(ex: Exchange, symbol: &str, p: f64) -> String {
+    if coin_quote(ex, symbol).is_some() { format!("{p:.4}") } else { fmt_px(p).replace(',', "") }
+}
+
+/// A premium in the order's quote, with its USD value when that quote is a coin (`fx` = USD per coin).
+pub(crate) fn amount(v: f64, ex: Exchange, symbol: &str, fx: Option<f64>) -> String {
+    match coin_quote(ex, symbol) {
+        Some(c) => format!("{v:.6} {c}{}", fx.map(|x| format!(" ≈ {:.2} $", v * x)).unwrap_or_default()),
+        None => format!("{v:.2} {}", trade::option_quote(ex, symbol)),
+    }
+}
 
 impl OptView {
     pub fn show(&mut self, ui: &mut Ui, a: &Agg) {
@@ -95,9 +121,11 @@ impl OptView {
         self.term(ui, term, a);
         ui.add_space(8.0);
         if let Some((symbol, side, px)) = self.chain(ui, venue, &rows, fwd) {
-            self.pick = Some(Pick { ex: venue, symbol });
+            let index = chain.opts.get(symbol.as_str()).and_then(|o| o.index);
             if let Some(b) = side { self.buy = b; }
-            if let Some(p) = px { self.px = fmt_px(p).replace(',', ""); }
+            // always replaced: a price left from another option (or another quote) must not carry over
+            self.px = px.and_then(|p| venue_px(venue, &symbol, p, index)).map(|p| px_text(venue, &symbol, p)).unwrap_or_default();
+            self.pick = Some(Pick { ex: venue, symbol });
             self.reduce = false;
         }
     }
@@ -237,6 +265,10 @@ impl OptView {
             kit::title(ui, t("opt.order"));
             let Some(pk) = self.pick.clone() else { kit::note(ui, t("opt.pick_hint"), mu()); return; };
             let o = a.chains.get(&pk.ex).and_then(|c| c.opts.get(pk.symbol.as_str())).cloned().unwrap_or_default();
+            // Deribit: the order is priced in coin; the chain shows USD at the index
+            let (quote, coin) = (trade::option_quote(pk.ex, &pk.symbol), coin_quote(pk.ex, &pk.symbol));
+            let fx = if coin.is_some() { o.index.filter(|i| *i > 0.0) } else { Some(1.0) };
+            let vpx = |usd: f64| venue_px(pk.ex, &pk.symbol, usd, o.index);
             ui.horizontal(|ui| {
                 icon(ui.painter(), pk.ex, Rect::from_min_size(ui.cursor().min + vec2(0.0, 3.0), vec2(14.0, 14.0)), false);
                 ui.add_space(18.0);
@@ -248,7 +280,10 @@ impl OptView {
             });
             kit::group(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 5.0;
-                let lvl = |l: Option<(f64, f64)>| l.map_or("—".into(), |(p, q)| format!("{} × {}", fmt_px(p), fmt_qty(q)));
+                let lvl = |l: Option<(f64, f64)>| l.map_or("—".into(), |(p, q)| match (coin, vpx(p)) {
+                    (Some(c), Some(v)) => format!("{v:.4} {c} · {} × {}", fmt_px(p), fmt_qty(q)),
+                    _ => format!("{} × {}", fmt_px(p), fmt_qty(q)),
+                });
                 kit::kv(ui, t("opt.bid"), lvl(o.bid), up());
                 kit::kv(ui, t("opt.ask"), lvl(o.ask), dn());
                 kit::kv(ui, t("opt.mark"), o.mark.map_or("—".into(), fmt_px), fg());
@@ -257,12 +292,13 @@ impl OptView {
             super::spot::side_toggle(ui, &mut self.buy, (t("spot.buy"), t("spot.sell")));
             kit::segments(ui, &mut self.tif, &[(Tif::Gtc, t("spot.limit")), (Tif::PostOnly, t("spot.post")), (Tif::Ioc, "IOC")], H);
             let bad = parse(&self.px).is_none();
-            kit::field(ui, t("spot.price"), &mut self.px, "USDT", "opt_px", bad);
+            kit::field(ui, t("spot.price"), &mut self.px, quote, "opt_px", bad);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let w = (ui.available_width() - 12.0) / 3.0;
                 for (label, p) in [(t("opt.bid"), o.bid.map(|b| b.0)), (t("opt.mark"), o.mark), (t("opt.ask"), o.ask.map(|b| b.0))] {
-                    if kit::button(ui, label, Look::Secondary, H_SM, Some(w), p.is_some()).clicked() { if let Some(p) = p { self.px = fmt_px(p).replace(',', ""); } }
+                    let p = p.and_then(vpx);
+                    if kit::button(ui, label, Look::Secondary, H_SM, Some(w), p.is_some()).clicked() { if let Some(p) = p { self.px = px_text(pk.ex, &pk.symbol, p); } }
                 }
             });
             let bad = !self.qty.is_empty() && parse(&self.qty).is_none();
@@ -275,12 +311,12 @@ impl OptView {
             kit::group(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 5.0;
                 let prem = px.zip(qty).map(|(p, q)| p * q);
-                kit::kv(ui, t(if self.buy { "opt.pay" } else { "opt.receive" }), prem.map_or("—".into(), |v| format!("{v:.2} USDT")), WARN);
-                // a long option's breakeven at expiry: strike plus (call) or minus (put) the premium
-                if let Some(p) = px.filter(|_| o.strike > 0.0) {
+                kit::kv(ui, t(if self.buy { "opt.pay" } else { "opt.receive" }), prem.map_or("—".into(), |v| amount(v, pk.ex, &pk.symbol, fx)), WARN);
+                // a long option's breakeven at expiry: strike plus (call) or minus (put) the premium in USD
+                if let Some(p) = px.zip(fx).map(|(p, x)| p * x).filter(|_| o.strike > 0.0) {
                     kit::kv(ui, t("opt.breakeven"), fmt_px(if o.call { o.strike + p } else { o.strike - p }), fg());
                 }
-                if self.buy { kit::kv(ui, t("ins.maxloss"), prem.map_or("—".into(), |v| format!("{v:.2} USDT")), fg()); }
+                if self.buy { kit::kv(ui, t("ins.maxloss"), prem.map_or("—".into(), |v| amount(v, pk.ex, &pk.symbol, fx)), fg()); }
             });
             if !self.buy && !self.reduce { kit::note(ui, t("opt.short_warn"), WARN); }
             let tradable = trade::OPTION_VENUES.contains(&pk.ex);
@@ -289,7 +325,7 @@ impl OptView {
             else if !keyed { kit::note(ui, t("ins.no_keys"), WARN); }
             let label = format!("{} {}", if self.buy { t("spot.buy") } else { t("spot.sell") }, qty.map(fmt_qty).unwrap_or_default());
             if kit::button(ui, &label, Look::Fill(if self.buy { up() } else { dn() }), H_LG, Some(f32::INFINITY), tradable && keyed && px.is_some() && qty.is_some()).clicked() {
-                let tk = OptTicket { ex: pk.ex, symbol: pk.symbol.clone(), buy: self.buy, px: px.unwrap_or(0.0), qty: qty.unwrap_or(0.0), tif: self.tif, reduce: self.reduce };
+                let tk = OptTicket { ex: pk.ex, symbol: pk.symbol.clone(), buy: self.buy, px: px.unwrap_or(0.0), qty: qty.unwrap_or(0.0), tif: self.tif, reduce: self.reduce, fx };
                 if confirm { self.confirm = Some(tk); } else { self.send(&tk, eng, ui.ctx()); }
             }
             self.held(ui, a, &held);
@@ -315,13 +351,19 @@ impl OptView {
             let long = p.side == Side::Buy;
             pnt.text(pos2(r.left() + 4.0, y), Align2::LEFT_CENTER, format!("{} {} {}", if long { "+" } else { "−" }, fmt_qty(p.qty), p.symbol.trim_end_matches("-USDT")), mono_m(11.0), if long { up() } else { dn() });
             pnt.text(pos2(r.right() - 4.0, y), Align2::RIGHT_CENTER, format!("{:+.2}", p.upnl), mono_m(11.0), if p.upnl >= 0.0 { up() } else { dn() });
-            if resp.on_hover_text(format!("{} {}  {} {}\n{}", t("opt.avg"), fmt_px(p.avg), t("opt.mark"), fmt_px(p.mark), t("opt.close_hint"))).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            // the venue's position greeks; none reported: no line
+            let greeks = if [p.delta, p.gamma, p.vega, p.theta].iter().any(|g| *g != 0.0) {
+                format!("\nΔ {:+.3}  Γ {:+.5}  V {:+.2}  Θ {:+.2}", p.delta, p.gamma, p.vega, p.theta)
+            } else { String::new() };
+            if resp.on_hover_text(format!("{} {}  {} {}{greeks}\n{}", t("opt.avg"), fmt_px(p.avg), t("opt.mark"), fmt_px(p.mark), t("opt.close_hint"))).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 let o = a.chains.get(&p.ex).and_then(|c| c.opts.get(p.symbol.as_str()));
                 self.pick = Some(Pick { ex: p.ex, symbol: p.symbol.clone() });
                 self.buy = !long;
                 self.reduce = true;
                 self.qty = fmt_qty(p.qty).replace(',', "");
-                if let Some(px) = o.and_then(|o| if long { o.bid } else { o.ask }).map(|l| l.0).or(Some(p.mark).filter(|m| *m > 0.0)) { self.px = fmt_px(px).replace(',', ""); }
+                // the touch, else the position's mark (both USD), in the venue's quote
+                let usd = o.and_then(|o| if long { o.bid } else { o.ask }).map(|l| l.0).or(Some(p.mark).filter(|m| *m > 0.0));
+                self.px = usd.and_then(|u| venue_px(p.ex, &p.symbol, u, o.and_then(|o| o.index))).map(|px| px_text(p.ex, &p.symbol, px)).unwrap_or_default();
             }
         }
         ui.spacing_mut().item_spacing.y = 10.0;
@@ -335,7 +377,8 @@ impl OptView {
             let y = r.center().y;
             let col = if o.side == Side::Buy { up() } else { dn() };
             ui.painter().text(pos2(r.left(), y), Align2::LEFT_CENTER, format!("{} {}", if o.side == Side::Buy { "+" } else { "−" }, o.symbol.trim_end_matches("-USDT")), mono_m(11.0), col);
-            ui.painter().text(pos2(r.right() - 26.0, y), Align2::RIGHT_CENTER, format!("{} @ {}", fmt_qty(o.qty - o.filled), fmt_px(o.price)), mono_m(11.0), fg());
+            let px = match coin_quote(o.ex, &o.symbol) { Some(c) => format!("{:.4} {c}", o.price), None => fmt_px(o.price) };
+            ui.painter().text(pos2(r.right() - 26.0, y), Align2::RIGHT_CENTER, format!("{} @ {px}", fmt_qty(o.qty - o.filled)), mono_m(11.0), fg());
             let x = Rect::from_center_size(pos2(r.right() - 9.0, y), vec2(18.0, 18.0));
             let resp = ui.interact(x, ui.id().with(("opt_cancel", &o.id)), Sense::click()).on_hover_text(t("spot.cancel"));
             ui.painter().text(x.center(), Align2::CENTER_CENTER, "✕", prop(12.0), if resp.hovered() { dn() } else { mu() });
@@ -354,10 +397,10 @@ impl OptView {
             kit::group(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 kit::kv(ui, t("spot.type"), format!("{} {}", t("spot.limit"), match tk.tif { Tif::PostOnly => "Post-only", Tif::Ioc => "IOC", Tif::Fok => "FOK", Tif::Gtc => "GTC" }), fg());
-                kit::kv(ui, t("spot.price"), fmt_px(tk.px), fg());
+                kit::kv(ui, t("spot.price"), format!("{} {}", px_text(tk.ex, &tk.symbol, tk.px), trade::option_quote(tk.ex, &tk.symbol)), fg());
                 kit::kv(ui, t("spot.qty"), format!("{} {base}", fmt_qty(tk.qty)), fg_strong());
                 if tk.reduce { kit::kv(ui, t("opt.reduce"), "✓".into(), fg()); }
-                kit::kv(ui, t(if tk.buy { "opt.pay" } else { "opt.receive" }), format!("{:.2} USDT", tk.px * tk.qty), WARN);
+                kit::kv(ui, t(if tk.buy { "opt.pay" } else { "opt.receive" }), amount(tk.px * tk.qty, tk.ex, &tk.symbol, tk.fx), WARN);
             });
             kit::note(ui, t("ins.untested"), WARN);
             ui.columns(2, |c| {
@@ -371,3 +414,25 @@ impl OptView {
 }
 
 fn parse(s: &str) -> Option<f64> { s.trim().replace(',', "").parse().ok().filter(|x: &f64| x.is_finite() && *x > 0.0) }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coin_quoted_prices_and_premiums() {
+        let (d, b) = (Exchange::Deribit, Exchange::Bybit);
+        let sym = "BTC-6NOV26-100000-P";
+        // the chain's USD ask back to the venue's coin price at the same index
+        let p = venue_px(d, sym, 0.252 * 79904.16, Some(79904.16)).unwrap();
+        assert_eq!(px_text(d, sym, p), "0.2520");
+        assert_eq!(venue_px(d, sym, 100.0, None), None, "no index yet: no price");
+        assert_eq!(venue_px(b, "BTC-25DEC26-100000-P-USDT", 1500.0, None), Some(1500.0));
+        assert_eq!(px_text(b, "BTC-25DEC26-100000-P-USDT", 1500.5), "1500.50");
+        // premiums say their unit; a coin premium carries its USD value
+        assert_eq!(amount(0.3 * 0.0125, d, sym, Some(80000.0)), "0.003750 BTC ≈ 300.00 $");
+        assert_eq!(amount(0.5, d, "ETH-6NOV26-2000-P", None), "0.500000 ETH");
+        assert_eq!(amount(15.0, b, "BTC-25DEC26-100000-P-USDT", Some(1.0)), "15.00 USDT");
+        assert_eq!((coin_quote(d, sym), coin_quote(b, "BTC-25DEC26-100000-P-USDT")), (Some("BTC"), None));
+    }
+}

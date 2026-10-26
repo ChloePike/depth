@@ -21,7 +21,8 @@ pub fn sign(secret: &str, prehash: &str) -> String {
 }
 
 /// Signed REST call; returns `data`. Query values are plain (symbols, enums, ids): no encoding needed.
-async fn bitget(k: &Keys, post: bool, path: &str, query: &[(&str, String)], body: Option<Value>) -> Result<Value> {
+pub(super) async fn bitget(k: &Keys, post: bool, path: &str, query: &[(&str, String)], body: Option<Value>) -> Result<Value> {
+    super::no_demo(k)?;
     let q = query.iter().map(|(a, b)| format!("{a}={b}")).collect::<Vec<_>>().join("&");
     let path_q = if q.is_empty() { path.to_string() } else { format!("{path}?{q}") };
     let body = body.map(|b| b.to_string()).unwrap_or_default();
@@ -228,6 +229,7 @@ fn position_push(data: &Value, held: &mut HashSet<(String, Side)>) -> Vec<AccEve
 /// Private stream: login, then positions / orders / account for USDT-FUTURES; Resync once all
 /// three subscriptions are acknowledged.
 pub async fn stream(k: Keys, tx: AccTx) {
+    if k.demo { return; }
     loop {
         // WS login timestamp is in SECONDS (official SDKs; the docs' prose says ms but the example is seconds)
         let ts = crate::now_ms() / 1000;

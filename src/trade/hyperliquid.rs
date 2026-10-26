@@ -18,7 +18,7 @@ const SLIPPAGE: f64 = 0.05;
 const MIN_NOTIONAL: f64 = 10.0;
 
 fn f(v: &Value) -> f64 { crate::opt_num(v).unwrap_or(0.0) }
-fn user(k: &Keys) -> String { k.key.trim().to_lowercase() }
+fn user(k: &Keys) -> Result<String> { super::no_demo(k)?; Ok(k.key.trim().to_lowercase()) }
 fn unified(coin: &str) -> String { format!("{}USDT", coin.to_uppercase()) }
 /// Spot coins ("@107", "PURR/USDC") show up in first-dex order lists; only perps are traded here.
 fn is_perp(coin: &str) -> bool { !coin.starts_with('@') && !coin.contains('/') }
@@ -150,7 +150,8 @@ fn next_nonce() -> u64 {
 /// Signs and posts one L1 action; returns `response.data`. Sent once, never retried: a
 /// retried order could fill twice. `expiresAfter` rejects an action stuck in transit
 /// (same idea as Bybit's write receive window).
-async fn exchange(k: &Keys, action: &impl Serialize) -> Result<Value> {
+pub(super) async fn exchange(k: &Keys, action: &impl Serialize) -> Result<Value> {
+    super::no_demo(k)?;
     let nonce = next_nonce();
     let expires = crate::now_ms() as u64 + RECV_WRITE as u64;
     let sig = sign_l1(&k.secret, action, nonce, Some(expires), !testnet())?;
@@ -186,7 +187,7 @@ pub async fn mode(_k: &Keys, _symbol: &str) -> Result<Mode> { Ok(Mode::OneWay) }
 
 pub async fn leverage(k: &Keys, symbol: &str) -> Result<f64> {
     let a = asset(symbol).await?;
-    let v = info(json!({"type": "activeAssetData", "user": user(k), "coin": a.coin})).await?;
+    let v = info(json!({"type": "activeAssetData", "user": user(k)?, "coin": a.coin})).await?;
     v["leverage"]["value"].as_f64().ok_or_else(|| anyhow!("hyperliquid: no leverage for {symbol}"))
 }
 
@@ -277,14 +278,14 @@ fn positions_of(cs: &Value) -> Vec<Position> {
 }
 
 pub async fn positions(k: &Keys) -> Result<Vec<Position>> {
-    Ok(positions_of(&info(json!({"type": "clearinghouseState", "user": user(k)})).await?))
+    Ok(positions_of(&info(json!({"type": "clearinghouseState", "user": user(k)?})).await?))
 }
 
 /// Funding since the position opened: `cumFunding.sinceOpen` is what the user PAID (positive =
 /// paid), so it is negated. The open time is not in the state.
 // ponytail: since = 0 (unknown); walk userFills like Binance if the date is wanted
 pub async fn funding_paid(k: &Keys, p: &Position) -> Result<Option<FundingPaid>> {
-    let cs = info(json!({"type": "clearinghouseState", "user": user(k)})).await?;
+    let cs = info(json!({"type": "clearinghouseState", "user": user(k)?})).await?;
     Ok(cs["assetPositions"].as_array().into_iter().flatten().map(|a| &a["position"]).find(|r| unified(r["coin"].as_str().unwrap_or_default()) == p.symbol)
         .and_then(|r| crate::opt_num(&r["cumFunding"]["sinceOpen"]).map(|x| FundingPaid { amount: -x, since: 0, lower: false })))
 }
@@ -301,7 +302,7 @@ fn open_order(o: &Value) -> OpenOrder {
 }
 
 pub async fn open_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
-    let v = info(json!({"type": "frontendOpenOrders", "user": user(k)})).await?;
+    let v = info(json!({"type": "frontendOpenOrders", "user": user(k)?})).await?;
     Ok(v.as_array().into_iter().flatten().filter(|o| is_perp(o["coin"].as_str().unwrap_or("@"))).map(open_order).collect())
 }
 
@@ -317,10 +318,10 @@ fn totals(cs: &Value) -> Option<Balance> {
 }
 
 pub async fn balance(k: &Keys) -> Result<Balance> {
-    if let Some(b) = totals(&info(json!({"type": "clearinghouseState", "user": user(k)})).await?) { return Ok(b); }
+    if let Some(b) = totals(&info(json!({"type": "clearinghouseState", "user": user(k)?})).await?) { return Ok(b); }
     // ponytail: unified-account fallback reads spot USDC only (weight 2); add other collateral
     // tokens if the venue starts margining with them
-    let v = info(json!({"type": "spotClearinghouseState", "user": user(k)})).await?;
+    let v = info(json!({"type": "spotClearinghouseState", "user": user(k)?})).await?;
     let usdc = v["balances"].as_array().into_iter().flatten().find(|b| b["coin"] == "USDC");
     Ok(usdc.map(|b| Balance { equity: f(&b["total"]), available: f(&b["total"]) - f(&b["hold"]), ..Default::default() }).unwrap_or_default())
 }
@@ -329,8 +330,9 @@ pub async fn balance(k: &Keys) -> Result<Balance> {
 /// `orderUpdates`, keyed by the account address; no auth. Resync after the clearinghouse
 /// subscription is acknowledged.
 pub async fn stream(k: Keys, tx: AccTx) {
+    if k.demo { return; }
     let ex = Exchange::Hyperliquid;
-    let u = user(&k);
+    let Ok(u) = user(&k) else { return };
     loop {
         let spec = ws::Spec::new("hyperliquid account", ws_url())
             .sub(json!({"method": "subscribe", "subscription": {"type": "clearinghouseState", "user": u, "dex": ""}}).to_string())

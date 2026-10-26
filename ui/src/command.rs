@@ -36,7 +36,7 @@ fn keywords() -> Vec<(String, Cmd)> {
         ("options", Market::Option), ("perps", Market::Perp), ("swap", Market::Perp), ("futures", Market::Perp)] { k.push((w.to_uppercase(), Cmd::Mode(m))); }
     // trading venues only: the word sets the order panel's venue
     k.extend(depth::trade::TRADABLE.map(|e| (format!("{e:?}").to_uppercase(), Cmd::Venue(e))));
-    for (w, n) in [("settings", 0), ("prefs", 0), ("appearance", 1), ("theme", 1), ("trading", 2), ("routing", 2), ("keys", 3), ("api", 3), ("hotkeys", 4), ("shortcuts", 4)] {
+    for (w, n) in [("settings", 0), ("prefs", 0), ("appearance", 1), ("theme", 1), ("trading", 2), ("routing", 2), ("demo", 2), ("keys", 3), ("api", 3), ("hotkeys", 4), ("shortcuts", 4)] {
         k.push((w.to_uppercase(), Cmd::Settings(n)));
     }
     k
@@ -219,6 +219,7 @@ mod tests {
         assert_eq!(parse("ETHUSDT opt", &t, 0), Ok(vec![base("ETH"), Cmd::Mode(Market::Option)]));
         assert_eq!(parse("1inch 1d", &t, 0), Ok(vec![base("1INCH"), Cmd::Tf(1440)]));
         assert_eq!(parse("keys", &t, 0), Ok(vec![Cmd::Settings(3)]));
+        assert_eq!(parse("demo", &t, 0), Ok(vec![Cmd::Settings(2)]));
         assert_eq!(parse("eth nope", &t, 0), Err("nope".into()));
         assert_eq!(parse("  ", &t, 0), Ok(vec![]));
         assert_eq!(parse("3m 1w", &t, 0), Ok(vec![Cmd::Tf(3), Cmd::Tf(10080)]));

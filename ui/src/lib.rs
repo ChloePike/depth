@@ -394,6 +394,8 @@ impl App {
         let prefs = st.prefs.clone().unwrap_or_default();
         prefs.apply(&cc.egui_ctx);
         let mode = env("T1_MODE").and_then(|m| Market::parse(&m)).or(st.mode).unwrap_or(Market::Perp);
+        // before the engine picks its active keys (T1_DEMO=1: demo account for screenshots)
+        depth::demo::set_on(prefs.demo || env("T1_DEMO").is_some());
         let mut eng = engine::Engine::new();
         {
             let mut a = eng.account.lock().unwrap();
@@ -451,6 +453,7 @@ impl App {
             let names: Vec<&str> = MODES.iter().map(|(_, k)| t(k)).collect();
             let sel = MODES.iter().position(|(m, _)| *m == self.mode).unwrap_or(0);
             if let Some(i) = top::pills(ui, "modes", &names, sel, 26.0, 13.0) { *new_mode = Some(MODES[i].0); }
+            if depth::demo::on() { kit::chip(ui, "DEMO", kit::Tone::Warn).on_hover_text(l("Simulated account: no real order is sent")); }
             let book_market = match self.mode { Market::Margin | Market::Option => Market::Spot, m => m };
             self.top.price(ui, a.mid(book_market));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -883,6 +886,8 @@ impl App {
     pub(crate) fn alerts_tick(&mut self, a: &depth::agg::Agg) {
         let base = self.eng.base.clone();
         let mut bases = self.chart.alert_bases();
+        // demo positions and orders off screen keep a price for marks, triggers and liquidation
+        if depth::demo::on() { bases.extend(depth::demo::bases()); bases.sort(); bases.dedup(); }
         bases.retain(|b| *b != base);
         self.eng.watch(&bases);
         let mut px = self.eng.watched.lock().unwrap().clone();

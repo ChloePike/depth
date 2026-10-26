@@ -79,7 +79,8 @@ impl App {
         let mode_s = mode.map(|m| if m == trade::Mode::Hedge { "hedge" } else { "oneway" });
         let (fee_t, fee_m) = super::settings::fee(ex);
         let trade_v = json!({
-            "venue": ex_name(ex), "symbol": symbol, "has_key": has_key, "verified": trade::VERIFIED.contains(&ex),
+            // a simulated venue needs no "untested" warning
+            "venue": ex_name(ex), "symbol": symbol, "has_key": has_key, "verified": trade::VERIFIED.contains(&ex) || depth::demo::on(), "demo": depth::demo::on(),
             "mode": mode_s, "lev": acc.levs.get(&key),
             "available": bal.as_ref().map(|b| b.available), "equity": bal.as_ref().map(|b| b.equity),
             "uni_mmr": bal.as_ref().and_then(|b| b.uni_mmr), "mm_rate": bal.as_ref().and_then(|b| b.mm_rate),
@@ -94,6 +95,7 @@ impl App {
         let opt_positions: Vec<Value> = acc.opts.iter().map(|o| json!({
             "ex": ex_name(o.ex), "symbol": o.symbol, "base": o.base, "expiry": o.expiry, "strike": o.strike, "call": o.call,
             "side": side_name(o.side), "qty": o.qty, "entry": o.avg, "mark": o.mark, "upnl": o.upnl, "option": true,
+            "delta": o.delta, "gamma": o.gamma, "vega": o.vega, "theta": o.theta, "quote": trade::option_quote(o.ex, &o.symbol),
         })).collect();
         let positions: Vec<Value> = acc.positions.iter().map(|p| {
             let f = funds.get(&(p.ex, p.symbol.clone()));
@@ -163,9 +165,10 @@ impl App {
             "trigger": if w.trigger == trade::tpsl::Trigger::Last { "last" } else { "mark" }, "client_id": w.client_id, "order_id": w.order_id, "filled": w.filled_ms.is_some(), "created_ms": w.created_ms})).collect();
         let tests = self.eng.key_tests.lock().unwrap().clone();
         let keys: Vec<Value> = trade::KEY_VENUES.iter().map(|&e| {
-            let tail: Option<String> = acc.keys.get(&e).map(|k| k.key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect());
+            // the Keychain's keys, never the demo ones
+            let tail: Option<String> = self.eng.real_keys.get(&e).map(|k| k.key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect());
             let (lk, ls, lx) = trade::key_fields(e);
-            json!({"ex": ex_name(e), "configured": tail.is_some(), "tail": tail, "verified": trade::VERIFIED.contains(&e),
+            json!({"ex": ex_name(e), "configured": tail.is_some(), "tail": tail, "verified": trade::VERIFIED.contains(&e) || depth::demo::on(),
                    "test": tests.get(&e).map(|(ok, m)| json!({"ok": ok, "msg": m})), "labels": [lk, ls, lx]})
         }).collect();
         let pm = trade::is_pm();
@@ -204,7 +207,7 @@ impl App {
             (c, b)
         };
         json!({
-            "base": self.eng.base, "mode": format!("{:?}", self.mode), "lang": super::lang_code(), "langs": super::LANGS,
+            "base": self.eng.base, "mode": format!("{:?}", self.mode), "lang": super::lang_code(), "langs": super::LANGS, "demo": depth::demo::on(),
             "header": header, "venues": venues, "stats": stats, "trade": trade_v,
             "positions": positions, "opt_positions": opt_positions, "orders": orders, "tpsl": tpsl, "tpsl_wait": tpsl_wait,
             "history": {"orders": hist.0, "fills": hist.1, "closed": hist.2, "updated_ms": (hist.3 != i64::MAX).then_some(hist.3),
@@ -246,14 +249,16 @@ impl App {
             "set_lang" => super::set_lang(v["lang"].as_str().unwrap_or("en")),
             "set_prefs" => {
                 let old = (self.prefs.proxy, self.prefs.proxy_url.clone());
+                let was_demo = self.prefs.demo;
                 self.prefs = super::settings::merge_prefs(&self.prefs, &v["prefs"])?;
                 self.prefs.apply(ctx);
                 self.eng.account.lock().unwrap().limits = self.prefs.risk;
+                // the account streams restart on the other account; market connections stay
+                if self.prefs.demo != was_demo { self.eng.set_demo(self.prefs.demo); }
                 // every stream reconnects through the new route now; private ones re-snapshot
                 if old != (self.prefs.proxy, self.prefs.proxy_url.clone()) {
                     self.pending_restart = true;
-                    let keys: Vec<_> = self.eng.account.lock().unwrap().keys.iter().map(|(e, k)| (*e, k.clone())).collect();
-                    for (e, k) in keys { self.eng.set_keys(e, Some(k)); }
+                    self.eng.restart_streams();
                 }
             }
             // the daily loss stop counts from now
@@ -412,7 +417,8 @@ impl App {
                 let req = self.order_req(&json!({"pos": v["pos"], "close": v["close"], "qty": v["qty"], "kind": "market"}))?;
                 let ex = self.trade.ex;
                 let minutes = f("minutes").ok_or("duration")?;
-                let id = if v["native"].as_bool() == Some(true) && trade::native_twap(ex).is_some() {
+                // venue-run TWAP is not simulated: the client-side one runs on the demo account
+                let id = if v["native"].as_bool() == Some(true) && trade::native_twap(ex).is_some() && !depth::demo::on() {
                     let ref_px = self.eng.agg.lock().unwrap().venues.get(&(ex, Market::Perp)).and_then(|v| v.mid()).unwrap_or(0.0);
                     self.eng.start_native_twap(ex, req, minutes.round() as u32, f("limit").filter(|l| *l > 0.0), v["randomize"].as_bool().unwrap_or(false), ref_px, ctx)?
                 } else {
@@ -447,7 +453,12 @@ impl App {
                 self.eng.set_keys(e, k);
             }
             "delete_keys" => { let e = exv()?; trade::delete_keys(e); self.eng.set_keys(e, None); }
-            "test_keys" => { let e = exv()?; let k = self.eng.account.lock().unwrap().keys.get(&e).cloned().ok_or("no keys")?; self.eng.test_keys(e, k, ctx); }
+            "demo_reset" => {
+                depth::demo::reset(self.prefs.demo_balance.max(1.0));
+                // a clean snapshot of the new account on every venue
+                if depth::demo::on() { self.eng.set_demo(true); }
+            }
+            "test_keys" => { let e = exv()?; let k = self.eng.real_keys.get(&e).cloned().ok_or("no keys")?; self.eng.test_keys(e, k, ctx); }
             other => return Err(format!("unknown op {other:?}")),
         }
         Ok(json!({}))

@@ -55,6 +55,7 @@ Sum of every connected perp venue = 所有已连接永续交易所之和
 Summed across Binance, Bybit, OKX and Hyperliquid = Binance、Bybit、OKX 和 Hyperliquid 之和
 The key is deleted from the Credential Manager and the venue disconnects from your account. = 密钥将从凭据管理器中删除，该交易所与你的账户断开连接。
 This venue is untested: start with the minimum size. = 该交易所尚未验证：请从最小数量开始。
+DEMO account: this order is simulated. No real order is sent. = 模拟账户：此订单为模拟成交，不会发送真实订单。
 This venue's raw book (click a level to fill the price) = 该交易所的原始订单簿（点击档位填入价格）
 Tick = 最小变动
 Trades = 成交

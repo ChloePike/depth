@@ -28,6 +28,7 @@ pub enum Effect { Plain, Borrow, Repay }
 /// margin data cannot give. Binance: `GET /sapi/v1/margin/crossMarginData?coin=` (weight 1 per coin,
 /// through the rate-limit pause like every signed call); an asset the venue has no rate for is left out.
 pub async fn borrow_rates(ex: Exchange, k: &Keys, assets: &[&str]) -> Result<Vec<(String, f64)>> {
+    if k.demo { return Ok(vec![]); }
     match ex {
         Exchange::Binance => {
             let mut out = vec![];
@@ -119,6 +120,10 @@ pub fn effect_str(e: Effect) -> &'static str { match e { Effect::Plain => "NO_SI
 /// Spot order, or a margin order when `margin` is set.
 #[allow(clippy::too_many_arguments)]
 pub async fn place(ex: Exchange, k: &Keys, symbol: &str, side: Side, kind: Kind, qty: f64, r: &Rules, ref_px: f64, margin: Option<Effect>) -> Result<String> {
+    if k.demo {
+        if margin.is_some() { bail!("demo: margin loans are not simulated"); }
+        return crate::demo::place(ex, crate::Market::Spot, &super::OrderReq { symbol: symbol.into(), pos: side, close: false, kind, qty, client_id: None, attach: None }, r, ref_px);
+    }
     let (q, px) = checked(kind, qty, r, ref_px)?;
     match ex {
         Exchange::Bybit => {
@@ -145,6 +150,7 @@ pub async fn place(ex: Exchange, k: &Keys, symbol: &str, side: Side, kind: Kind,
 }
 
 pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str, margin: bool) -> Result<()> {
+    if k.demo { return crate::demo::cancel(id); }
     match ex {
         Exchange::Bybit => { bybit(k, false, "/v5/order/cancel", json!({"category": "spot", "symbol": symbol, "orderId": id})).await?; }
         Exchange::Binance => {
@@ -168,6 +174,7 @@ fn binance_order(ex: Exchange, o: &Value) -> OpenOrder {
 /// Resting margin orders on `symbol` (Binance: weight 10, papi 5). Bybit margin orders are spot
 /// orders with `isLeverage`: they come with `open_orders`.
 pub async fn margin_orders(ex: Exchange, k: &Keys, symbol: &str) -> Result<Vec<OpenOrder>> {
+    if k.demo { return Ok(vec![]); }
     match ex {
         Exchange::Binance => {
             let (host, pre) = binance_margin(k).await?;
@@ -180,6 +187,7 @@ pub async fn margin_orders(ex: Exchange, k: &Keys, symbol: &str) -> Result<Vec<O
 
 /// Coins on the margin account with their loans. Bybit: the unified wallet (same as spot).
 pub async fn margin_balances(ex: Exchange, k: &Keys) -> Result<Vec<Bal>> {
+    if k.demo { return Ok(vec![]); }
     match ex {
         Exchange::Binance if super::binance_pm(k).await? => {
             let v = binance_at(k, super::papi_url(), reqwest::Method::GET, "/papi/v1/balance", &[]).await?;
@@ -198,6 +206,7 @@ pub async fn margin_balances(ex: Exchange, k: &Keys) -> Result<Vec<Bal>> {
 /// Resting spot orders (Binance: all symbols, weight 80; read on resync, reconcile and after our own
 /// orders only).
 pub async fn open_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
+    if k.demo { return Ok(crate::demo::open_orders(ex, crate::Market::Spot)); }
     match ex {
         Exchange::Bybit => {
             let v = bybit(k, true, "/v5/order/realtime", json!({"category": "spot", "limit": "50"})).await?;
@@ -220,6 +229,7 @@ pub async fn open_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
 /// ponytail: Bybit unified USDT that backs perp margin is counted as free; the venue refuses a buy
 /// beyond what is really available.
 pub async fn balances(ex: Exchange, k: &Keys) -> Result<Vec<Bal>> {
+    if k.demo { return Ok(crate::demo::spot_balances(ex)); }
     match ex {
         Exchange::Bybit => {
             let v = bybit(k, true, "/v5/account/wallet-balance", json!({"accountType": "UNIFIED"})).await?;

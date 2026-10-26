@@ -37,6 +37,7 @@ impl TradeView {
     /// Cheapest option protection across option venues for the open position on this base
     /// (or a hypothetical long of `ins_qty` when there is none).
     fn insurance(&mut self, ui: &mut Ui, a: &Agg, eng: &Engine, base: &str, pos: Option<Position>) {
+        if depth::demo::on() { kit::note(ui, t("ins.demo"), WARN); return; }
         // the floor and max loss are measured from the position's own mark on its venue; the composite
         // only stands in when there is no position (or the venue reports no mark yet)
         let comp = a.mid(Market::Perp).unwrap_or(0.0);
@@ -55,7 +56,8 @@ impl TradeView {
         }
         if ip.qty <= 0.0 || mark <= 0.0 { return; }
         let f = Filter { min_days: 2.0, max_days: 60.0, otm_max: 0.12 };
-        // OKX and Deribit option prices are already USD; the other venues quote USDT
+        // OKX and Deribit option prices are already USD; the other venues quote USDT. A Deribit inverse option pays
+        // its intrinsic in coin at expiry, worth exactly the USD intrinsic, so payoff and max loss stay in USD
         let all = insure::quotes(&a.chains, |e| if matches!(e, Exchange::Okx | Exchange::Deribit) { 1.0 } else { a.usdt(e, Market::Perp) }, &ip, &f, now_ms());
         let mut best = insure::best_per_contract(&all);
         best.retain(|q| q.floor_dist >= 0.02);
@@ -125,17 +127,20 @@ impl TradeView {
         let plan = match plan { Some(((e, s), r)) if e == q.ex && s == *q.symbol => r, _ => { kit::note(ui, t("ins.pricing"), mu()); return; } };
         let p = match plan { Ok(p) => p, Err(e) => { kit::note(ui, &e, WARN); return; } };
         let gap = if ip.side == Side::Buy { ip.mark - q.strike } else { q.strike - ip.mark };
+        // Bybit quotes USDT; Deribit's inverse options are priced and paid in their coin (`p.usd` = its index)
+        let coin = super::options::coin_quote(p.ex, &p.symbol);
+        let px = |v: f64| match coin { Some(c) => format!("{v:.4} {c}"), None => fmt_px(v) };
         kit::group(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 6.0;
             kit::kv(ui, &format!("{:?}", q.ex), p.symbol.clone(), fg_strong());
-            kit::kv(ui, t("ins.limit"), fmt_px(p.limit), fg());
+            kit::kv(ui, t("ins.limit"), px(p.limit), fg());
             kit::kv(ui, t("ins.qty"), format!("{} {base}", fmt_qty(p.qty)), fg());
-            kit::kv(ui, t("ins.avg"), fmt_px(p.avg), fg());
-            // Bybit options quote USDT
-            kit::kv(ui, t("ins.total"), format!("{:.2} USDT", p.cost), WARN);
-            kit::kv(ui, t("ins.maxloss"), format!("{:.0}$", gap * ip.qty + p.cost), fg());
+            kit::kv(ui, t("ins.avg"), px(p.avg), fg());
+            kit::kv(ui, t("ins.total"), super::options::amount(p.cost, p.ex, &p.symbol, Some(p.usd)), WARN);
+            kit::kv(ui, t("ins.maxloss"), format!("{:.0}$", max_loss(gap, ip.qty, &p)), fg());
         });
         if p.fill + 1e-9 < p.qty { kit::note(ui, &format!("{} {} / {} {base}", t("ins.partial"), fmt_qty(p.fill), fmt_qty(p.qty)), WARN); }
+        if let Some(c) = coin { kit::note(ui, &t("ins.coin_note").replace("{coin}", c), WARN); }
         kit::note(ui, t("ins.untested"), WARN);
         let (mut cancel, mut buy) = (false, false);
         ui.columns(2, |c| {
@@ -188,9 +193,20 @@ impl TradeView {
     }
 }
 
+/// Loss from the position's mark down to the floor plus the premium in USD (a coin premium at the plan's index).
+fn max_loss(gap: f64, qty: f64, p: &trade::OptBuy) -> f64 { gap * qty + p.cost * p.usd }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_loss_counts_a_coin_premium_in_usd() {
+        let p = trade::OptBuy { ex: Exchange::Deribit, symbol: "BTC-6NOV26-76000-P".into(), qty: 1.0, limit: 0.012, tick: 0.0001, step: 0.1, fill: 1.0, avg: 0.012, cost: 0.012, usd: 80000.0 };
+        // 4000 down to the floor plus 0.012 BTC at 80000 = 960 $, never 4000 + 0.012
+        assert!((max_loss(4000.0, 1.0, &p) - 4960.0).abs() < 1e-9);
+        assert_eq!(max_loss(4000.0, 1.0, &trade::OptBuy { ex: Exchange::Bybit, cost: 900.0, usd: 1.0, ..p }), 4900.0);
+    }
 
     #[test]
     fn position_prices_are_in_usdt_of_its_venue() {

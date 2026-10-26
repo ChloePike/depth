@@ -245,6 +245,7 @@ pub(super) async fn binance_cancel(k: &Keys, id: &str) -> Result<()> {
 /// Bybit: one trading-stop call (10/s per UID). Binance: list the symbol (weight 1), then per side
 /// cancel the old one (weight 1) and place the new one (order count 1); unchanged sides are skipped.
 pub async fn set_position_tpsl(ex: Exchange, k: &Keys, symbol: &str, pos: Side, mode: Mode, tp: Option<f64>, sl: Option<f64>, trigger: Trigger) -> Result<()> {
+    if k.demo { return crate::demo::set_tpsl(ex, symbol, pos, tp, sl, trigger).await; }
     if tp.is_none() && sl.is_none() { bail!("nothing to set"); }
     let r = rules(ex, symbol).await?;
     let tp = tp.map(|p| price(&r, p)).transpose()?;
@@ -276,6 +277,7 @@ pub async fn set_position_tpsl(ex: Exchange, k: &Keys, symbol: &str, pos: Side, 
 
 /// Removes the whole-position TP and/or SL. Partial levels stay (cancel them by id).
 pub async fn clear_position_tpsl(ex: Exchange, k: &Keys, symbol: &str, pos: Side, mode: Mode, tp: bool, sl: bool) -> Result<()> {
+    if k.demo { return crate::demo::clear_tpsl(ex, symbol, pos, tp, sl); }
     match ex {
         Exchange::Bybit => {
             if !tp && !sl { return Ok(()); }
@@ -297,6 +299,7 @@ pub async fn clear_position_tpsl(ex: Exchange, k: &Keys, symbol: &str, pos: Side
 /// conditional orders of the symbol (one read, 50/s per UID); "" if that lookup fails — the
 /// `order.linear` push carries it anyway.
 pub async fn add_partial(ex: Exchange, k: &Keys, symbol: &str, pos: Side, mode: Mode, take_profit: bool, trigger_px: f64, qty: f64, trigger: Trigger) -> Result<String> {
+    if k.demo { return crate::demo::add_partial(ex, symbol, pos, take_profit, trigger_px, qty, trigger).await; }
     let r = rules(ex, symbol).await?;
     let (px, q) = (price(&r, trigger_px)?, size(&r, qty)?);
     match ex {
@@ -319,6 +322,7 @@ pub async fn add_partial(ex: Exchange, k: &Keys, symbol: &str, pos: Side, mode: 
 /// Every active TP/SL of the account. Bybit: `/v5/order/realtime`, all pages of 50 rows (50/s per UID).
 /// Binance: `openAlgoOrders` without symbol = weight 40: snapshot on (re)connect only, never a timer.
 pub async fn list(ex: Exchange, k: &Keys) -> Result<Vec<TpSl>> {
+    if k.demo { return Ok(crate::demo::tpsl_list(ex)); }
     match ex {
         Exchange::Bybit => {
             // regular orders share the list; every page is read so a TP/SL behind 50+ resting orders still shows
@@ -332,6 +336,7 @@ pub async fn list(ex: Exchange, k: &Keys) -> Result<Vec<TpSl>> {
 
 /// Cancels one TP/SL by id (Bybit orderId: order cancel, 10/s per UID; Binance algoId: weight 1).
 pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {
+    if k.demo { return crate::demo::cancel(id); }
     match ex {
         Exchange::Bybit => bybit(k, false, "/v5/order/cancel", json!({"category": "linear", "symbol": symbol, "orderId": id})).await.map(|_| ()),
         Exchange::Binance => binance_cancel(k, id).await,
@@ -342,6 +347,7 @@ pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()
 /// Cancels every given TP/SL, one request after another. By id on purpose: the bulk endpoints
 /// (Bybit cancel-all StopOrder, Binance algoOpenOrders) also take conditional entries and trailing stops.
 pub async fn cancel_all(ex: Exchange, k: &Keys, list: &[TpSl]) -> Result<CancelReport> {
+    if k.demo { let mut rep = CancelReport::default(); for t in list { rep.add(format!("{} {}", t.symbol, t.id), crate::demo::cancel(&t.id)); } return Ok(rep); }
     let mut rep = CancelReport::default();
     for t in list { rep.add(format!("{} {}", t.symbol, t.id), cancel(ex, k, &t.symbol, &t.id).await); }
     Ok(rep)
