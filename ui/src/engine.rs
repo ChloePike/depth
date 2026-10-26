@@ -560,8 +560,8 @@ impl Engine {
             // spot orders / balances changed (Bybit order.spot push): one REST refetch per 3s at most
             let mut spot_dirty: std::collections::HashSet<Exchange> = Default::default();
             let mut last_spot: HashMap<Exchange, std::time::Instant> = HashMap::new();
-            // venues whose position pushes carry no liquidation price (Binance, Kraken): positions are
-            // refetched after a push, at most every 3s, so the venue's own figure replaces the old one
+            // Binance position pushes carry no liquidation price: positions are refetched after a push,
+            // at most every 3s, so the venue's own figure replaces the old one
             let mut pos_dirty: std::collections::HashSet<Exchange> = Default::default();
             let mut last_pos: HashMap<Exchange, std::time::Instant> = HashMap::new();
             let mut last_bal: HashMap<Exchange, std::time::Instant> = HashMap::new();
@@ -584,10 +584,10 @@ impl Engine {
                                     trade::AccEvent::BalanceDirty => {
                                         dirty.insert(ex);
                                         // equity moved (fill, funding, transfer): cross liquidation prices with it
-                                        if matches!(ex, Exchange::Binance | Exchange::Kraken) { pos_dirty.insert(ex); }
+                                        if ex == Exchange::Binance { pos_dirty.insert(ex); }
                                     }
                                     ev => {
-                                        if let trade::AccEvent::Position { p, .. } = &ev { if p.qty > 0.0 && p.liq.is_none() { pos_dirty.insert(ex); } }
+                                        if let trade::AccEvent::Position { p, .. } = &ev { if wants_liq_refetch(ex, p) { pos_dirty.insert(ex); } }
                                         let wallet = matches!(ev, trade::AccEvent::Wallet(_));
                                         changed |= apply(&mut a, ex, ev);
                                         // run after the lock is released: spawn_top_up locks the account itself
@@ -622,9 +622,7 @@ impl Engine {
                             tokio::spawn(async move {
                                 let Some(k) = acc.lock().unwrap().keys.get(&ex).cloned() else { return };
                                 if let Ok(p) = trade::positions(ex, &k).await {
-                                    let mut a = acc.lock().unwrap();
-                                    a.positions.retain(|x| x.ex != ex);
-                                    a.positions.extend(p);
+                                    replace_positions(&mut acc.lock().unwrap(), ex, p);
                                     ctx.request_repaint();
                                 }
                             });
@@ -1392,7 +1390,7 @@ async fn refresh_venue(account: &Arc<Mutex<Account>>, ex: Exchange) {
     let mut a = account.lock().unwrap();
     // each part applies on its own: a failing orders or balance call must not freeze positions
     let mut err = None;
-    match p { Ok(p) => { a.positions.retain(|x| x.ex != ex); a.positions.extend(p); } Err(e) => err = err.or(Some(e)) }
+    match p { Ok(p) => replace_positions(&mut a, ex, p), Err(e) => err = err.or(Some(e)) }
     match o { Ok(o) => { a.orders.retain(|x| x.ex != ex); a.orders.extend(o); } Err(e) => err = err.or(Some(e)) }
     // an account without option trading answers with an error: keep it out of the venue's status
     if let Ok(op) = op { a.opts.retain(|x| x.ex != ex); a.opts.extend(op); }
@@ -1406,6 +1404,19 @@ async fn refresh_venue(account: &Arc<Mutex<Account>>, ex: Exchange) {
             a.errors.insert(ex, e);
         }
     }
+}
+
+/// Binance is the one venue whose position pushes lack the liquidation price while its REST rows
+/// have it, so a push without one is followed by a refetch. Kraken's REST rows carry no mark / liq /
+/// margin either, and the other pushes bring their own liq: a refetch there gains nothing.
+fn wants_liq_refetch(ex: Exchange, p: &Position) -> bool { ex == Exchange::Binance && p.qty > 0.0 && p.liq.is_none() }
+
+/// A REST position snapshot replaces the venue's rows but keeps what the snapshot leaves out
+/// (Kraken: mark, liq, margin) from the rows pushed so far.
+fn replace_positions(a: &mut Account, ex: Exchange, new: Vec<Position>) {
+    let old: Vec<Position> = a.positions.iter().filter(|x| x.ex == ex).cloned().collect();
+    a.positions.retain(|x| x.ex != ex);
+    a.positions.extend(trade::merge_snapshot(&old, new));
 }
 
 async fn reload_wallets(account: &Arc<Mutex<Account>>, ex: Exchange, k: &Keys) {
@@ -1628,6 +1639,29 @@ mod tests {
         assert_eq!(a.orders[0].filled, 0.5);
         apply(&mut a, ex, E::OrderDone { id: "7".into() });
         assert!(a.orders.is_empty());
+    }
+
+    #[test]
+    fn rest_snapshots_merge_into_pushed_positions() {
+        let ex = Exchange::Kraken;
+        let mut a = Account::default();
+        let pushed = Position { ex, liq: Some(80.0), lev: 10.0, margin: 50.0, mark: 101.0, cross: Some(true), ..pos(Side::Buy, 1.0) };
+        a.positions.push(pushed);
+        a.positions.push(Position { ex: Exchange::Bybit, ..pos(Side::Buy, 3.0) });
+        // Kraken REST row: mark 0, liq None, margin 0; another venue's row is untouched
+        replace_positions(&mut a, ex, vec![Position { ex, upnl: 2.0, ..pos(Side::Buy, 1.0) }]);
+        let k = a.positions.iter().find(|p| p.ex == ex).unwrap();
+        assert_eq!((k.mark, k.liq, k.margin, k.lev, k.cross, k.upnl), (101.0, Some(80.0), 50.0, 10.0, Some(true), 2.0));
+        assert_eq!(a.positions.iter().filter(|p| p.ex == Exchange::Bybit).map(|p| p.qty).collect::<Vec<_>>(), vec![3.0]);
+        // a position closed meanwhile is gone after the snapshot
+        replace_positions(&mut a, ex, vec![]);
+        assert!(a.positions.iter().all(|p| p.ex != ex));
+        // only Binance refetches after a push without a liquidation price
+        let p = |qty| Position { ex, ..pos(Side::Buy, qty) };
+        assert!(!wants_liq_refetch(Exchange::Kraken, &p(1.0)) && !wants_liq_refetch(Exchange::Bybit, &p(1.0)));
+        assert!(wants_liq_refetch(Exchange::Binance, &p(1.0)));
+        assert!(!wants_liq_refetch(Exchange::Binance, &p(0.0)));
+        assert!(!wants_liq_refetch(Exchange::Binance, &Position { liq: Some(1.0), ..p(1.0) }));
     }
 
     #[test]
