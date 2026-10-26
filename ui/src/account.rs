@@ -288,6 +288,11 @@ fn opt_cell(ui: &mut Ui, i: usize, r: Rect, p: &Value, perps: &[Value], acts: &m
             txt(ui, bot, format!("{}%", signed(if cost > 0.0 { upnl / cost * 100.0 } else { 0.0 })), mono_m(11.0), pnl_col(upnl), true);
         }
         7 => { txt(ui, r, format!("{} {}", super::t("ins.exp"), s(&p["expiry"])), prop(12.0), mu(), false); }
+        // the venue's position greeks in the perp-only TP / SL and funding columns
+        8 | 9 if p["delta"].as_f64().is_some_and(|d| d != 0.0) || p["theta"].as_f64().is_some_and(|x| x != 0.0) => {
+            let s = if i == 8 { format!("Δ {:+.2}", f(&p["delta"])) } else { format!("Θ {:+.2}", f(&p["theta"])) };
+            txt(ui, r, s, mono(12.5), mu(), true);
+        }
         11 => {
             let base = s(&p["base"]);
             let covers = perps.iter().any(|x| base_of(s(&x["symbol"])) == base && (s(&x["side"]) == "long") != call);

@@ -160,6 +160,7 @@ ins.venue_soon = 这家交易所的期权下单还没接入，目前只支持 By
 ins.no_keys = 这家交易所没有 API Key（需要期权交易权限）。
 ins.partial = 卖盘只够
 ins.untested = 期权下单还没在真实账户验证过，先用小仓位试。结果见账户日志。
+ins.coin_note = 权利金以 {coin} 支付：Deribit 分币种保证金（segregated）账户里没有 {coin} 时会被交易所拒单（原因见账户日志）。到期时期权按超出保护价部分的美元差额支付等值的 {coin}。
 ins.held = 已保
 ins.protecting = 保护中
 ins.orphan = 无合约

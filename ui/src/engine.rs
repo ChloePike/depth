@@ -820,7 +820,7 @@ impl Engine {
         rt.spawn(async move {
             let Some(k) = account.lock().unwrap().keys.get(&p.ex).cloned() else { return };
             let res = trade::buy_option(&k, &p).await;
-            let what = format!("{:?} {} buy {} limit {} IOC", p.ex, p.symbol, p.qty, p.limit);
+            let what = format!("{:?} {} buy {} limit {} {} IOC", p.ex, p.symbol, p.qty, p.limit, trade::option_quote(p.ex, &p.symbol));
             let mut a = account.lock().unwrap();
             match res { Ok(id) => a.note(format!("OK {what} id {id}"), true), Err(e) => a.note(format!("FAIL {what}: {e:#}"), false) }
             ctx.request_repaint();
@@ -885,7 +885,7 @@ impl Engine {
                 Ok(r) => { account.lock().unwrap().rules.insert(key, r); trade::option_order(&k, ex, &symbol, side, qty, price, tif, reduce_only, &r).await }
                 Err(e) => Err(e),
             };
-            let what = format!("{ex:?} option {} {symbol} {qty} @ {price} {tif:?}{}", if side == depth::Side::Buy { "buy" } else { "sell" }, if reduce_only { " reduce-only" } else { "" });
+            let what = format!("{ex:?} option {} {symbol} {qty} @ {price} {} {tif:?}{}", if side == depth::Side::Buy { "buy" } else { "sell" }, trade::option_quote(ex, &symbol), if reduce_only { " reduce-only" } else { "" });
             { let mut a = account.lock().unwrap(); match res { Ok(id) => a.note(format!("OK {what} id {id}"), true), Err(e) => a.note(format!("FAIL {what}: {e:#}"), false) } }
             ctx.request_repaint();
             for wait in [500, 2_500] {
