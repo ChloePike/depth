@@ -418,7 +418,8 @@ impl App {
         let (saved, unreadable) = settings_path().map_or((String::new(), false), |p| read_settings(&p));
         let (st, lossy) = load_settings(&saved);
         // part of the file was dropped (or is newer than this build): keep a copy before the first save rewrites it
-        if (lossy || unreadable) && let Some(p) = settings_path() && keep_copy(&p, "bad") { eprintln!("[settings] original kept in {}.bad", p.display()); }
+        // (screenshot runs never write settings, and never save either)
+        if (lossy || unreadable) && env("T1_SHOT").is_none() && let Some(p) = settings_path() && keep_copy(&p, "bad") { eprintln!("[settings] original kept in {}.bad", p.display()); }
         set_lang(&env("T1_LANG").or(st.lang.clone()).unwrap_or_default());
         let prefs = st.prefs.clone().unwrap_or_default();
         prefs.apply(&cc.egui_ctx);
