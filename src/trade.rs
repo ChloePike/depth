@@ -799,7 +799,7 @@ pub async fn funding_paid(ex: Exchange, k: &Keys, p: &Position, known: Option<i6
 
 /// Group closing fills (realized != 0) by (symbol, second, side) into closes: a Sell that realizes
 /// PnL closed a long. Entry is implied from exit and PnL per unit.
-fn closes_from_fills(fills: &[Fill]) -> Vec<ClosedPnl> {
+pub(crate) fn closes_from_fills(fills: &[Fill]) -> Vec<ClosedPnl> {
     let mut out: Vec<ClosedPnl> = vec![];
     for f in fills.iter().filter(|f| f.realized.is_some_and(|r| r != 0.0)) {
         let long = f.side == Side::Sell;
@@ -906,12 +906,13 @@ pub async fn transfer(ex: Exchange, k: &Keys, from: &str, to: &str, coin: &str, 
     Ok(log)
 }
 
-fn uuid_v4() -> String {
-    // random enough for an idempotency id: time + process + counter, formatted as a UUID
+/// A v4-shaped id: time plus 64 bits of std's OS-seeded hasher over a counter, so ids made by
+/// different processes and devices do not collide (demo events and the device id rely on that).
+pub(crate) fn uuid_v4() -> String {
+    use std::hash::BuildHasher;
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let a = crate::now_ms() as u128;
-    let b = (std::process::id() as u128) << 32 | N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128;
-    let x = (a << 64) | b;
+    let r = std::collections::hash_map::RandomState::new().hash_one(N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let x = ((crate::now_ms() as u128) << 64) | r as u128;
     let h = format!("{x:032x}");
     format!("{}-{}-4{}-a{}-{}", &h[0..8], &h[8..12], &h[13..16], &h[17..20], &h[20..32])
 }

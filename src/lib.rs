@@ -2,6 +2,7 @@
 pub mod agg;
 pub mod alias;
 pub mod db;
+pub mod demo;
 pub mod l3;
 pub mod algo;
 pub mod algoscan;
@@ -17,7 +18,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Exchange { Binance, Bybit, Bitget, Okx, Mexc, Coinbase, Kraken, Gate, Hyperliquid, Lighter }
 
 impl Exchange {
@@ -38,7 +39,7 @@ impl Market {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Side { Buy, Sell }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
