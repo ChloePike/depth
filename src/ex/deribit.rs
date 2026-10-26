@@ -32,8 +32,8 @@ fn rpc(method: &str, channels: &[String]) -> String {
     json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": {"channels": channels}}).to_string()
 }
 
-/// One connection for the whole chain; the instrument list is re-read every 10 minutes and only the
-/// channels that changed are (un)subscribed on the live socket (daily expiries and new weeklies).
+/// One connection for the whole chain; the instrument list is re-read every 10 minutes and the live
+/// socket follows it (daily expiries and new weeklies), see `swap`.
 async fn option_feed(e: Emit, base: String) {
     let live = Arc::new(Mutex::new(Vec::<String>::new()));
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -55,19 +55,22 @@ async fn option_feed(e: Emit, base: String) {
                 e.send(&s, 0, info);
             }
             chans.sort();
-            let (new, old): (Vec<String>, Vec<String>) = {
-                let mut cur = live.lock().unwrap();
-                let new = chans.iter().filter(|c| cur.binary_search(c).is_err()).cloned().collect();
-                let old = cur.iter().filter(|c| chans.binary_search(c).is_err()).cloned().collect();
-                *cur = chans;
-                (new, old)
-            };
-            for c in old.chunks(CHUNK) { let _ = tx.send(rpc("public/unsubscribe", c)); }
-            for c in new.chunks(CHUNK) { let _ = tx.send(rpc("public/subscribe", c)); }
+            let msgs = swap(&mut live.lock().unwrap(), chans);
+            for m in msgs { let _ = tx.send(m); }
             tokio::time::sleep(Duration::from_secs(600)).await;
         }
     };
     tokio::join!(stream, chain);
+}
+
+/// The requests that bring the live socket to `chans` (sorted): unsubscribe what left the chain,
+/// then subscribe the whole list, not only the additions. Subscribe is idempotent, so a chunk the
+/// venue refused (rate limit, error reply) is retried at the next refresh instead of never.
+fn swap(cur: &mut Vec<String>, chans: Vec<String>) -> Vec<String> {
+    let old: Vec<String> = cur.iter().filter(|c| chans.binary_search(c).is_err()).cloned().collect();
+    let msgs = old.chunks(CHUNK).map(|c| rpc("public/unsubscribe", c)).chain(chans.chunks(CHUNK).map(|c| rpc("public/subscribe", c))).collect();
+    *cur = chans;
+    msgs
 }
 
 /// public/get_instruments costs 10000 credits (1 per second allowed), hence the slow refresh
@@ -200,5 +203,21 @@ mod tests {
             on_option(e, &mut HashMap::new(), Frame::Text("not json"));
         });
         assert!(m.is_empty());
+    }
+
+    #[test]
+    fn refresh_subscribes_the_whole_chain_again() {
+        let ch = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut cur = ch(&["a", "b"]);
+        // nothing changed: everything is subscribed again (a chunk refused earlier gets another try), nothing unsubscribed
+        let m = swap(&mut cur, ch(&["a", "b"]));
+        assert!(m.len() == 1 && m[0].contains("public/subscribe") && m[0].contains(r#""a","b""#));
+        // what left the chain is unsubscribed first, then the whole new list
+        let m = swap(&mut cur, ch(&["b", "c"]));
+        assert!(m.len() == 2 && m[0].contains("public/unsubscribe") && m[0].contains(r#"["a"]"#) && m[1].contains("public/subscribe") && m[1].contains(r#""b","c""#));
+        assert_eq!(cur, ch(&["b", "c"]));
+        // a full chain goes out in CHUNK-sized requests
+        let all: Vec<String> = (0..CHUNK + 1).map(|i| format!("ticker.{i:04}.agg2")).collect();
+        assert_eq!(swap(&mut cur, all).len(), 1 + 2);
     }
 }
