@@ -42,6 +42,8 @@ and Lighter implemented and marked untested): limit / market / post-only / BBO o
 routing across venues, whole-position and staged TP/SL, close / reverse / close-all, positions with
 funding estimates and funding paid since open, account-wide liquidation estimates for unified /
 portfolio-margin accounts, order / trade / position history, wallets and transfers between a venue's accounts.
+Options on Bybit and Deribit (coin-settled BTC / ETH; both marked untested): limit orders from the chain and
+position insurance bought on the venue's real asks, held options with greeks.
 Private data arrives over WebSocket pushes, never REST polling.
 
 ## Getting started

@@ -184,8 +184,9 @@ uniMMR / margin-rate gauge per venue.
 futures, funding, earn redemption). Auto top-up refills the trading account from spot below a
 threshold (at most once a minute per venue).
 
-**Position insurance**: hedge a perp with options (long → puts, short → calls) on Binance, Bybit, OKX
-and Gate; costs use the venue's real ask.
+**Position insurance**: hedge a perp with options (long → puts, short → calls), compared across Binance,
+Bybit, OKX, Gate and Deribit and bought on Bybit or Deribit; costs use the venue's real ask. Deribit's
+coin-settled options are priced and paid in BTC / ETH (the confirm shows the USD value beside it).
 
 ## 8. Settings
 
