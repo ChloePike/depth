@@ -112,6 +112,8 @@ impl LiqCache {
     fn texture(&mut self, ctx: &egui::Context, t0: i64, ms: i64, cols: usize, rows: usize, view: (u64, u64, u8), row: impl Fn(f64) -> f32) -> Option<egui::TextureId> {
         let k = (self.ver, t0, ms, cols, view.0, view.1 ^ ((view.2 as u64) << 60), rows);
         if let Some((kk, t)) = &self.tex { if *kk == k { return Some(t.id()); } }
+        // past the GPU's texture side (zoomed far out on 1m) wgpu panics: no map there
+        if cols.max(rows) > ctx.input(|i| i.max_texture_side) { return None; }
         let m = self.map.as_ref()?;
         let g = m.grid(t0, ms, cols, rows, row);
         let mut nz: Vec<f32> = g.iter().copied().filter(|v| *v > 0.0).collect();

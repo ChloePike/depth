@@ -61,14 +61,21 @@ impl HeatCache {
     /// re-uploaded only when new samples arrived. Drawn as a single textured rect per frame.
     fn texture(&mut self, ctx: &egui::Context) -> Option<(egui::TextureId, TexGeom)> {
         if let Some((v, t, g)) = &self.tex { if *v == self.ver { return Some((t.id(), *g)); } }
-        let (first, last) = (self.bars.first()?, self.bars.last()?);
+        // a texture side over the GPU limit (8192 here) is a wgpu validation panic: keep the newest
+        // `side` columns and merge price bins `step` to a row
+        let side = ctx.input(|i| i.max_texture_side).max(1);
         let ms = self.tf * 60_000;
-        let lo = self.bars.iter().map(|b| b.1).min()?;
-        let hi = self.bars.iter().map(|b| b.1 + b.2.len() as i64).max()?;
-        let (cols, bins) = (((last.0 - first.0) / ms + 1) as usize, (hi - lo).max(1) as usize);
-        if cols * bins > 8_000_000 { return None; }
+        let last = self.bars.last()?;
+        let t0 = self.bars.iter().map(|b| b.0).find(|t| (last.0 - t) / ms < side as i64)?;
+        let bars = || self.bars.iter().filter(move |b| b.0 >= t0);
+        let lo = bars().map(|b| b.1).min()?;
+        let hi = bars().map(|b| b.1 + b.2.len() as i64).max()?;
+        let (cols, bins) = (((last.0 - t0) / ms + 1) as usize, (hi - lo).max(1) as usize);
+        let step = bins.div_ceil(side);
+        let rows = bins.div_ceil(step);
+        if cols * rows > 8_000_000 { return None; }
         let last_i = self.bars.len() - 1;
-        let vals: Vec<(i64, i64, Vec<f32>)> = self.bars.iter().enumerate().map(|(i, (t, blo, v, n))| {
+        let vals: Vec<(i64, i64, Vec<f32>)> = self.bars.iter().enumerate().filter(|(_, b)| b.0 >= t0).map(|(i, (t, blo, v, n))| {
             if i == last_i {
                 let mut w = vec![0.0; v.len()];
                 for &(b, q) in &self.cur { if let Some(x) = usize::try_from(b - blo).ok().and_then(|k| w.get_mut(k)) { *x = q; } }
@@ -79,16 +86,17 @@ impl HeatCache {
         if qs.is_empty() { return None; }
         qs.sort_by(f32::total_cmp);
         let qmax = qs[(qs.len() * 97 / 100).min(qs.len() - 1)].max(1e-9);
-        let mut img = egui::ColorImage::new([cols, bins], vec![Color32::TRANSPARENT; cols * bins]);
+        let mut img = egui::ColorImage::new([cols, rows], vec![Color32::TRANSPARENT; cols * rows]);
         for (bt, blo, v) in &vals {
-            let x = ((bt - first.0) / ms) as usize;
+            let x = ((bt - t0) / ms) as usize;
             for (k, q) in v.iter().enumerate() {
                 if *q <= 0.0 { continue; }
-                let row = bins - 1 - (blo + k as i64 - lo) as usize;
-                img.pixels[row * cols + x] = heat_color((q / qmax).min(1.0).sqrt());
+                let (i, c) = (((rows - 1 - (blo + k as i64 - lo) as usize / step) * cols + x), heat_color((q / qmax).min(1.0).sqrt()));
+                // merged bins keep the strongest (alpha rises with the level)
+                if c.a() >= img.pixels[i].a() { img.pixels[i] = c; }
             }
         }
-        let geom = TexGeom { t0: first.0, ms, lo, bins, cols };
+        let geom = TexGeom { t0, ms, lo, bins: rows * step, cols };
         let t = match self.tex.take() {
             Some((_, mut t, _)) => { t.set(img, egui::TextureOptions::NEAREST); t }
             None => ctx.load_texture("heatmap", img, egui::TextureOptions::NEAREST),
@@ -169,5 +177,22 @@ mod tests {
         let (_, lo, v, n) = &c.bars[0];
         assert_eq!(v[(100 - lo) as usize] / *n as f32, 10.0);
         assert_eq!(c.cur, vec![(100, 0.0), (101, 1.0)]);
+    }
+
+    #[test]
+    fn heatmap_texture_fits_the_gpu_side() {
+        // price walked 15,000 bins across bars and the bars span a long gap in time: both sides
+        // past the limit crashed wgpu (Dimension Y value 8884 exceeds the limit of 8192)
+        let mut h = Heatmap { bin: 1.0, ..Default::default() };
+        for i in 0..1500i64 { h.cols.push_back((i * 60_000 + i.min(1) * 600_000_000, vec![(i * 10, 5.0), (i * 10 + 1, 1.0)])); }
+        let mut c = HeatCache::default();
+        c.update(&h, 1, Market::Perp);
+        let ctx = egui::Context::default();
+        let side = ctx.input(|i| i.max_texture_side);
+        let (_, g) = c.texture(&ctx).unwrap();
+        let [w, hh] = c.tex.as_ref().unwrap().1.size();
+        assert!(w <= side && hh <= side, "{w} x {hh} over {side}");
+        // the quad still covers every bin of the kept bars
+        assert!(g.lo + g.bins as i64 >= 1499 * 10 + 1 && g.cols == w);
     }
 }
