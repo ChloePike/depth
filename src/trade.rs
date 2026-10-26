@@ -258,6 +258,21 @@ fn n(v: &Value) -> f64 { crate::num(v) }
 /// A venue's client order id field: None when absent or empty.
 fn opt_id(v: &Value) -> Option<String> { v.as_str().filter(|s| !s.is_empty()).map(String::from) }
 
+/// Rows of a paged REST listing. `fetch(cursor)` returns one page and the cursor of the next one
+/// (None on the last page; the first call gets None). Stops after `max` pages or when a cursor
+/// repeats; rows seen on an earlier page (the list moved while paging) are dropped by `key`.
+/// Snapshot paths only (resync, reconcile): paging is never a polling loop.
+pub(super) async fn paged<F, Fut>(max: usize, key: impl Fn(&Value) -> String, mut fetch: F) -> Result<Vec<Value>>
+where F: FnMut(Option<String>) -> Fut, Fut: std::future::Future<Output = Result<(Vec<Value>, Option<String>)>> {
+    let (mut out, mut seen, mut cursor) = (vec![], std::collections::HashSet::new(), None);
+    for _ in 0..max {
+        let (rows, next) = fetch(cursor.clone()).await?;
+        out.extend(rows.into_iter().filter(|r| seen.insert(key(r))));
+        match next { Some(c) if cursor.as_ref() != Some(&c) => cursor = Some(c), _ => break }
+    }
+    Ok(out)
+}
+
 pub async fn rules(ex: Exchange, symbol: &str) -> Result<Rules> {
     // every order starts here: a market this venue lists under another name (crate::alias, e.g.
     // XAU = Hyperliquid xyz:GOLD) or whose same-name market is another asset is refused, never
@@ -1147,5 +1162,32 @@ mod tests {
         // the demo flag never shows in Debug
         let k = Keys { key: "ABCDEFGH".into(), secret: "s".into(), extra: None, demo: true };
         assert_eq!(format!("{k:?}"), "Keys(ABCD…)");
+    }
+
+    #[test]
+    fn paged_follows_cursors_dedupes_and_stops() {
+        use futures_util::FutureExt;
+        let ids = |v: Vec<Value>| v.iter().map(|r| r["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let key = |r: &Value| r["id"].to_string();
+        let row = |i: &str| json!({"id": i});
+        // b moved onto page 2 while paging: listed once
+        let server = |c: Option<String>| -> Result<(Vec<Value>, Option<String>)> {
+            Ok(match c.as_deref() {
+                None => (vec![row("a"), row("b")], Some("p2".into())),
+                Some("p2") => (vec![row("b"), row("c")], Some("p3".into())),
+                _ => (vec![row("d")], None),
+            })
+        };
+        let all = paged(20, key, |c| async move { server(c) }).now_or_never().unwrap().unwrap();
+        assert_eq!(ids(all), ["a", "b", "c", "d"]);
+        // the page cap bounds the walk
+        let capped = paged(2, key, |c| async move { server(c) }).now_or_never().unwrap().unwrap();
+        assert_eq!(ids(capped), ["a", "b", "c"]);
+        // a cursor that does not advance ends it after one repeat
+        let calls = std::cell::Cell::new(0);
+        let stuck = paged(20, key, |_| { calls.set(calls.get() + 1); async { Ok((vec![row("x")], Some("same".to_string()))) } }).now_or_never().unwrap().unwrap();
+        assert_eq!((ids(stuck), calls.get()), (vec!["x".to_string()], 2));
+        // a failing page fails the walk
+        assert!(paged(20, key, |_| async { Err(anyhow!("limit")) }).now_or_never().unwrap().is_err());
     }
 }

@@ -243,9 +243,9 @@ pub async fn add_partial(ex: Exchange, k: &Keys, symbol: &str, pos: Side, mode: 
             let (tp, sl) = if take_profit { (Some(px.as_str()), None) } else { (None, Some(px.as_str())) };
             bybit(k, false, "/v5/position/trading-stop", bybit_body(symbol, pos, mode, tp, sl, Some(&q), trigger)).await?;
             let (pxf, qf): (f64, f64) = (px.parse()?, q.parse()?);
-            let v = bybit(k, true, "/v5/order/realtime", json!({"category": "linear", "symbol": symbol, "limit": "50"})).await.unwrap_or_default();
+            let rows = bybit::realtime(k, "linear", Some(symbol)).await.unwrap_or_default();
             // newest first: the first matching untriggered level is the one just added
-            Ok(v["list"].as_array().into_iter().flatten().filter_map(bybit_row)
+            Ok(rows.iter().filter_map(bybit_row)
                 .find(|(t, open)| *open && t.pos == pos && t.take_profit == take_profit && (t.trigger_px - pxf).abs() < r.tick / 2.0
                       && t.qty.is_some_and(|x| (x - qf).abs() < r.step / 2.0))
                 .map(|(t, _)| t.id).unwrap_or_default())
@@ -255,14 +255,14 @@ pub async fn add_partial(ex: Exchange, k: &Keys, symbol: &str, pos: Side, mode: 
     }
 }
 
-/// Every active TP/SL of the account in one request. Bybit: `/v5/order/realtime` (50/s per UID).
+/// Every active TP/SL of the account. Bybit: `/v5/order/realtime`, all pages of 50 rows (50/s per UID).
 /// Binance: `openAlgoOrders` without symbol = weight 40: snapshot on (re)connect only, never a timer.
 pub async fn list(ex: Exchange, k: &Keys) -> Result<Vec<TpSl>> {
     match ex {
         Exchange::Bybit => {
-            // ponytail: one page of 50 rows (regular orders included); follow nextPageCursor if accounts hold more
-            let v = bybit(k, true, "/v5/order/realtime", json!({"category": "linear", "settleCoin": "USDT", "limit": "50"})).await?;
-            Ok(v["list"].as_array().into_iter().flatten().filter_map(bybit_row).filter(|(_, open)| *open).map(|(t, _)| t).collect())
+            // regular orders share the list; every page is read so a TP/SL behind 50+ resting orders still shows
+            let rows = bybit::realtime(k, "linear", None).await?;
+            Ok(rows.iter().filter_map(bybit_row).filter(|(_, open)| *open).map(|(t, _)| t).collect())
         }
         Exchange::Binance => binance_open(k, None).await,
         _ => bail!("{ex:?} TP/SL not implemented"),

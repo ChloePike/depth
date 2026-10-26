@@ -234,12 +234,24 @@ pub async fn funding_paid(k: &Keys, p: &Position) -> Result<Option<FundingPaid>>
         .and_then(|r| crate::opt_num(&r["fundingFee"]).map(|f| FundingPaid { amount: f, since: z(&r["cTime"]) as i64, lower: false })))
 }
 
-/// Pending swap orders.
-// ponytail: first page only (100 orders); paginate with `after` if anyone keeps more open
+/// Rows per `orders-pending` page (the maximum).
+const PAGE: usize = 100;
+
+/// One `orders-pending` page and the cursor of the next (`after` = the last ordId, only while the page is full).
+fn pending_page(d: &Value) -> (Vec<Value>, Option<String>) {
+    let rows = d.as_array().cloned().unwrap_or_default();
+    let next = if rows.len() >= PAGE { rows.last().and_then(|o| o["ordId"].as_str()).map(String::from) } else { None };
+    (rows, next)
+}
+
+/// Pending swap orders, all pages. Snapshots only (resync, reconcile).
+// ponytail: stops at 10 pages (1000 orders)
 pub async fn open_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
     ensure_insts().await?;
-    let d = okx(k, None, "/api/v5/trade/orders-pending?instType=SWAP").await?;
-    let rows = d.as_array().cloned().unwrap_or_default();
+    let rows = paged(10, |o| o["ordId"].to_string(), |after| async move {
+        let after = after.map(|a| format!("&after={a}")).unwrap_or_default();
+        Ok(pending_page(&okx(k, None, &format!("/api/v5/trade/orders-pending?instType=SWAP&limit={PAGE}{after}")).await?))
+    }).await?;
     if rows.iter().any(|o| o["instId"].as_str().is_some_and(|i| unified(i).is_some() && cached(i).is_none())) { load_insts().await?; }
     Ok(rows.iter().filter_map(|o| order(o, cached)).collect())
 }
@@ -411,5 +423,22 @@ mod tests {
         assert_eq!((b.available, b.mm_rate), (4000.0, Some(0.01)));
         // a push without USDT and without account-level availEq: refetch instead of guessing
         assert!(balance_of(&serde_json::json!({"totalEq":"1","availEq":"","details":[{"ccy":"BTC","availEq":"1"}]})).is_none());
+    }
+
+    #[test]
+    fn pending_pages_follow_after() {
+        use futures_util::FutureExt;
+        // newest first: ordIds 1000 down; `after` is the last ordId of the previous page
+        let rows = |a: usize, b: usize| Value::Array((a..b).map(|i| serde_json::json!({"ordId": (1000 - i).to_string()})).collect());
+        let server = |after: Option<String>| match after.as_deref() {
+            None => rows(0, 100),
+            Some("901") => rows(100, 150),
+            Some(c) => panic!("unexpected after {c}"),
+        };
+        let all = paged(10, |o| o["ordId"].to_string(), |a| async move { Ok(pending_page(&server(a))) }).now_or_never().unwrap().unwrap();
+        assert_eq!(all.len(), 150);
+        assert_eq!(pending_page(&rows(0, 99)).1, None);
+        assert_eq!(pending_page(&rows(0, 100)).1.as_deref(), Some("901"));
+        assert_eq!(pending_page(&Value::Null), (vec![], None));
     }
 }

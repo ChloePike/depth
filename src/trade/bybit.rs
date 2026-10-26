@@ -174,10 +174,32 @@ pub async fn option_cancel(k: &Keys, symbol: &str, id: &str) -> Result<()> {
     bybit(k, false, "/v5/order/cancel", json!({"category": "option", "symbol": symbol, "orderId": id})).await?; Ok(())
 }
 
+/// Rows per `/v5/order/realtime` page (the maximum; the default is 20).
+const PAGE: usize = 50;
+
+/// One page of `/v5/order/realtime` and the cursor of the next (only while the page is full).
+fn realtime_page(v: &Value) -> (Vec<Value>, Option<String>) {
+    let rows = v["list"].as_array().cloned().unwrap_or_default();
+    let next = v["nextPageCursor"].as_str().filter(|c| !c.is_empty() && rows.len() >= PAGE).map(String::from);
+    (rows, next)
+}
+
+/// Every open order of a category (conditional / TP/SL rows included), all pages: 50 per request,
+/// linear without a symbol is scoped by settleCoin. Snapshots only (resync, reconcile, own TP/SL adds).
+// ponytail: stops at 20 pages (1000 rows); raise it if an account really rests more than that
+pub(super) async fn realtime(k: &Keys, category: &str, symbol: Option<&str>) -> Result<Vec<Value>> {
+    paged(20, |o| o["orderId"].to_string(), |cursor| async move {
+        let mut q = json!({"category": category, "limit": PAGE.to_string()});
+        match symbol { Some(s) => q["symbol"] = s.into(), None if category == "linear" => q["settleCoin"] = "USDT".into(), None => {} }
+        if let Some(c) = cursor { q["cursor"] = c.into(); }
+        Ok(realtime_page(&bybit(k, true, "/v5/order/realtime", q).await?))
+    }).await
+}
+
 pub async fn option_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
     let ex = Exchange::Bybit;
-    let v = bybit(k, true, "/v5/order/realtime", json!({"category": "option", "limit": "50"})).await?;
-    Ok(v["list"].as_array().into_iter().flatten().map(|o| OpenOrder {
+    let rows = realtime(k, "option", None).await?;
+    Ok(rows.iter().map(|o| OpenOrder {
         ex, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].as_str().unwrap_or_default().into(),
         side: if o["side"] == "Sell" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["qty"]), filled: n(&o["cumExecQty"]),
         tif: o["timeInForce"].as_str().unwrap_or_default().into(), kind: o["orderType"].as_str().unwrap_or("Limit").to_lowercase(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: n(&o["createdTime"]) as i64, pos: None, client_id: None, trigger: None,
@@ -208,9 +230,9 @@ pub async fn positions(k: &Keys) -> Result<Vec<Position>> {
 }
 
 pub async fn open_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
-    let v = bybit(k, true, "/v5/order/realtime", json!({"category": "linear", "settleCoin": "USDT"})).await?;
+    let rows = realtime(k, "linear", None).await?;
     // TP/SL rows live in the same list; they are reported by tpsl::list instead
-    Ok(v["list"].as_array().into_iter().flatten().filter(|o| tpsl::bybit_row(o).is_none()).map(bybit_order).collect())
+    Ok(rows.iter().filter(|o| tpsl::bybit_row(o).is_none()).map(bybit_order).collect())
 }
 
 pub async fn balance(k: &Keys) -> Result<Balance> {
@@ -474,5 +496,24 @@ mod tests {
         let k = Keys { key: "XXXXKEY".into(), secret: "YYYYSECRET".into(), extra: None, demo: false };
         assert_eq!(sign(&k, 1_700_000_000_000, 5000, r#"{"category":"linear","symbol":"BTCUSDT"}"#),
                    "136ba24b5260b0829ea5217d7be22cff536e12d72edc8f9e72238c026fbaee4f");
+    }
+
+    #[test]
+    fn realtime_pages_follow_the_cursor() {
+        use futures_util::FutureExt;
+        let rows = |a: usize, b: usize| (a..b).map(|i| json!({"orderId": i.to_string()})).collect::<Vec<_>>();
+        // 120 open orders: two full pages with cursors, then a short page that ends the walk even though it names a cursor
+        let server = |c: Option<String>| match c.as_deref() {
+            None => json!({"list": rows(0, 50), "nextPageCursor": "page_token%3D1%26"}),
+            Some("page_token%3D1%26") => json!({"list": rows(50, 100), "nextPageCursor": "page_token%3D2%26"}),
+            Some("page_token%3D2%26") => json!({"list": rows(100, 120), "nextPageCursor": "page_token%3D3%26"}),
+            Some(c) => panic!("unexpected cursor {c}"),
+        };
+        let all = paged(20, |o| o["orderId"].to_string(), |c| async move { Ok(realtime_page(&server(c))) }).now_or_never().unwrap().unwrap();
+        assert_eq!(all.len(), 120);
+        assert_eq!((all[0]["orderId"].as_str(), all[119]["orderId"].as_str()), (Some("0"), Some("119")));
+        // a full page with an empty cursor is the last one; a missing list is an empty page
+        assert_eq!(realtime_page(&json!({"list": rows(0, 50), "nextPageCursor": ""})).1, None);
+        assert_eq!(realtime_page(&json!({})), (vec![], None));
     }
 }

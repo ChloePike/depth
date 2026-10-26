@@ -184,11 +184,30 @@ fn position(p: &Value, mult: f64) -> Position {
     }
 }
 
+/// Rows per list page (the maximum).
+const PAGE: usize = 100;
+
+/// One page of a Gate list and the next offset (only while the page is full). `offset` = rows already read.
+fn page(v: &Value, offset: usize) -> (Vec<Value>, Option<String>) {
+    let rows = v.as_array().cloned().unwrap_or_default();
+    let next = (rows.len() >= PAGE).then(|| (offset + rows.len()).to_string());
+    (rows, next)
+}
+
+/// All pages of a list endpoint (`query` without paging params), offset paging; the first request carries no offset.
+/// ponytail: stops at 10 pages (1000 rows)
+async fn listing(k: &Keys, path: &str, query: &str, key: impl Fn(&Value) -> String) -> Result<Vec<Value>> {
+    paged(10, key, |off| async move {
+        let offset: usize = off.as_deref().and_then(|o| o.parse().ok()).unwrap_or(0);
+        let more = if off.is_some() { format!("&offset={offset}") } else { String::new() };
+        Ok(page(&gate(k, reqwest::Method::GET, path, &format!("{query}&limit={PAGE}{more}"), None).await?, offset))
+    }).await
+}
+
 pub async fn positions(k: &Keys) -> Result<Vec<Position>> {
-    // ponytail: first page only (limit 100 positions); page with offset if an account ever holds more
-    let v = gate(k, reqwest::Method::GET, "/futures/usdt/positions", "holding=true&limit=100", None).await?;
+    let v = listing(k, "/futures/usdt/positions", "holding=true", |p| format!("{}{}", p["contract"], p["mode"])).await?;
     let mut out = vec![];
-    for p in v.as_array().into_iter().flatten().filter(|p| z(&p["size"]) != 0.0) {
+    for p in v.iter().filter(|p| z(&p["size"]) != 0.0) {
         out.push(position(p, mult_or_load(p["contract"].as_str().unwrap_or_default()).await?));
     }
     Ok(out)
@@ -219,10 +238,10 @@ fn order(o: &Value, mult: f64, dual: bool) -> OpenOrder {
 }
 
 pub async fn open_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
-    let v = gate(k, reqwest::Method::GET, "/futures/usdt/orders", "status=open&limit=100", None).await?;
+    let v = listing(k, "/futures/usdt/orders", "status=open", id_of).await?;
     let dual = DUAL.load(std::sync::atomic::Ordering::Relaxed);
     let mut out = vec![];
-    for o in v.as_array().into_iter().flatten() {
+    for o in &v {
         out.push(order(o, mult_or_load(o["contract"].as_str().unwrap_or_default()).await?, dual));
     }
     Ok(out)
@@ -435,5 +454,24 @@ mod tests {
         let tick = json!({"channel": "futures.tickers", "event": "update", "result": [{"contract": "BTC_USDT", "mark_price": "84000.5"}]});
         let Out::Ev(AccEvent::Mark { symbol, mark }) = on_frame(&tick, &mut sub).remove(0) else { panic!() };
         assert_eq!((symbol.as_str(), mark), ("BTCUSDT", 84000.5));
+    }
+
+    #[test]
+    fn list_pages_follow_the_offset() {
+        use futures_util::FutureExt;
+        let rows = |a: usize, b: usize| Value::Array((a..b).map(|i| json!({"id": i})).collect());
+        let server = |off: Option<String>| match off.as_deref() {
+            None => rows(0, 100),
+            Some("100") => rows(100, 200),
+            Some("200") => rows(200, 230),
+            Some(o) => panic!("unexpected offset {o}"),
+        };
+        let all = paged(10, id_of, |off| async move {
+            let o = off.as_deref().and_then(|o| o.parse().ok()).unwrap_or(0);
+            Ok(page(&server(off), o))
+        }).now_or_never().unwrap().unwrap();
+        assert_eq!(all.len(), 230);
+        assert_eq!(page(&rows(0, 100), 200).1.as_deref(), Some("300"));
+        assert_eq!(page(&rows(0, 99), 0).1, None);
     }
 }
