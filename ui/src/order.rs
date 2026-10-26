@@ -1226,7 +1226,8 @@ impl OrderPanel {
         args["expect"] = tk.plan["legs"].as_array().map(|a| a.iter().map(|l| json!({"ex": l["ex"], "qty": l["qty"]})).collect::<Vec<_>>()).unwrap_or_default().into();
         if let Some(v) = tk.tp { args["tp"] = v.into(); }
         if let Some(v) = tk.sl { args["sl"] = v.into(); }
-        args["trigger"] = tk.trigger.into();
+        // its own key: `trigger` is a stop order's trigger price
+        args["tpsl_trigger"] = tk.trigger.into();
         call(args)?;
         self.sent_ms = depth::now_ms();
         self.last = Some(tk.clone());

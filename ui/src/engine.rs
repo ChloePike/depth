@@ -294,8 +294,8 @@ pub struct TpSlWait {
     pub filled_ms: Option<i64>,
     /// a lookup by client id is running
     #[serde(skip)] pub checking: bool,
-    /// the venue's positions are loaded since it was created (false when read from disk until the
-    /// venue's first snapshot); `restored`: read from disk
+    /// the venue's positions are loaded since it was created; `restored`: read from disk and not yet
+    /// seen resting in the venue's first snapshot (both false / true until then)
     #[serde(skip)] pub armed: bool,
     #[serde(skip)] pub restored: bool,
 }
@@ -353,23 +353,31 @@ fn settle(a: &mut Account, now: i64) -> Vec<WaitAct> {
     out
 }
 
-/// After a snapshot of `ex` (connect, reconnect, the 5-minute reconcile): entries read from disk are
-/// armed, and an entry whose order is not resting and whose fill is not known is checked with the
-/// venue once (pushes missed while away or disconnected). A fresh entry still being placed waits.
+/// After a snapshot of `ex` (connect, reconnect, the 5-minute reconcile): an entry read from disk is
+/// re-armed while its order still rests, else dropped with a notice (it may have filled while Depth was
+/// closed, but the position now there may be a later, unrelated one); an entry whose order is not
+/// resting and whose fill is not known is checked with the venue once (pushes missed while
+/// disconnected). A fresh entry still being placed waits.
 fn rearm(a: &mut Account, ex: Exchange, now: i64) -> Vec<WaitAct> {
-    let mut out = vec![];
+    let (mut out, mut notes) = (vec![], vec![]);
     let orders = &a.orders;
-    for w in a.tpsl_wait.iter_mut().filter(|w| w.ex == ex) {
-        w.armed = true;
+    a.tpsl_wait.retain_mut(|w| {
+        if w.ex != ex { return true; }
         let resting = orders.iter().find(|o| o.ex == ex && o.symbol == w.symbol && (w.order_id.as_deref() == Some(o.id.as_str()) || o.client_id.as_deref() == Some(w.client_id.as_str())));
         if let Some(o) = resting {
+            (w.armed, w.restored) = (true, false);
             w.order_id = Some(o.id.clone());
             if o.filled > 0.0 { w.filled_ms.get_or_insert(now); }
-        } else if w.filled_ms.is_none() && !w.checking && (w.order_id.is_some() || w.restored || now - w.created_ms > 15_000) {
+        } else if w.restored {
+            notes.push(format!("NOTE {ex:?} {}: TP/SL dropped after the restart, its order {} no longer rests (it may have filled while Depth was closed): set it from the positions table", w.symbol, w.client_id));
+            return false;
+        } else if w.filled_ms.is_none() && !w.checking && (w.order_id.is_some() || now - w.created_ms > 15_000) {
             w.checking = true;
             out.push(WaitAct::Check(w.clone()));
         }
-    }
+        true
+    });
+    for n in notes { a.note(n, false); }
     out.extend(settle(a, now));
     out
 }
@@ -400,10 +408,7 @@ fn run_wait(account: &Arc<Mutex<Account>>, acts: Vec<WaitAct>, ctx: &eframe::egu
         let (account, ctx) = (account.clone(), ctx.clone());
         tokio::spawn(async move {
             match act {
-                WaitAct::Fire(w) => {
-                    if w.restored { account.lock().unwrap().note(format!("NOTE {:?} {}: its order filled while Depth was closed, setting its TP/SL now", w.ex, w.symbol), true); }
-                    set_tpsl_logged(&account, w.ex, w.symbol, w.pos, w.tp, w.sl, None, w.trigger).await;
-                }
+                WaitAct::Fire(w) => set_tpsl_logged(&account, w.ex, w.symbol, w.pos, w.tp, w.sl, None, w.trigger).await,
                 WaitAct::Check(w) => {
                     let k = account.lock().unwrap().keys.get(&w.ex).cloned();
                     let r = match k { Some(k) => trade::order_by_client_id(w.ex, &k, &w.symbol, &w.client_id).await, None => Err(anyhow::anyhow!("no API key")) };
@@ -528,7 +533,7 @@ pub(crate) fn check_plan(a: &mut Account, legs: &[depth::route::Leg]) -> Result<
     for l in legs {
         let (c, r) = risk_ctx(a, l.ex, &l.req, l.ref_px, now, off);
         depth::risk::check(&l.req, r, &depth::risk::Ctx { fx: l.fx, ..c }, &band).map_err(|e| format!("{:?}: {e}", l.ex))?;
-        (usdt, qty, red) = (usdt + l.est_px * l.fx * l.req.qty, qty + l.req.qty, red + r);
+        (usdt, qty, red) = (usdt + l.est_px * l.fx * l.req.qty, qty + l.req.qty, red + r.min(l.req.qty));
     }
     let Some(l0) = legs.first().filter(|_| qty > 0.0) else { return Ok(()) };
     let (c, _) = risk_ctx(a, l0.ex, &l0.req, 0.0, now, off);
@@ -1546,17 +1551,33 @@ impl Engine {
                 }
                 _ => Err(anyhow::anyhow!("keys or venue rules not loaded")),
             };
-            let mut a = account.lock().unwrap();
             let what = format!("{ex:?} {} TWAP {} {} over {minutes} min", base.symbol, if base.side() == depth::Side::Buy { "buy" } else { "sell" }, base.qty);
-            match res {
-                Ok(vid) => {
-                    a.note(format!("OK {what} id {vid}"), true);
-                    if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) { j.venue_id = Some(vid); j.status = format!("running on {ex:?}"); }
+            // cancelled (Cancel, the kill switch) while the start was in flight: stopped on the venue right away
+            let stop = {
+                let mut a = account.lock().unwrap();
+                match res {
+                    Ok(vid) => {
+                        a.note(format!("OK {what} id {vid}"), true);
+                        let mut cancelled = false;
+                        if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) {
+                            j.venue_id = Some(vid.clone());
+                            cancelled = j.cancelled;
+                            j.status = if cancelled { "cancelling".into() } else { format!("running on {ex:?}") };
+                        }
+                        if cancelled { a.keys.get(&ex).cloned().map(|k| (k, vid)) } else { None }
+                    }
+                    Err(e) => {
+                        a.note(format!("FAIL {what}: {e:#}"), false);
+                        if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) { j.status = format!("failed: {e:#}"); j.cancelled = true; j.end_ms = depth::now_ms(); }
+                        None
+                    }
                 }
-                Err(e) => {
-                    a.note(format!("FAIL {what}: {e:#}"), false);
-                    if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) { j.status = format!("failed: {e:#}"); j.cancelled = true; j.end_ms = depth::now_ms(); }
-                }
+            };
+            if let Some((k, vid)) = stop {
+                let r = trade::cancel_twap(ex, &k, &base.symbol, &vid).await;
+                let mut a = account.lock().unwrap();
+                match &r { Ok(()) => a.note(format!("OK {ex:?} {} TWAP {vid} cancelled", base.symbol), true), Err(e) => a.note(format!("FAIL cancel TWAP {vid}: {e:#}"), false) }
+                if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) { j.status = match r { Ok(()) => "cancelled".into(), Err(e) => format!("cancel failed: {e:#}") }; j.end_ms = depth::now_ms(); }
             }
             ctx.request_repaint();
         });
@@ -2288,7 +2309,7 @@ mod tests {
     }
 
     #[test]
-    fn tpsl_wait_restores_and_applies_when_filled_while_away() {
+    fn tpsl_wait_restored_rearms_while_resting_else_drops() {
         let ex = Exchange::Binance;
         let mut a = Account::default();
         let mut w = wait("t1al0");
@@ -2297,23 +2318,20 @@ mod tests {
         let mut back: TpSlWait = serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
         assert!(!back.armed && back.order_id.as_deref() == Some("55") && back.client_id == "t1al0");
         back.restored = true;
-        a.tpsl_wait.push(back);
+        a.tpsl_wait.push(back.clone());
         // before the venue's snapshot nothing happens, even with a position on screen
         a.positions.push(pos(Side::Buy, 1.0));
         assert!(settle(&mut a, 10).is_empty());
-        // snapshot: the order is not resting any more, so the venue is asked
-        let acts = rearm(&mut a, ex, 11);
-        assert!(matches!(&acts[..], [WaitAct::Check(_)]));
-        resolve(&mut a, &wait("t1al0"), Ok(Some(trade::Found::Done { id: "55".into(), filled: 1.0, status: "FILLED".into() })), 12);
-        let acts = settle(&mut a, 13);
-        assert!(matches!(&acts[..], [WaitAct::Fire(w)] if w.restored));
-        // still resting after the restart: re-armed, waiting
-        let mut w = wait("t1bl0");
-        w.order_id = Some("56".into());
-        a.tpsl_wait.push(TpSlWait { armed: false, restored: true, ..w });
-        a.orders.push(order("56", Some("t1bl0"), 0.0));
-        assert!(rearm(&mut a, ex, 14).is_empty());
-        assert!(a.tpsl_wait[0].armed);
+        // snapshot: the order rests no more: dropped with a notice, never set on whatever position is there now
+        assert!(rearm(&mut a, ex, 11).is_empty());
+        assert!(a.tpsl_wait.is_empty() && a.log.back().is_some_and(|l| l.1.contains("dropped after the restart")));
+        // still resting: re-armed, and its fill later sets it
+        a.tpsl_wait.push(back);
+        a.orders.push(order("55", Some("t1al0"), 0.0));
+        assert!(rearm(&mut a, ex, 12).is_empty());
+        assert!(a.tpsl_wait[0].armed && !a.tpsl_wait[0].restored);
+        wait_touch(&mut a, ex, &E::Order(order("55", Some("t1al0"), 1.0)), 13);
+        assert_eq!(fired(&settle(&mut a, 14)), 1);
     }
 
     #[test]

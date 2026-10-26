@@ -275,7 +275,7 @@ impl App {
                     }
                     // TP/SL: attached to the order where the venue takes it (protected at fill), else set by the
                     // engine once this very order has filled (`TpSlWait`)
-                    let trigger = if s("trigger") == "last" { trade::tpsl::Trigger::Last } else { trade::tpsl::Trigger::Mark };
+                    let trigger = if s("tpsl_trigger") == "last" { trade::tpsl::Trigger::Last } else { trade::tpsl::Trigger::Mark };
                     let attach = (f("tp").is_some() || f("sl").is_some()).then_some(trade::tpsl::Attach { tp: f("tp"), sl: f("sl"), trigger }).filter(|_| !req.close);
                     self.eng.account.lock().unwrap().record_plan(&plan.legs);
                     for leg in &plan.legs {
