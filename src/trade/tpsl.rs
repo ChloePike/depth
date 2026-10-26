@@ -32,6 +32,11 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Trigger { #[default] Mark, Last }
 
+/// Whole-position TP and/or SL sent with an opening order, so the position is protected the moment
+/// it fills (Bybit takeProfit / stopLoss on the order). Only where `Caps.attach_tpsl`; `place` refuses it elsewhere.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Attach { pub tp: Option<f64>, pub sl: Option<f64>, pub trigger: Trigger }
+
 /// One active TP/SL. `pos` is the position side it protects (Buy = long); `qty` None = whole position.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TpSl { pub id: String, pub ex: Exchange, pub symbol: String, pub pos: Side, pub take_profit: bool, pub trigger_px: f64, pub qty: Option<f64>, pub trigger: Trigger }

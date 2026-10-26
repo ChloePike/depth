@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn order_params_by_intent() {
         let get = |v: &[(&str, String)], k: &str| v.iter().find(|(a, _)| *a == k).map(|(_, b)| b.clone());
-        let o = |pos, close, kind| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind, qty: 0.01, client_id: None };
+        let o = |pos, close, kind| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind, qty: 0.01, client_id: None, attach: None };
         let p = order_params(&o(Side::Sell, true, Kind::Limit { price: 90000.0, tif: Tif::PostOnly }), "0.01", Some("90000")).unwrap();
         assert_eq!(p.iter().map(|(a, b)| format!("{a}={b}")).collect::<Vec<_>>().join("&"),
                    "orderType=post&symbol=PF_XBTUSD&side=buy&size=0.01&limitPrice=90000&reduceOnly=true");

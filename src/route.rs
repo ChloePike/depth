@@ -267,7 +267,7 @@ mod tests {
         }
         a
     }
-    fn req(kind: Kind, qty: f64) -> OrderReq { OrderReq { symbol: "BTCUSDT".into(), pos: Side::Buy, close: false, kind, qty, client_id: None } }
+    fn req(kind: Kind, qty: f64) -> OrderReq { OrderReq { symbol: "BTCUSDT".into(), pos: Side::Buy, close: false, kind, qty, client_id: None, attach: None } }
     fn smart() -> Policy { Policy { smart: true, ..Policy::default() } }
     fn leg(p: &RoutePlan, ex: Exchange) -> f64 { p.legs.iter().filter(|l| l.ex == ex).map(|l| l.req.qty).sum() }
     fn close(a: f64, b: f64) -> bool { (a - b).abs() < 1e-9 }

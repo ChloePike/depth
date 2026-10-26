@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn hedge_and_one_way_bodies() {
-        let o = |pos, close, kind| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind, qty: 1.0, client_id: None };
+        let o = |pos, close, kind| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind, qty: 1.0, client_id: None, attach: None };
         for (pos, close) in [(Side::Buy, false), (Side::Buy, true), (Side::Sell, false), (Side::Sell, true)] {
             let r = o(pos, close, Kind::Market);
             let h = order_body(&r, Mode::Hedge, "0.01", None, "crossed").unwrap();

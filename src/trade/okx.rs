@@ -361,7 +361,7 @@ mod tests {
         assert_eq!(contracts("30", Inst { ct: 10.0, lot: 1.0, min: 1.0, tick: 0.0001 }).unwrap(), "3");
         // rules in base units: step 0.0001 BTC; the trade.rs rounding then lands on the lot grid
         let r = Rules { tick: BTC.tick, step: BTC.lot * BTC.ct, min_qty: BTC.min * BTC.ct, min_notional: 0.0 };
-        let req = OrderReq { symbol: "BTCUSDT".into(), pos: Side::Buy, close: false, kind: Kind::Market, qty: 0.012345, client_id: None };
+        let req = OrderReq { symbol: "BTCUSDT".into(), pos: Side::Buy, close: false, kind: Kind::Market, qty: 0.012345, client_id: None, attach: None };
         let (q, _) = checked(&req, &r, 100_000.0).unwrap();
         assert_eq!(q, "0.0123");
         assert_eq!(contracts(&q, BTC).unwrap(), "1.23");
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn order_bodies() {
-        let o = |pos, close, kind| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind, qty: 1.0, client_id: None };
+        let o = |pos, close, kind| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind, qty: 1.0, client_id: None, attach: None };
         for (pos, close, side) in [(Side::Buy, false, "buy"), (Side::Buy, true, "sell"), (Side::Sell, false, "sell"), (Side::Sell, true, "buy")] {
             let h = order_body(&o(pos, close, Kind::Market), Mode::Hedge, "2", None).unwrap();
             assert_eq!((h["instId"].as_str(), h["side"].as_str(), h["posSide"].as_str(), h["ordType"].as_str(), h["sz"].as_str(), h["tdMode"].as_str()),

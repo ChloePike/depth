@@ -96,6 +96,17 @@ pub fn bybit_body(req: &OrderReq, mode: Mode, qty: &str, px: Option<&str>, ref_p
             b["bboLevel"] = level.to_string().into();
         }
     }
+    // whole-position TP/SL that the venue attaches to the position at fill (trade::place refuses it on a close)
+    if let Some(a) = req.attach.filter(|_| !req.close) {
+        let by = match a.trigger { tpsl::Trigger::Mark => "MarkPrice", tpsl::Trigger::Last => "LastPrice" };
+        b["tpslMode"] = "Full".into();
+        for (px, p, f) in [(a.tp, "tp", "takeProfit"), (a.sl, "sl", "stopLoss")] {
+            let Some(px) = px else { continue };
+            b[f] = fmt_step(px, tick, false).into();
+            b[format!("{p}TriggerBy")] = by.into();
+            b[format!("{p}OrderType")] = "Market".into();
+        }
+    }
     b
 }
 
