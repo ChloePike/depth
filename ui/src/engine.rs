@@ -89,6 +89,102 @@ pub struct Account {
     pub kill_gen: u64,
     /// the last kill switch run, for its report
     pub kill: Option<KillReport>,
+    /// the last routed orders as sent (newest last, at most 10): each leg's state for the order panel
+    pub plans: VecDeque<PlanRun>,
+    /// orders whose request got no readable answer and that no push has shown yet: (venue, client id)
+    pub unknown: Vec<(Exchange, String)>,
+}
+
+/// What became of one order request: the venue's id, refused (or never sent), or unknown: no
+/// answer could be read, so it may be live. Unknown orders are looked up by client id, never re-sent.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Sent { Ok(String), Failed, Unknown }
+
+/// One routed order as sent: its legs by client id, for the panel (and "retry remainder").
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanRun { pub ts: i64, pub legs: Vec<LegRun> }
+#[derive(Clone, Debug, PartialEq)]
+pub struct LegRun { pub ex: Exchange, pub client_id: String, pub qty: f64, pub state: LegState }
+#[derive(Clone, Debug, PartialEq)]
+pub enum LegState { Sent, Ok(String), Live(String), Filled, Failed(String), Unknown }
+
+impl LegState {
+    /// (state word for the panel, detail)
+    pub fn label(&self) -> (&'static str, String) {
+        match self {
+            LegState::Sent => ("sent", String::new()), LegState::Ok(id) => ("ok", id.clone()), LegState::Live(id) => ("live", id.clone()),
+            LegState::Filled => ("filled", String::new()), LegState::Failed(e) => ("failed", e.clone()), LegState::Unknown => ("unknown", String::new()),
+        }
+    }
+}
+
+impl Account {
+    /// A routed order about to be sent: every leg "sent" until its venue answers.
+    pub(crate) fn record_plan(&mut self, legs: &[depth::route::Leg]) {
+        let legs = legs.iter().filter_map(|l| Some(LegRun { ex: l.ex, client_id: l.req.client_id.clone()?, qty: l.req.qty, state: LegState::Sent })).collect();
+        self.plans.push_back(PlanRun { ts: now_ms(), legs });
+        if self.plans.len() > 10 { self.plans.pop_front(); }
+    }
+
+    fn set_leg(&mut self, cid: &str, s: &LegState) {
+        for l in self.plans.iter_mut().flat_map(|p| p.legs.iter_mut()).filter(|l| l.client_id == cid) { l.state = s.clone(); }
+    }
+}
+
+/// The part of a routed order to route again: what failed, once no leg is still sent or unknown.
+pub(crate) fn remainder(p: &PlanRun) -> Option<f64> {
+    if p.legs.iter().any(|l| matches!(l.state, LegState::Sent | LegState::Unknown)) { return None; }
+    let q: f64 = p.legs.iter().filter(|l| matches!(l.state, LegState::Failed(_))).map(|l| l.qty).sum();
+    (q > 0.0).then_some(q)
+}
+
+/// A pushed order carrying the client id of an order not known to be live (no answer read, or
+/// looked up and not found): the venue has it after all.
+fn found_by_push(a: &mut Account, ex: Exchange, ev: &trade::AccEvent) {
+    let trade::AccEvent::Order(o) = ev else { return };
+    let Some(cid) = o.client_id.as_deref() else { return };
+    let was = a.unknown.iter().position(|u| u.0 == ex && u.1 == cid).map(|i| a.unknown.remove(i)).is_some();
+    let mut late = false;
+    for l in a.plans.iter_mut().flat_map(|p| p.legs.iter_mut()).filter(|l| l.ex == ex && l.client_id == cid) {
+        late |= matches!(l.state, LegState::Unknown | LegState::Failed(_));
+        if !matches!(l.state, LegState::Ok(_)) { l.state = LegState::Live(o.id.clone()); }
+    }
+    if was || late { a.note(format!("OK {ex:?} {} order {cid} is on the venue after all (id {})", o.symbol, o.id), true); }
+}
+
+/// A client id for an order that has none yet (routed legs carry the planner's), unique in this run.
+fn new_cid() -> String {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!("t1m{:x}{:03x}", now_ms(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 4096)
+}
+
+/// The one lookup of an order whose request got no readable answer, 10 s later and only if no push
+/// has shown it meanwhile: live, filled, ended unfilled or not placed, noted in the order log and on
+/// its leg (a TP/SL waiting on it learns the same). Never re-sent.
+async fn look_up(account: &Arc<Mutex<Account>>, ex: Exchange, symbol: String, cid: String) {
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let k = {
+        let a = account.lock().unwrap();
+        if !a.unknown.iter().any(|u| u.0 == ex && u.1 == cid) { return; }
+        a.keys.get(&ex).cloned()
+    };
+    let r = match k { Some(k) => trade::order_by_client_id(ex, &k, &symbol, &cid).await, None => Err(anyhow::anyhow!("no API key")) };
+    let mut a = account.lock().unwrap();
+    // a push that came while asking wins
+    let Some(i) = a.unknown.iter().position(|u| u.0 == ex && u.1 == cid) else { return };
+    a.unknown.remove(i);
+    let (state, msg) = match &r {
+        Ok(Some(trade::Found::Open(o))) => (LegState::Live(o.id.clone()), format!("is live on the venue (id {})", o.id)),
+        Ok(Some(trade::Found::Done { id, filled, status })) if *filled > 0.0 => (LegState::Filled, format!("filled {filled} ({status}, id {id})")),
+        Ok(Some(trade::Found::Done { status, .. })) => (LegState::Failed(format!("ended {status} unfilled")), format!("ended {status} without a fill")),
+        Ok(None) => (LegState::Failed("not placed (no answer)".into()), "was not placed".into()),
+        Err(e) => (LegState::Unknown, format!("could not be looked up ({e:#}): check the venue for it")),
+    };
+    let ok = matches!(state, LegState::Live(_) | LegState::Filled);
+    a.note(format!("{} {ex:?} {symbol} order {cid} {msg}", if ok { "OK" } else { "NOTE" }), ok);
+    a.set_leg(&cid, &state);
+    // a failed lookup leaves a waiting TP/SL to the next snapshot
+    if let Ok(found) = r { if let Some(w) = a.tpsl_wait.iter().find(|w| w.ex == ex && w.client_id == cid).cloned() { resolve(&mut a, &w, Ok(found), now_ms()); } }
 }
 
 /// One kill switch run: per keyed venue, every step's line (ok or failed) and whether it is done.
@@ -164,9 +260,10 @@ async fn kill_venue(account: &Arc<Mutex<Account>>, ex: Exchange, k: &Keys, twaps
     let (closes, limited) = kill_closes(&ps, &capped);
     if closes.is_empty() { line("no position".into(), true); }
     let close = |req: OrderReq, px: f64| async move {
-        let ok = place_logged(account, ex, &req, px).await.is_some();
+        let sent = place_logged(account, ex, &req, px).await;
         let side = if req.pos == depth::Side::Buy { "long" } else { "short" };
-        kill_line(account, ex, format!("close {} {side} {} {}: {}", req.symbol, req.qty, req.kind.label(), if ok { "sent" } else { "FAILED, see the order log" }), ok);
+        let how = match sent { Sent::Ok(_) => "sent", Sent::Failed => "FAILED, see the order log", Sent::Unknown => "NO ANSWER, being looked up by client id (see the order log)" };
+        kill_line(account, ex, format!("close {} {side} {} {}: {how}", req.symbol, req.qty, req.kind.label()), matches!(sent, Sent::Ok(_)));
     };
     for (req, px) in closes { close(req, px).await; }
     if limited {
@@ -446,39 +543,55 @@ fn venue_mid(agg: &Arc<Mutex<Agg>>, base: &str, ex: Exchange, symbol: &str) -> f
     a.venues.get(&(ex, Market::Perp)).filter(|v| now_ms() - v.fresh < 5_000).and_then(|v| v.mid()).unwrap_or(0.0)
 }
 
-async fn place_logged(account: &Arc<Mutex<Account>>, ex: Exchange, req: &OrderReq, ref_px: f64) -> Option<String> {
+/// Place one order with the account's keys, cached rules and position mode; every order carries a
+/// client id (so an unanswered one can be found), the outcome lands in the order log and on its
+/// routed leg, and the round trip is tracked.
+async fn place_logged(account: &Arc<Mutex<Account>>, ex: Exchange, req: &OrderReq, ref_px: f64) -> Sent {
+    let mut req = req.clone();
+    let cid = req.client_id.get_or_insert_with(new_cid).clone();
+    let req = &req;
     let what = format!("{ex:?} {} {} {} {} {}", req.symbol, if req.close { "close" } else { "open" }, if req.pos == depth::Side::Buy { "long" } else { "short" }, req.qty, req.kind.label());
+    let fail = |msg: String| { let mut a = account.lock().unwrap(); a.note(format!("FAIL {what}: {msg}"), false); a.set_leg(&cid, &LegState::Failed(msg)); Sent::Failed };
     // never sent past a risk limit (a separate statement: the guard's lock ends before the note's)
     let gate = risk_gate(&mut account.lock().unwrap(), ex, req, ref_px);
-    if let Err(e) = gate { account.lock().unwrap().note(format!("FAIL {what}: risk limit: {e}"), false); return None; }
-    let k = account.lock().unwrap().keys.get(&ex).cloned()?;
+    if let Err(e) = gate { return fail(format!("risk limit: {e}")); }
+    let Some(k) = account.lock().unwrap().keys.get(&ex).cloned() else { return fail("no API key".into()) };
     let key = (ex, req.symbol.clone());
     let cached = account.lock().unwrap().rules.get(&key).copied();
     let rules = match cached { Some(r) => Ok(r), None => trade::rules(ex, &req.symbol).await };
     let cached_mode = account.lock().unwrap().modes.get(&key).copied().flatten();
     let mode = match cached_mode { Some(m) => Ok(m), None => trade::mode(ex, &k, &req.symbol).await };
+    // a failed rules / mode read sent nothing: a plain failure, whatever kind of error it was
+    let (r, m) = match (rules, mode) { (Ok(r), Ok(m)) => (r, m), (Err(e), _) | (_, Err(e)) => return fail(format!("{e:#}")) };
+    {
+        let mut a = account.lock().unwrap();
+        a.rules.insert(key.clone(), r);
+        a.modes.insert(key, Some(m));
+    }
     let t0 = std::time::Instant::now();
-    let res = match (rules, mode) {
-        (Ok(r), Ok(m)) => {
-            {
-                let mut a = account.lock().unwrap();
-                a.rules.insert(key.clone(), r);
-                a.modes.insert(key, Some(m));
-            }
-            trade::place(ex, &k, req, &r, ref_px, m).await
-        }
-        (Err(e), _) | (_, Err(e)) => Err(e),
-    };
+    let res = trade::place(ex, &k, req, &r, ref_px, m).await;
     let rtt = t0.elapsed().as_secs_f64() * 1e3;
-    let mut a = account.lock().unwrap();
     match res {
         Ok(id) => {
+            let mut a = account.lock().unwrap();
             let r = a.order_rtt.entry(ex).or_insert(rtt);
             *r += (rtt - *r) * 0.3;
             a.note(format!("OK {what} id {id} ({rtt:.0} ms)"), true);
-            Some(id)
+            a.set_leg(&cid, &LegState::Ok(id.clone()));
+            Sent::Ok(id)
         }
-        Err(e) => { a.note(format!("FAIL {what}: {e:#}"), false); None }
+        Err(e) if trade::is_unknown_outcome(&e) => {
+            {
+                let mut a = account.lock().unwrap();
+                a.note(format!("UNKNOWN {what}: no answer read ({e:#}); it may be live: looking it up by client id {cid} in 10 s, it is never sent again"), false);
+                a.set_leg(&cid, &LegState::Unknown);
+                a.unknown.push((ex, cid.clone()));
+            }
+            let (account, symbol) = (account.clone(), req.symbol.clone());
+            tokio::spawn(async move { look_up(&account, ex, symbol, cid).await });
+            Sent::Unknown
+        }
+        Err(e) => fail(format!("{e:#}")),
     }
 }
 
@@ -933,6 +1046,7 @@ impl Engine {
                                         if let trade::AccEvent::Position { p, .. } = &ev { if wants_liq_refetch(ex, p) { pos_dirty.insert(ex); } }
                                         let wallet = matches!(ev, trade::AccEvent::Wallet(_));
                                         waits.extend(wait_touch(&mut a, ex, &ev, now_ms()));
+                                        found_by_push(&mut a, ex, &ev);
                                         changed |= apply(&mut a, ex, ev);
                                         // run after the lock is released: spawn_top_up locks the account itself
                                         if wallet { if let Some(need) = auto_due(&mut a, ex) { top_ups.push((ex, need)); } }
@@ -1139,16 +1253,18 @@ impl Engine {
     }
 
     /// Place an order (rules fetched once per symbol and cached); the result lands in the account log.
+    /// On the account runtime: an order in flight survives a switch of the base.
     pub fn submit(&self, ex: Exchange, req: OrderReq, ref_px: f64, ctx: &eframe::egui::Context) {
-        let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
         rt.spawn(async move {
-            let id = place_logged(&account, ex, &req, ref_px).await;
-            // a TP/SL waiting on this order: its venue id, or nothing to wait for
+            let sent = place_logged(&account, ex, &req, ref_px).await;
+            // a TP/SL waiting on this order: its venue id, nothing to wait for, or (unknown) the lookup's answer
             let mut a = account.lock().unwrap();
             if let Some(i) = a.tpsl_wait.iter().position(|w| w.ex == ex && Some(&w.client_id) == req.client_id.as_ref()) {
-                match id {
-                    Some(id) => { a.tpsl_wait[i].order_id.get_or_insert(id); }
-                    None => { a.tpsl_wait.remove(i); a.note(format!("NOTE {ex:?} {}: TP/SL dropped, its order was not placed", req.symbol), false); }
+                match sent {
+                    Sent::Ok(id) => { a.tpsl_wait[i].order_id.get_or_insert(id); }
+                    Sent::Failed => { a.tpsl_wait.remove(i); a.note(format!("NOTE {ex:?} {}: TP/SL dropped, its order was not placed", req.symbol), false); }
+                    Sent::Unknown => {}
                 }
             }
             ctx.request_repaint();
@@ -1197,13 +1313,14 @@ impl Engine {
     /// Place `reqs` on `ex` one after another in one task: each only once the one before was
     /// accepted, so a refused close never leaves the open after it on its own.
     pub fn submit_seq(&self, ex: Exchange, reqs: Vec<OrderReq>, ref_px: f64, ctx: &eframe::egui::Context) {
-        let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
         let kill0 = account.lock().unwrap().kill_gen;
         rt.spawn(async move {
             let n = reqs.len();
             for (i, req) in reqs.iter().enumerate() {
                 if account.lock().unwrap().kill_gen != kill0 { account.lock().unwrap().note(format!("NOTE {ex:?} {}: kill switch, {} of {n} orders not sent", req.symbol, n - i), false); break; }
-                if place_logged(&account, ex, req, ref_px).await.is_none() {
+                // an unanswered one stops it too: the next must not go out while it may be live or not
+                if !matches!(place_logged(&account, ex, req, ref_px).await, Sent::Ok(_)) {
                     if i + 1 < n { account.lock().unwrap().note(format!("NOTE {ex:?} {}: stopped after {i} of {n} orders, the rest was not sent", req.symbol), false); }
                     break;
                 }
@@ -2243,6 +2360,52 @@ mod tests {
         a.modes.insert((ex, "BTCUSDT".into()), Some(Mode::Hedge));
         assert!(risk_gate(&mut a, ex, &o(trade::Kind::Market, 2.0), 100.0).is_err());
         assert!(risk_gate(&mut a, ex, &OrderReq { close: true, ..o(trade::Kind::Market, 50.0) }, 100.0).is_ok());
+    }
+
+    fn leg(ex: Exchange, cid: &str, qty: f64) -> depth::route::Leg {
+        depth::route::Leg { ex, req: OrderReq { symbol: "BTCUSDT".into(), pos: Side::Buy, close: false, kind: trade::Kind::Market, qty, client_id: Some(cid.into()), attach: None },
+            ref_px: 100.0, mode: Mode::OneWay, est_px: 100.0, est_fee: 0.0, slip_bps: 0.0, avail_after: 0.0, fx: 1.0 }
+    }
+
+    #[test]
+    fn plan_run_resolves_unknown_leg_from_push_by_client_id() {
+        let mut a = Account::default();
+        a.record_plan(&[leg(Exchange::Binance, "t1al0", 1.0), leg(Exchange::Bybit, "t1al1", 2.0)]);
+        a.set_leg("t1al0", &LegState::Unknown);
+        a.unknown.push((Exchange::Binance, "t1al0".into()));
+        // another venue's push with the same id, or an order without one, changes nothing
+        found_by_push(&mut a, Exchange::Bybit, &E::Order(order("9", Some("t1al0"), 0.0)));
+        found_by_push(&mut a, Exchange::Binance, &E::Order(order("9", None, 0.0)));
+        assert_eq!(a.plans[0].legs[0].state, LegState::Unknown);
+        found_by_push(&mut a, Exchange::Binance, &E::Order(order("55", Some("t1al0"), 0.0)));
+        assert_eq!(a.plans[0].legs[0].state, LegState::Live("55".into()));
+        assert!(a.unknown.is_empty() && a.log.back().is_some_and(|l| l.1.contains("after all")));
+        // a leg that answered keeps its id
+        a.set_leg("t1al1", &LegState::Ok("77".into()));
+        found_by_push(&mut a, Exchange::Bybit, &E::Order(OpenOrder { ex: Exchange::Bybit, ..order("77", Some("t1al1"), 0.0) }));
+        assert_eq!(a.plans[0].legs[1].state, LegState::Ok("77".into()));
+        // ids for orders without one never repeat
+        assert_ne!(new_cid(), new_cid());
+        assert!(new_cid().len() <= 36);
+    }
+
+    #[test]
+    fn retry_remainder_only_when_nothing_unknown() {
+        let mut a = Account::default();
+        a.record_plan(&[leg(Exchange::Binance, "a", 1.0), leg(Exchange::Bybit, "b", 2.0), leg(Exchange::Okx, "c", 0.5)]);
+        assert_eq!(remainder(&a.plans[0]), None);
+        a.set_leg("a", &LegState::Ok("1".into()));
+        a.set_leg("b", &LegState::Failed("insufficient margin".into()));
+        a.set_leg("c", &LegState::Unknown);
+        assert_eq!(remainder(&a.plans[0]), None);
+        a.set_leg("c", &LegState::Failed("not placed (no answer)".into()));
+        assert_eq!(remainder(&a.plans[0]), Some(2.5));
+        a.set_leg("b", &LegState::Live("2".into()));
+        a.set_leg("c", &LegState::Filled);
+        assert_eq!(remainder(&a.plans[0]), None);
+        // at most ten plans are kept
+        for _ in 0..12 { a.record_plan(&[leg(Exchange::Binance, "x", 1.0)]); }
+        assert_eq!(a.plans.len(), 10);
     }
 
     #[test]

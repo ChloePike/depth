@@ -152,6 +152,8 @@ impl App {
             "native": j.venue_id.is_some(),
         })).collect();
         let log: Vec<Value> = acc.log.iter().rev().take(200).map(|(ts, m, ok)| json!({"ts": ts, "msg": m, "ok": ok})).collect();
+        let plans: Vec<Value> = acc.plans.iter().filter(|p| nowms - p.ts < 60_000).map(|p| json!({"ts": p.ts, "remainder": super::engine::remainder(p),
+            "legs": p.legs.iter().map(|l| { let (st, detail) = l.state.label(); json!({"ex": ex_name(l.ex), "qty": l.qty, "client_id": l.client_id, "state": st, "detail": detail}) }).collect::<Vec<_>>()})).collect();
         let kill = json!({
             "plan": super::engine::kill_plan(&acc).iter().map(|(e, o, t, j, p)| json!({"ex": ex_name(*e), "orders": o, "tpsl": t, "algos": j, "positions": p})).collect::<Vec<_>>(),
             "report": acc.kill.as_ref().map(|r| json!({"started_ms": r.started_ms, "venues": r.venues.iter().map(|(e, lines, done)| json!({"ex": ex_name(*e), "done": done,
@@ -213,7 +215,7 @@ impl App {
             "chart": chart, "book": book, "fired": fired, "signals": signals, "quant": quant,
             "book_click": self.trade.fill.map(|(e, px)| json!({"ex": ex_name(e), "px": px})),
             "tradable": trade::TRADABLE.iter().map(|e| ex_name(*e)).collect::<Vec<_>>(),
-            "risk": risk, "kill": kill,
+            "risk": risk, "kill": kill, "plans": plans,
         }).to_string()
     }
 
@@ -275,6 +277,7 @@ impl App {
                     // engine once this very order has filled (`TpSlWait`)
                     let trigger = if s("trigger") == "last" { trade::tpsl::Trigger::Last } else { trade::tpsl::Trigger::Mark };
                     let attach = (f("tp").is_some() || f("sl").is_some()).then_some(trade::tpsl::Attach { tp: f("tp"), sl: f("sl"), trigger }).filter(|_| !req.close);
+                    self.eng.account.lock().unwrap().record_plan(&plan.legs);
                     for leg in &plan.legs {
                         let mut r = leg.req.clone();
                         match attach {
@@ -526,7 +529,11 @@ impl App {
         for e in trade::TRADABLE { let (t, m) = super::settings::fee(e); policy.fees.insert(e, (t, m)); }
         // staleness is judged on local receive time of the last book/BBO (v.ts follows every event, incl. polled
         // long/short rows stamped minutes back)
-        let plan = route::plan(req, &venues, &snap, &policy, now_ms(), now_ms() as u64).map_err(|e| format!("{e:#}"))?;
+        // plan ids (and so the legs' client ids) never repeat, even for plans made in the same millisecond
+        // (Close All, the kill switch: two closes on one venue must not share an id)
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = now_ms() as u64 * 256 + SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 256;
+        let plan = route::plan(req, &venues, &snap, &policy, now_ms(), id).map_err(|e| format!("{e:#}"))?;
         // risk limits, so the preview shows the block before anything is confirmed
         super::engine::check_plan(&mut self.eng.account.lock().unwrap(), &plan.legs).map_err(|e| format!("{} {e}", l("Risk limit:")))?;
         Ok(plan)

@@ -21,6 +21,7 @@ impl Kind {
 }
 
 /// A previewed order: the exact preview args (re-sent to `place`) and the route plan.
+#[derive(Clone)]
 struct Ticket { pos: String, close: bool, args: Value, plan: Value, tp: Option<f64>, sl: Option<f64>, trigger: &'static str, err: Option<String> }
 
 impl Ticket {
@@ -99,6 +100,8 @@ pub struct OrderPanel {
     dial_size: bool,
     /// when this panel last sent something: order-log entries since then show under the buttons
     sent_ms: i64,
+    /// the last routed order sent, for "retry remainder"
+    last: Option<Ticket>,
 }
 
 impl Default for OrderPanel {
@@ -109,7 +112,7 @@ impl Default for OrderPanel {
             trigger: String::new(), trigger_last: false, stop_limit: false, callback: "1.0".into(), activation: String::new(),
             scaled_from: String::new(), scaled_to: String::new(), scaled_count: 5, scaled_skew: 0.0, scaled_post: true,
             twap_minutes: "15".into(), twap_slices: "10".into(), twap_slip: "10".into(), twap_limit: String::new(), twap_native: true, twap_random: false,
-            lev: None, sheet: None, seen: Default::default(), open_settings: None, open_transfer: None, preview: vec![], tick: None, flatten: None, qty_usdt: false, dial_price: false, dial_size: false, sent_ms: 0,
+            lev: None, sheet: None, seen: Default::default(), open_settings: None, open_transfer: None, preview: vec![], tick: None, flatten: None, qty_usdt: false, dial_price: false, dial_size: false, sent_ms: 0, last: None,
         }
     }
 }
@@ -520,7 +523,7 @@ impl OrderPanel {
                     if kit::button(ui, l2, Look::Fill(dn()), 32.0, Some(w), can_trade).clicked() { go = Some(p2); }
                 });
             }
-            self.results(ui, st);
+            self.results(ui, st, call);
             // per side, Binance-style: "label value" pairs, the buy side flush left, the sell side
             // flush right; est. liquidation (isolated estimate), margin, and what can be opened
             ui.spacing_mut().item_spacing.y = 3.0;
@@ -1048,9 +1051,41 @@ impl OrderPanel {
         self.error = (!ok).then(|| l("TP/SL is not available on this venue yet").into());
     }
 
-    fn results(&self, ui: &mut Ui, st: &Value) {
-        let log: Vec<(i64, &str, bool)> = st["log"].as_array().map(|a| a.iter().map(|x| (x["ts"].as_i64().unwrap_or(0), s(&x["msg"]), x["ok"] == true)).collect()).unwrap_or_default();
-        results(ui, self.sent_ms, &log);
+    /// Under the buttons: the last routed order sent from here, one row per leg with its state (sent,
+    /// OK, live, filled, failed, unknown), and the failed part to route again once nothing is unknown;
+    /// other orders: "Sent, waiting" until the venue answers.
+    fn results(&mut self, ui: &mut Ui, st: &Value, call: &mut Call) {
+        let plan = st["plans"].as_array().and_then(|a| a.iter().rev().find(|p| self.sent_ms > 0 && p["ts"].as_i64().is_some_and(|t| t >= self.sent_ms - 2_000))).cloned();
+        let Some(p) = plan else {
+            let log: Vec<(i64, &str, bool)> = st["log"].as_array().map(|a| a.iter().map(|x| (x["ts"].as_i64().unwrap_or(0), s(&x["msg"]), x["ok"] == true)).collect()).unwrap_or_default();
+            return results(ui, self.sent_ms, &log);
+        };
+        let legs = p["legs"].as_array().cloned().unwrap_or_default();
+        for lg in &legs {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{} · {}", s(&lg["ex"]), fmt_qty(f(&lg["qty"]).unwrap_or(0.0)))).font(mono_m(11.5)).color(fg()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (text, tone) = match s(&lg["state"]) {
+                        "ok" => (l("Accepted"), Tone::Up), "live" => (l("Live"), Tone::Up), "filled" => (l("Filled"), Tone::Up),
+                        "failed" => (l("Failed"), Tone::Down), "unknown" => (l("No answer"), Tone::Warn), _ => (l("Sent"), Tone::Neutral),
+                    };
+                    let detail = s(&lg["detail"]);
+                    let r = kit::chip(ui, text, tone);
+                    if !detail.is_empty() { r.on_hover_text(detail); }
+                });
+            });
+        }
+        if legs.iter().any(|lg| lg["state"] == "unknown") { kit::note(ui, l("No answer from the venue for a leg: it may be live. It is looked up by its client id, never sent again."), WARN); }
+        if let Some(q) = f(&p["remainder"]) {
+            let text = lf("Retry remainder (%@ %@)", &[fmt_qty(q), s(&st["base"]).to_string()]);
+            if kit::button(ui, &text, Look::Secondary, H_SM, Some(f32::INFINITY), true).on_hover_text(l("Routes the part that failed again on fresh books, through the preview and the confirmation")).clicked() {
+                if let Some(mut tk) = self.last.clone() {
+                    tk.args["qty"] = q.into();
+                    self.sent_ms = 0;
+                    self.open_ticket(tk, st, call);
+                }
+            }
+        }
     }
 
     /// The trade venue's account: margin health, equity, uPnL, keys shortcut.
@@ -1162,7 +1197,14 @@ impl OrderPanel {
             args["tpsl"] = true.into();
             if let Some(e) = tpsl_check(pos == "long", ref_px, l("the order price"), tp, sl) { self.error = Some(e); return; }
         }
-        let mut req = args.clone();
+        let tk = Ticket { pos: pos.into(), close: self.close, args, plan: Value::Null, tp, sl, trigger: if self.trig_last { "last" } else { "mark" }, err: None };
+        self.open_ticket(tk, st, call);
+    }
+
+    /// Preview `tk.args` (validated and routed on the books now), then the confirm modal, or place at
+    /// once when confirmations are off.
+    fn open_ticket(&mut self, mut tk: Ticket, st: &Value, call: &mut Call) {
+        let mut req = tk.args.clone();
         req["op"] = "preview".into();
         let plan = match call(req) { Ok(p) => p, Err(e) => { self.error = Some(e); return } };
         let legs = plan["legs"].as_array().map_or(0, |a| a.len());
@@ -1171,7 +1213,7 @@ impl OrderPanel {
             self.error = Some(if ex.is_empty() { l("No venue can take this order").into() } else { ex.join("\n") });
             return;
         }
-        let tk = Ticket { pos: pos.into(), close: self.close, args, plan, tp, sl, trigger: if self.trig_last { "last" } else { "mark" }, err: None };
+        tk.plan = plan;
         if st["prefs"]["confirm"].as_bool().unwrap_or(true) { self.ticket = Some(tk); }
         else if let Err(e) = self.place(&tk, call) { self.error = Some(e); }
     }
@@ -1187,6 +1229,7 @@ impl OrderPanel {
         args["trigger"] = tk.trigger.into();
         call(args)?;
         self.sent_ms = depth::now_ms();
+        self.last = Some(tk.clone());
         Ok(())
     }
 
