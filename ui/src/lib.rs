@@ -19,6 +19,7 @@ mod command;
 mod kbd;
 mod tray;
 mod native;
+mod hunter;
 
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Ui};
 use std::collections::HashMap;
@@ -186,10 +187,11 @@ struct Settings { route: Option<depth::route::Policy>, prefs: Option<settings::P
     /// the daily loss stop's baseline: (local day number, equity per venue at its start)
     risk_day: Option<(i64, Vec<(Exchange, f64)>)>,
     /// TP/SL still waiting for their entry order (engine::TpSlWait)
-    tpsl_wait: Option<Vec<engine::TpSlWait>> }
+    tpsl_wait: Option<Vec<engine::TpSlWait>>,
+    hunter: Option<hunter::HunterView> }
 
 #[derive(serde::Serialize)]
-struct SettingsRef<'a> { route: &'a depth::route::Policy, prefs: &'a settings::Prefs, lang: &'static str, base: &'a str, mode: Market, chart: &'a chart::Chart, layout: &'a str, cell: usize, charts: &'a [(usize, chart::Chart)], trade_ex: Exchange, off: Vec<Exchange>, auto: std::collections::BTreeMap<String, engine::AutoTopUp>, order_panel: bool, window: Option<[f32; 4]>, book: &'a book::BookView, risk_day: (i64, Vec<(Exchange, f64)>), tpsl_wait: Vec<engine::TpSlWait> }
+struct SettingsRef<'a> { route: &'a depth::route::Policy, prefs: &'a settings::Prefs, lang: &'static str, base: &'a str, mode: Market, chart: &'a chart::Chart, layout: &'a str, cell: usize, charts: &'a [(usize, chart::Chart)], trade_ex: Exchange, off: Vec<Exchange>, auto: std::collections::BTreeMap<String, engine::AutoTopUp>, order_panel: bool, window: Option<[f32; 4]>, book: &'a book::BookView, risk_day: (i64, Vec<(Exchange, f64)>), tpsl_wait: Vec<engine::TpSlWait>, hunter: &'a hunter::HunterView }
 
 fn settings_path() -> Option<std::path::PathBuf> {
     Some(depth::sys::data_dir()?.join("settings.json"))
@@ -306,7 +308,7 @@ fn load_settings(text: &str) -> (Settings, bool) {
         route: d.obj("route"), prefs: d.obj("prefs"), lang: d.get("lang"), base: d.get("base"), mode: d.get("mode"), chart: d.obj("chart"), layout: d.get("layout"), cell: d.get("cell"),
         charts: d.list("charts"), trade_ex: d.get("trade_ex"), off: d.list("off"),
         auto: d.take("auto").and_then(|x| { let r = lenient_map(x); d.keep("auto", r) }),
-        order_panel: d.get("order_panel"), window: d.get("window"), book: d.obj("book"), risk_day: d.get("risk_day"), tpsl_wait: d.list("tpsl_wait"),
+        order_panel: d.get("order_panel"), window: d.get("window"), book: d.obj("book"), risk_day: d.get("risk_day"), tpsl_wait: d.list("tpsl_wait"), hunter: d.obj("hunter"),
     };
     // keys left over belong to a newer build
     let unknown = d.v.as_object().is_some_and(|m| !m.is_empty());
@@ -386,6 +388,8 @@ pub struct App {
     top: top::TopBar,
     venue_pages: venues::VenuePages,
     account: account::AccountPanel,
+    /// the Hunter page (title bar pill after the markets) and its rules, persisted
+    hunter: hunter::HunterView,
 }
 
 /// Cell rects of a chart layout: "2" side by side, "2v" stacked, "3" one left and two right,
@@ -442,6 +446,12 @@ impl App {
         eng.start_account(&cc.egui_ctx);
         eng.off = st.off.unwrap_or_default().into_iter().collect();
         if eng.off.len() >= Exchange::ALL.len() { eng.off.clear(); }
+        // the scanner first, so the picker's Binance stream rides on its connection from the start
+        // (not hosted: the SwiftUI / WinUI hosts have no Hunter page)
+        eng.set_hunter(prefs.hunter && !hosted, &cc.egui_ctx);
+        let mut hunter = st.hunter.unwrap_or_default();
+        hunter.open |= env("T1_MODE").as_deref() == Some("hunter");
+        hunter.sync(&eng.hunt);
         eng.start(&env("T1_BASE").or(st.base).unwrap_or("BTC".into()), &cc.egui_ctx);
         if matches!(mode, Market::Margin | Market::Option) { eng.ensure(mode); }
         let mut chart = st.chart.unwrap_or_default();
@@ -463,7 +473,7 @@ impl App {
             route: st.route.clone().unwrap_or_default(), pending_base: None, pending_mode: None, pending_restart: false, book_w: 0.0,
             layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(), fills_key: Default::default(), log_seen: now_ms(), fill_seen: 0,
             st: (Default::default(), Instant::now(), true), order: Default::default(), hot_trade: vec![], venue_toggle: None, coins_preloaded: false, order_panel: st.order_panel.unwrap_or(true), top: Default::default(), venue_pages: Default::default(),
-            account: Default::default(),
+            account: Default::default(), hunter,
         }
     }
 
@@ -490,9 +500,14 @@ impl App {
                 self.coins_preloaded = true;
             }
             if let Some(b) = self.picker.show(ui, &self.eng.base, &tickers) { if b != self.eng.base { *new_base = Some(b); } }
-            let names: Vec<&str> = MODES.iter().map(|(_, k)| t(k)).collect();
-            let sel = MODES.iter().position(|(m, _)| *m == self.mode).unwrap_or(0);
-            if let Some(i) = top::pills(ui, "modes", &names, sel, 26.0, 13.0) { *new_mode = Some(MODES[i].0); }
+            // the markets, then the Hunter page (not a market: the chart keeps its market under it)
+            let names: Vec<&str> = MODES.iter().map(|(_, k)| t(k)).chain([t("mode.hunter")]).collect();
+            let sel = if self.hunter.open { MODES.len() } else { MODES.iter().position(|(m, _)| *m == self.mode).unwrap_or(0) };
+            match top::pills(ui, "modes", &names, sel, 26.0, 13.0) {
+                Some(i) if i == MODES.len() => self.hunter.open = true,
+                Some(i) => *new_mode = Some(MODES[i].0),
+                None => {}
+            }
             if depth::demo::on() { kit::chip(ui, "DEMO", kit::Tone::Warn).on_hover_text(l("Simulated account: no real order is sent")); }
             let book_market = match self.mode { Market::Margin | Market::Option => Market::Spot, m => m };
             self.top.price(ui, a.mid(book_market));
@@ -905,7 +920,7 @@ impl App {
             day.sort_by_key(|x| x.0 as u8);
             (a.auto.iter().map(|(e, r)| (format!("{e:?}"), *r)).collect(), (a.day_start.0, day), a.tpsl_wait.clone())
         };
-        let s = SettingsRef { route: &self.route, prefs: &self.prefs, lang: lang_code(), base: &self.eng.base, mode: self.mode, chart: &self.chart, layout: &self.layout, cell: self.cell, charts: &self.others, trade_ex: self.trade.ex, off, auto, order_panel: self.order_panel, window: self.window, book: &self.book, risk_day, tpsl_wait };
+        let s = SettingsRef { route: &self.route, prefs: &self.prefs, lang: lang_code(), base: &self.eng.base, mode: self.mode, chart: &self.chart, layout: &self.layout, cell: self.cell, charts: &self.others, trade_ex: self.trade.ex, off, auto, order_panel: self.order_panel, window: self.window, book: &self.book, risk_day, tpsl_wait, hunter: &self.hunter };
         let Ok(json) = serde_json::to_string_pretty(&s) else { return };
         if json == self.saved.0 { return; }
         let Some(p) = settings_path() else { return };
@@ -1055,8 +1070,12 @@ impl App {
         self.last_frame = Instant::now();
         let ctx = ui.ctx().clone();
         // live data does not request repaints itself: this timer is the chart / book refresh rate.
-        // 30 Hz while focused (10 Hz read as a stuttering, late candle), 10 Hz in the background
-        ctx.request_repaint_after(Duration::from_millis(if focused { 33 } else { 100 }));
+        // 30 Hz while focused (10 Hz read as a stuttering, late candle), 10 Hz in the background.
+        // The Hunter page shows no chart or book: once a second (its clock), the scanner repaints on new rows
+        let hunting = self.hunter.open && !self.hosted;
+        ctx.request_repaint_after(Duration::from_millis(if hunting { 1000 } else if focused { 33 } else { 100 }));
+        let scan = self.prefs.hunter && !self.hosted;
+        if self.eng.hunter_on() != scan { self.eng.set_hunter(scan, &ctx); }
         // T1_SPIN: repaint every frame (diagnostics: worst case of constant mouse movement)
         if std::env::var("T1_SPIN").is_ok() { ctx.request_repaint(); }
         self.screenshot(&ctx);
@@ -1108,7 +1127,7 @@ impl App {
             if self.trade.ins_pos.is_some() { let g = agg.lock().unwrap(); self.trade.insure_modal(&ctx, &g, &self.eng); }
             // trading hotkeys go to the order panel on screen; none shown (or options): dropped, never queued for later
             let hot = std::mem::take(&mut self.hot_trade);
-            if self.mode == Market::Perp && self.order_panel {
+            if self.mode == Market::Perp && self.order_panel && !hunting {
                 let mut op = std::mem::take(&mut self.order);
                 egui::Panel::right("order").show_separator_line(false).frame(Frame::new().fill(bg()).inner_margin(Margin::symmetric(4, 4))).resizable(false).exact_size(300.0)
                     .show(ui, |ui| egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
@@ -1130,7 +1149,7 @@ impl App {
                 }
                 self.order = op;
             }
-            if matches!(self.mode, Market::Spot | Market::Margin | Market::Option) && self.order_panel {
+            if matches!(self.mode, Market::Spot | Market::Margin | Market::Option) && self.order_panel && !hunting {
                 egui::Panel::right("spot_order").show_separator_line(false).frame(Frame::new().fill(bg()).inner_margin(Margin::symmetric(4, 4))).resizable(false).exact_size(300.0)
                     .show(ui, |ui| egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
                         let g = agg.lock().unwrap();
@@ -1147,7 +1166,7 @@ impl App {
             } else { drop(stats); }
             // the book's rows are drawn here at display rate; hosted, its header (and the Venues / Quant
             // pages) are native views laid over a fixed 300 pt column
-            if self.mode != Market::Option {
+            if self.mode != Market::Option && !hunting {
                 let panel = egui::Panel::right("book").show_separator_line(theme::native()).frame(card(8));
                 let panel = if self.hosted { panel.resizable(false).exact_size(300.0) } else { panel.resizable(true).default_size(320.0) };
                 let pane = if self.hosted { 0 } else { self.book.pane() };
@@ -1246,7 +1265,13 @@ impl App {
             self.alerts_tick(&a);
             self.tray_tick(&ctx, &a);
             egui::CentralPanel::default().frame(card(10)).show(ui, |ui| {
-                if self.mode == Market::Option { self.opt.show(ui, &a) } else { self.charts(ui, &a) }
+                if hunting {
+                    // a coin picked there opens in Perpetual
+                    if let Some(b) = self.hunter.show(ui, &self.eng.hunt, self.eng.hunter_on(), &self.eng.off) {
+                        if b != self.eng.base { self.pending_base = Some(b); }
+                        self.pending_mode = Some(Market::Perp);
+                    }
+                } else if self.mode == Market::Option { self.opt.show(ui, &a) } else { self.charts(ui, &a) }
             });
             self.chart_actions(&ctx);
         }
@@ -1274,7 +1299,8 @@ impl App {
             if switched || self.book.src.is_some_and(|e| self.eng.off.contains(&e)) { self.book.src = None; }
             self.rate = (Instant::now(), 0, 0.0);
         }
-        if let Some(m) = new_mode { self.mode = m; self.eng.ensure(m); }
+        // a market chosen (pill, hotkey, command, a Hunter row) leaves the Hunter page
+        if let Some(m) = new_mode { self.mode = m; self.eng.ensure(m); self.hunter.open = false; }
         // T1_SETTINGS=<tab>: open the settings dialog once (screenshots)
         if let Some(n) = std::env::var("T1_SETTINGS").ok().and_then(|s| s.parse().ok()) { if !self.shot_sent && self.started.elapsed().as_secs() < 2 { self.settings.open_tab(n); } }
         // T1_COMMAND=<text>: open the command bar with that text once (screenshots)

@@ -3,7 +3,7 @@
 //! (`set_prefs` / `set_route` with the whole object, `set_lang`, `save_keys`, ...), so there is no Save.
 //! `Prefs` persist in settings.json; `apply` pushes them into the palette, zoom and style.
 use super::hotkeys::{self, Act, Rec};
-use super::{kit, l, theme::*, tz_label};
+use super::{kit, l, t, theme::*, tz_label};
 use depth::{route::Policy, trade, ws::ProxyMode, Exchange};
 use eframe::egui::{self, Color32, RichText, Ui};
 use serde_json::{json, Value};
@@ -54,11 +54,13 @@ pub struct Prefs {
     pub demo: bool,
     /// USDT the demo account starts with after a reset
     pub demo_balance: f64,
+    /// the Hunter scanner polls every venue's all-symbol tickers in the background (page and alerts)
+    pub hunter: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into(), risk: Default::default(), demo: false, demo_balance: depth::demo::START_BALANCE }
+        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into(), risk: Default::default(), demo: false, demo_balance: depth::demo::START_BALANCE, hunter: true }
     }
 }
 
@@ -247,6 +249,9 @@ impl SettingsView {
         });
         section(ui, l("Data sources"), l("Flowscan runs a Hyperliquid node and publishes its book with order counts about every 130 ms (the public feed: every few seconds), which makes the order-by-order estimate in the book much closer. It is a third-party, undocumented service and may stop working; when it fails Depth retries, and turning this off goes back to the public feed."), |ui| {
             row(ui, l("Hyperliquid orders via Flowscan"), |ui| { kit::switch(ui, &mut p.hl_flowscan); });
+        });
+        section(ui, "", t("set.hunter_desc"), |ui| {
+            row(ui, t("set.hunter"), |ui| { kit::switch(ui, &mut p.hunter); });
         });
         let draft = self.proxy_url.get_or_insert_with(|| p.proxy_url.clone());
         let err = (p.proxy == ProxyMode::Custom).then(|| depth::ws::check_proxy(draft).err()).flatten();
