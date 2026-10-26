@@ -169,13 +169,15 @@ impl Kind {
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize)]
 pub struct Caps { pub fok: bool, pub stop: bool, pub trailing: bool, pub post_only: bool,
     /// position TP/SL (`tpsl` module)
-    pub tpsl: bool }
+    pub tpsl: bool,
+    /// TP/SL attached to an opening order (`OrderReq.attach`)
+    pub attach_tpsl: bool }
 
 pub fn caps(ex: Exchange) -> Caps {
     match ex {
-        Exchange::Bybit | Exchange::Binance => Caps { fok: true, stop: true, trailing: true, post_only: true, tpsl: true },
-        Exchange::Okx | Exchange::Bitget | Exchange::Gate => Caps { fok: true, stop: false, trailing: false, post_only: true, tpsl: false },
-        Exchange::Kraken | Exchange::Hyperliquid | Exchange::Lighter => Caps { fok: false, stop: false, trailing: false, post_only: true, tpsl: false },
+        Exchange::Bybit | Exchange::Binance => Caps { fok: true, stop: true, trailing: true, post_only: true, tpsl: true, attach_tpsl: ex == Exchange::Bybit },
+        Exchange::Okx | Exchange::Bitget | Exchange::Gate => Caps { fok: true, stop: false, trailing: false, post_only: true, tpsl: false, attach_tpsl: false },
+        Exchange::Kraken | Exchange::Hyperliquid | Exchange::Lighter => Caps { fok: false, stop: false, trailing: false, post_only: true, tpsl: false, attach_tpsl: false },
         _ => Caps::default(),
     }
 }
@@ -193,6 +195,8 @@ pub struct OrderReq {
     /// our id for the order (Bybit orderLinkId, Binance newClientOrderId): lets a leg whose
     /// request timed out be found in the private stream instead of being blindly re-sent
     pub client_id: Option<String>,
+    /// TP/SL to protect the position from the fill on (opening orders, `Caps.attach_tpsl` venues only)
+    pub attach: Option<tpsl::Attach>,
 }
 
 impl OrderReq {
@@ -220,9 +224,10 @@ pub struct OpenOrder { pub ex: Exchange, pub symbol: String, pub id: String, pub
     pub tif: String, pub reduce_only: bool, pub ts: i64,
     /// hedge mode: which position the order belongs to
     pub pos: Option<Side>,
-    /// our id for the order, where the venue row carries it (Bybit orderLinkId, Binance clientOrderId); None elsewhere
+    /// our id for the order, where the venue row carries it (Bybit orderLinkId, Binance clientOrderId / clientAlgoId); None elsewhere
     pub client_id: Option<String>,
-    /// trigger price when the row is a conditional order waiting on the venue; None for plain resting orders
+    /// trigger price when the row is a conditional order waiting on the venue; None for plain resting orders.
+    /// Binance: Some on every algo-service row (trailing without activation: Some(0)), which routes its cancel
     pub trigger: Option<f64> }
 
 /// The trading (margin) account, USD. Every other account is listed by `wallets`.
@@ -406,8 +411,16 @@ pub fn accepts(ex: Exchange, req: &OrderReq) -> Result<()> {
         Kind::Stop { .. } if !c.stop => bail!("{ex:?}: conditional orders are not supported here yet"),
         Kind::Trailing { .. } if !c.trailing => bail!("{ex:?}: trailing stops are not supported here yet"),
         Kind::Trailing { .. } if ex == Exchange::Bybit && !req.close => bail!("bybit: a trailing stop protects an open position: use it from Close"),
-        _ => Ok(()),
+        _ => {}
     }
+    if let Some(a) = &req.attach {
+        if !c.attach_tpsl { bail!("{ex:?}: TP/SL cannot be attached to an order here; set it once the position is open"); }
+        if req.close { bail!("TP/SL can only be attached to an order that opens a position"); }
+        if matches!(req.kind, Kind::Trailing { .. }) { bail!("TP/SL cannot be attached to a trailing stop"); }
+        if a.tp.is_none() && a.sl.is_none() { bail!("attached TP/SL has neither a take-profit nor a stop-loss"); }
+        if let Some(p) = [a.tp, a.sl].into_iter().flatten().find(|p| !(*p > 0.0 && p.is_finite())) { bail!("invalid TP/SL price {p}"); }
+    }
+    Ok(())
 }
 
 pub async fn place(ex: Exchange, k: &Keys, req: &OrderReq, r: &Rules, ref_px: f64, mode: Mode) -> Result<String> {
@@ -552,9 +565,14 @@ pub async fn amend(ex: Exchange, k: &Keys, o: &OpenOrder, price: f64, r: &Rules)
     Ok(())
 }
 
-/// Cancels one resting order row. ponytail: plain cancel by id on every venue; trigger rows
-/// (`o.trigger`) get their venue's algo cancel here once those rows are listed.
-pub async fn cancel_order(ex: Exchange, k: &Keys, o: &OpenOrder) -> Result<()> { cancel(ex, k, &o.symbol, &o.id).await }
+/// Cancels one resting order row. Binance trigger rows (`o.trigger`, algo service) go to the algo
+/// cancel; everywhere else a plain cancel by id (Bybit cancels conditional rows the same way).
+pub async fn cancel_order(ex: Exchange, k: &Keys, o: &OpenOrder) -> Result<()> {
+    match ex {
+        Exchange::Binance => binance::cancel_order(k, o).await,
+        _ => cancel(ex, k, &o.symbol, &o.id).await,
+    }
+}
 
 /// Outcome of a bulk cancel: how many cancels the venue accepted, and one line per refusal.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -566,12 +584,51 @@ impl CancelReport {
     }
 }
 
-/// Cancels every given order, one request after another (the rate-limit pause applies to each).
-/// ponytail: a loop of single cancels; native cancel-all endpoints come with the kill switch.
+/// Cancels the venue's resting and conditional orders, never its TP/SL (`tpsl::cancel_all`); every
+/// refusal is a line in the report and the rest still go out. Bybit: two account-wide cancel-all
+/// calls (USDT linear, also orders missing from `orders`), then the given trailing stops one by one.
+/// Binance: one cancel-all per symbol of `orders`, then its algo rows by id. Elsewhere one request
+/// per given order (the rate-limit pause applies to each).
+// ponytail: other venues loop single cancels; wire their cancel-all endpoints once they are verified on a real account
 pub async fn cancel_all(ex: Exchange, k: &Keys, orders: &[OpenOrder]) -> Result<CancelReport> {
-    let mut rep = CancelReport::default();
-    for o in orders { rep.add(format!("{} {}", o.symbol, o.id), cancel_order(ex, k, o).await); }
-    Ok(rep)
+    match ex {
+        Exchange::Bybit => bybit::cancel_all(k, orders).await,
+        Exchange::Binance => binance::cancel_all(k, orders).await,
+        _ => {
+            let mut rep = CancelReport::default();
+            for o in orders { rep.add(format!("{} {}", o.symbol, o.id), cancel_order(ex, k, o).await); }
+            Ok(rep)
+        }
+    }
+}
+
+/// An order found by our client id: still open, or finished with the venue's status (Filled,
+/// Cancelled, Rejected, ...; FILLED, CANCELED, EXPIRED, ...) and how much of it filled.
+#[derive(Clone, Debug)]
+pub enum Found { Open(OpenOrder), Done { id: String, filled: f64, status: String } }
+
+/// One-shot lookup of an order by our client id, after a request whose outcome is unknown
+/// (`is_unknown_outcome`): Some when the venue knows the order, None when it does not. Never looped.
+/// Venues without a lookup answer an error rather than None, which would read as "not placed".
+pub async fn order_by_client_id(ex: Exchange, k: &Keys, symbol: &str, client_id: &str) -> Result<Option<Found>> {
+    match ex {
+        Exchange::Bybit => bybit::order_by_client_id(k, symbol, client_id).await,
+        Exchange::Binance => binance::order_by_client_id(k, symbol, client_id).await,
+        _ => bail!("{ex:?}: no order lookup by client id yet; check the venue for {client_id}"),
+    }
+}
+
+/// Whether a failed order request may still have reached the venue, so the order may be live: a
+/// timeout, a transport failure once connected, a response that could not be read, a 2xx / 5xx
+/// answer that is not JSON (Bybit), one without a venue code (Binance), or the venues' own
+/// "status unknown" codes (Binance -1006 / -1007, Bybit 10000 / 10016). A venue refusal, a failed
+/// connect or a paused host is a plain failure: nothing was placed. Unknown means look it up by
+/// client id, never re-send blindly.
+pub fn is_unknown_outcome(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| match c.downcast_ref::<reqwest::Error>() {
+        Some(r) => r.is_timeout() || (!r.is_connect() && (r.is_request() || r.is_body() || r.is_decode())),
+        None => { let s = c.to_string(); ["(-1006)", "(-1007)", "(10000)", "(10016)", ": HTTP 2", ": HTTP 5", ": ? (null)"].iter().any(|m| s.contains(m)) }
+    })
 }
 
 pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {
@@ -667,9 +724,10 @@ pub enum AccEvent {
     /// margin account totals pushed by the venue; `equity` / `available` always replace, the Option
     /// fields keep the last value when None (a push that does not carry them)
     Wallet(Balance),
-    /// the private stream is down (emitted by streams later; the engine only logs it for now)
+    /// a session that had subscribed dropped (Bybit, Binance: once per lost session; the next one sends Resync)
     Down,
-    /// one of our positions was liquidated by the venue (emitted later; the engine only logs it for now)
+    /// one of our positions was liquidated or auto-deleveraged by the venue (Bybit, Binance: one per execution);
+    /// `side` is the position's side (Buy = a long was closed)
     Liquidated { symbol: String, side: Side, qty: f64, price: f64 },
     /// balances changed but the push has no account totals (Binance): refetch the balance
     BalanceDirty,
@@ -1017,7 +1075,7 @@ mod tests {
         assert_eq!(fmt_step(0.30000000000000004, 0.1, true), "0.3");
         assert_eq!(fmt_step(12.0, 1.0, true), "12");
         let r = Rules { tick: 0.1, step: 0.001, min_qty: 0.001, min_notional: 5.0 };
-        let req = |qty: f64| OrderReq { symbol: "BTCUSDT".into(), pos: Side::Buy, close: false, kind: Kind::Limit { price: 86000.04, tif: Tif::Gtc }, qty, client_id: None };
+        let req = |qty: f64| OrderReq { symbol: "BTCUSDT".into(), pos: Side::Buy, close: false, kind: Kind::Limit { price: 86000.04, tif: Tif::Gtc }, qty, client_id: None, attach: None };
         assert_eq!(checked(&req(0.0019), &r, 86000.0).unwrap(), ("0.001".into(), Some("86000.0".into())));
         assert!(checked(&req(0.0004), &r, 86000.0).is_err());
         let r2 = Rules { min_notional: 100.0, ..r };
@@ -1043,7 +1101,7 @@ mod tests {
 
     #[test]
     fn bbo_params() {
-        let r = |queue, level| OrderReq { symbol: "BTCUSDT".into(), pos: Side::Buy, close: false, kind: Kind::Bbo { queue, level }, qty: 1.0, client_id: None };
+        let r = |queue, level| OrderReq { symbol: "BTCUSDT".into(), pos: Side::Buy, close: false, kind: Kind::Bbo { queue, level }, qty: 1.0, client_id: None, attach: None };
         let get = |v: &[(&str, String)], k: &str| v.iter().find(|(a, _)| *a == k).map(|(_, b)| b.clone());
         let b = binance_params(&r(true, 1), Mode::Hedge, "1", None);
         assert_eq!(get(&b, "priceMatch").as_deref(), Some("QUEUE"));
@@ -1059,7 +1117,7 @@ mod tests {
     #[test]
     fn conditional_trailing_and_fok_params() {
         let get = |v: &[(&str, String)], k: &str| v.iter().find(|(a, _)| *a == k).map(|(_, b)| b.clone());
-        let o = |pos: Side, close: bool, kind: Kind| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind, qty: 1.0, client_id: None };
+        let o = |pos: Side, close: bool, kind: Kind| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind, qty: 1.0, client_id: None, attach: None };
         // a buy that triggers above the price is a stop, below it a take-profit; the reverse for a sell
         let stop = |t: f64, l: Option<f64>| Kind::Stop { trigger: t, limit: l, by_mark: true };
         let ty = |r: &OrderReq| get(&binance_algo_params(r, Mode::OneWay, "1", None, 100.0, 0.1).unwrap(), "type").unwrap();
@@ -1091,7 +1149,7 @@ mod tests {
 
     #[test]
     fn hedge_and_one_way_params() {
-        let o = |pos: Side, close: bool| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind: Kind::Market, qty: 1.0, client_id: None };
+        let o = |pos: Side, close: bool| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind: Kind::Market, qty: 1.0, client_id: None, attach: None };
         // (pos, close) -> order side
         for (pos, close, side) in [(Side::Buy, false, "Buy"), (Side::Buy, true, "Sell"), (Side::Sell, false, "Sell"), (Side::Sell, true, "Buy")] {
             let r = o(pos, close);
@@ -1151,13 +1209,87 @@ mod tests {
         assert!(merge_snapshot(&[pos(Side::Buy, 1.0)], vec![]).is_empty());
     }
 
+    #[tokio::test]
+    async fn unknown_outcome_only_when_the_order_may_be_live() {
+        use std::io::{Read, Write};
+        // venue refusals, a paused host and a refused connection: nothing was placed
+        for e in ["binance /fapi/v1/order: Margin is insufficient. (-2019)", "bybit /v5/order/create: params error (10001)", "bybit /v5/order/create: HTTP 403: <html>",
+                  "api.bybit.com: rate limited, paused for 30s more"] {
+            assert!(!is_unknown_outcome(&anyhow!("{e}")), "{e}");
+        }
+        // the venues' own "status unknown" answers and answers without a venue verdict
+        for e in ["binance /fapi/v1/order: Timeout waiting for response from backend server. Send status unknown; execution status unknown. (-1007)",
+                  "bybit /v5/order/create: Server Timeout (10000)", "bybit /v5/order/create: HTTP 502: <html>bad gateway</html>",
+                  "bybit /v5/order/create: HTTP 200: <html>gateway</html>", "binance /fapi/v1/order: ? (null)"] {
+            assert!(is_unknown_outcome(&anyhow!("{e}")), "{e}");
+            assert!(is_unknown_outcome(&anyhow!("{e}").context("place leg 2")), "context on top: {e}");
+        }
+        let c = reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_millis(300)).build().unwrap();
+        // nothing listens: connect refused
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", closed.local_addr().unwrap());
+        drop(closed);
+        let e: anyhow::Error = c.get(&url).send().await.unwrap_err().into();
+        assert!(!is_unknown_outcome(&e), "{e:#}");
+        // connected, no answer in time: the venue may have the order
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let e: anyhow::Error = c.get(format!("http://{}/", silent.local_addr().unwrap())).send().await.unwrap_err().into();
+        assert!(is_unknown_outcome(&e), "{e:#}");
+        // the answer breaks off mid-body
+        let cut = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = cut.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = cut.accept().unwrap();
+            let _ = s.read(&mut [0u8; 1024]);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"orderId\"");
+        });
+        let r = c.get(format!("http://{addr}/")).send().await.unwrap();
+        let e: anyhow::Error = r.text().await.unwrap_err().into();
+        assert!(is_unknown_outcome(&e), "{e:#}");
+        drop(silent);
+    }
+
+    #[test]
+    fn attached_tpsl() {
+        use futures_util::FutureExt;
+        let a = tpsl::Attach { tp: Some(110.04), sl: Some(90.0), trigger: tpsl::Trigger::Mark };
+        let o = |close: bool, kind: Kind, attach| OrderReq { symbol: "BTCUSDT".into(), pos: Side::Buy, close, kind, qty: 1.0, client_id: None, attach };
+        let lim = Kind::Limit { price: 100.0, tif: Tif::Gtc };
+        // opening hedge long: whole-position TP/SL rides on the order, prices on the tick grid
+        let b = bybit_body(&o(false, lim, Some(a)), Mode::Hedge, "1", Some("100.0"), 100.0, 0.1);
+        assert_eq!(b, json!({"category": "linear", "symbol": "BTCUSDT", "side": "Buy", "qty": "1", "positionIdx": 1, "reduceOnly": false,
+            "orderType": "Limit", "price": "100.0", "timeInForce": "GTC", "tpslMode": "Full",
+            "takeProfit": "110.0", "tpTriggerBy": "MarkPrice", "tpOrderType": "Market", "stopLoss": "90.0", "slTriggerBy": "MarkPrice", "slOrderType": "Market"}));
+        // SL only, on last price
+        let b = bybit_body(&o(false, Kind::Market, Some(tpsl::Attach { tp: None, sl: Some(95.0), trigger: tpsl::Trigger::Last })), Mode::OneWay, "1", None, 100.0, 0.1);
+        assert_eq!((b.get("takeProfit"), b["stopLoss"].as_str(), b["slTriggerBy"].as_str(), b.get("tpTriggerBy")), (None, Some("95.0"), Some("LastPrice"), None));
+        // without attach the body is what it was
+        assert_eq!(bybit_body(&o(false, lim, None), Mode::Hedge, "1", Some("100.0"), 100.0, 0.1),
+            json!({"category": "linear", "symbol": "BTCUSDT", "side": "Buy", "qty": "1", "positionIdx": 1, "reduceOnly": false, "orderType": "Limit", "price": "100.0", "timeInForce": "GTC"}));
+        // refused before anything is sent: a close, a trailing stop, an empty or bad attach, a venue without it
+        let k = Keys { key: "k".into(), secret: "s".into(), extra: None, demo: false };
+        let r = Rules { tick: 0.1, step: 0.001, min_qty: 0.001, min_notional: 5.0 };
+        let err = |ex: Exchange, req: OrderReq| place(ex, &k, &req, &r, 100.0, Mode::OneWay).now_or_never().expect("refused without a request").unwrap_err().to_string();
+        assert!(err(Exchange::Bybit, o(true, Kind::Market, Some(a))).contains("opens a position"));
+        assert!(err(Exchange::Bybit, o(false, Kind::Trailing { callback_pct: 1.0, activation: None }, Some(a))).contains("trailing"));
+        assert!(err(Exchange::Bybit, o(false, lim, Some(tpsl::Attach { tp: None, sl: None, trigger: tpsl::Trigger::Mark }))).contains("neither"));
+        assert!(err(Exchange::Bybit, o(false, lim, Some(tpsl::Attach { tp: Some(f64::NAN), ..a }))).contains("invalid TP/SL"));
+        assert!(err(Exchange::Binance, o(false, lim, Some(a))).contains("cannot be attached"));
+        assert!(caps(Exchange::Bybit).attach_tpsl && !caps(Exchange::Binance).attach_tpsl && !caps(Exchange::Okx).attach_tpsl);
+        // old persisted requests (no attach field) still load
+        let old: OrderReq = serde_json::from_str(r#"{"symbol":"BTCUSDT","pos":"Buy","close":false,"kind":"Market","qty":1.0,"client_id":null}"#).unwrap();
+        assert_eq!(old.attach, None);
+        let back: OrderReq = serde_json::from_str(&serde_json::to_string(&o(false, lim, Some(a))).unwrap()).unwrap();
+        assert_eq!(back.attach, Some(a));
+    }
+
     #[test]
     fn contract_types() {
         // TP/SL exists on the two verified venues only
         assert!(caps(Exchange::Bybit).tpsl && caps(Exchange::Binance).tpsl);
         assert!(![Exchange::Okx, Exchange::Bitget, Exchange::Gate, Exchange::Kraken, Exchange::Hyperliquid, Exchange::Lighter].iter().any(|e| caps(*e).tpsl));
         // an order request survives JSON (jobs persist them)
-        let r = OrderReq { symbol: "BTCUSDT".into(), pos: Side::Sell, close: true, kind: Kind::Stop { trigger: 95_000.0, limit: Some(94_900.0), by_mark: true }, qty: 0.5, client_id: Some("t1x".into()) };
+        let r = OrderReq { symbol: "BTCUSDT".into(), pos: Side::Sell, close: true, kind: Kind::Stop { trigger: 95_000.0, limit: Some(94_900.0), by_mark: true }, qty: 0.5, client_id: Some("t1x".into()), attach: None };
         let back: OrderReq = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert_eq!(back, r);
         let t: tpsl::Trigger = serde_json::from_str(&serde_json::to_string(&tpsl::Trigger::Last).unwrap()).unwrap();

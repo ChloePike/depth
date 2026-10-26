@@ -1124,7 +1124,7 @@ impl Engine {
         let (Some(rt), account, ctx, o) = (self.rt.as_ref(), self.account.clone(), ctx.clone(), o.clone()) else { return };
         let opp = |s: depth::Side| if s == depth::Side::Buy { depth::Side::Sell } else { depth::Side::Buy };
         let req = OrderReq {
-            symbol: o.symbol.clone(), close: o.reduce_only, kind: trade::Kind::Limit { price, tif: trade::Tif::Gtc }, qty: o.qty - o.filled, client_id: None,
+            symbol: o.symbol.clone(), close: o.reduce_only, kind: trade::Kind::Limit { price, tif: trade::Tif::Gtc }, qty: o.qty - o.filled, client_id: None, attach: None,
             // the position the order acts on: its own side when opening, the other one when reducing
             pos: o.pos.unwrap_or(if o.reduce_only { opp(o.side) } else { o.side }),
         };

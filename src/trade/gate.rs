@@ -386,7 +386,7 @@ mod tests {
         assert_eq!(unified("BTC_USDT"), "BTCUSDT");
         // BTC_USDT: 0.0001 BTC per contract; 0.00257 BTC -> 0.0025 -> 25 contracts
         let r = Rules { tick: 0.1, step: 0.0001, min_qty: 0.0001, min_notional: 0.0 };
-        let req = OrderReq { symbol: "BTCUSDT".into(), pos: Side::Sell, close: false, kind: Kind::Limit { price: 84000.04, tif: Tif::PostOnly }, qty: 0.00257, client_id: None };
+        let req = OrderReq { symbol: "BTCUSDT".into(), pos: Side::Sell, close: false, kind: Kind::Limit { price: 84000.04, tif: Tif::PostOnly }, qty: 0.00257, client_id: None, attach: None };
         let (qty, px) = checked(&req, &r, 84000.0).unwrap();
         let contracts = (qty.parse::<f64>().unwrap() / r.step).round() as i64;
         let b = order_body(&req, contracts, px.as_deref()).unwrap();
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn open_close_bodies() {
-        let o = |pos: Side, close: bool, kind: Kind| OrderReq { symbol: "ETHUSDT".into(), pos, close, kind, qty: 1.0, client_id: None };
+        let o = |pos: Side, close: bool, kind: Kind| OrderReq { symbol: "ETHUSDT".into(), pos, close, kind, qty: 1.0, client_id: None, attach: None };
         // (pos, close) -> size sign; reduce_only marks the close in both modes
         for (pos, close, sign) in [(Side::Buy, false, 1), (Side::Buy, true, -1), (Side::Sell, false, -1), (Side::Sell, true, 1)] {
             let b = order_body(&o(pos, close, Kind::Market), 7, None).unwrap();

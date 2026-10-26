@@ -96,6 +96,17 @@ pub fn bybit_body(req: &OrderReq, mode: Mode, qty: &str, px: Option<&str>, ref_p
             b["bboLevel"] = level.to_string().into();
         }
     }
+    // whole-position TP/SL that the venue attaches to the position at fill (trade::place refuses it on a close)
+    if let Some(a) = req.attach.filter(|_| !req.close) {
+        let by = match a.trigger { tpsl::Trigger::Mark => "MarkPrice", tpsl::Trigger::Last => "LastPrice" };
+        b["tpslMode"] = "Full".into();
+        for (px, p, f) in [(a.tp, "tp", "takeProfit"), (a.sl, "sl", "stopLoss")] {
+            let Some(px) = px else { continue };
+            b[f] = fmt_step(px, tick, false).into();
+            b[format!("{p}TriggerBy")] = by.into();
+            b[format!("{p}OrderType")] = "Market".into();
+        }
+    }
     b
 }
 
@@ -224,6 +235,49 @@ pub async fn cancel(k: &Keys, symbol: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// `/v5/order/cancel-all` body: the whole USDT linear account, one order class: resting orders
+/// (`Order`), or conditional orders except TP/SL and trailing stops (`StopOrder` + `Stop`).
+pub(super) fn cancel_all_body(conditional: bool) -> Value {
+    let mut b = json!({"category": "linear", "settleCoin": "USDT", "orderFilter": if conditional { "StopOrder" } else { "Order" }});
+    if conditional { b["stopOrderType"] = "Stop".into(); }
+    b
+}
+
+/// Order ids a cancel-all answer lists as cancelled.
+fn cancelled_ids(v: &Value) -> Result<Vec<String>> {
+    if v["success"] == "0" { bail!("not accepted (success 0)"); }
+    Ok(v["list"].as_array().into_iter().flatten().filter_map(|o| o["orderId"].as_str().map(String::from)).collect())
+}
+
+/// Given rows the cancel-all calls did not report cancelled that still need a single cancel: trigger
+/// rows (trailing stops, which no bulk filter reaches without taking TP/SL too), and every plain
+/// row when the resting-order call failed (plain rows missing from a good answer already filled).
+fn leftovers<'a>(orders: &'a [OpenOrder], done: &'a std::collections::HashSet<String>, plain_ok: bool) -> impl Iterator<Item = &'a OpenOrder> {
+    orders.iter().filter(move |o| !done.contains(&o.id) && (o.trigger.is_some() || !plain_ok))
+}
+
+/// Every resting and conditional order of the USDT linear account, given or not (two cancel-all
+/// calls), then `leftovers` one by one. TP/SL stay (tpsl::cancel_all): the venue's only bulk filter
+/// for them also takes conditional entries and trailing stops. A call cancels at most 500 orders
+/// (picked at random); hitting that cap is reported as a failure line.
+pub async fn cancel_all(k: &Keys, orders: &[OpenOrder]) -> Result<CancelReport> {
+    let (mut rep, mut done, mut plain_ok) = (CancelReport::default(), std::collections::HashSet::new(), false);
+    for conditional in [false, true] {
+        let what = if conditional { "conditional orders" } else { "resting orders" };
+        match bybit(k, false, "/v5/order/cancel-all", cancel_all_body(conditional)).await.and_then(|v| cancelled_ids(&v)) {
+            Ok(ids) => {
+                if ids.len() >= 500 { rep.failed.push(format!("bybit cancel-all {what}: 500 cancelled, the most one call takes; more may still be open")); }
+                rep.sent += ids.len();
+                done.extend(ids);
+                plain_ok |= !conditional;
+            }
+            Err(e) => rep.failed.push(format!("bybit cancel-all {what}: {e:#}")),
+        }
+    }
+    for o in leftovers(orders, &done, plain_ok) { rep.add(format!("{} {}", o.symbol, o.id), cancel(k, &o.symbol, &o.id).await); }
+    Ok(rep)
+}
+
 pub async fn positions(k: &Keys) -> Result<Vec<Position>> {
     let v = bybit(k, true, "/v5/position/list", json!({"category": "linear", "settleCoin": "USDT"})).await?;
     Ok(v["list"].as_array().into_iter().flatten().filter(|p| n(&p["size"]) > 0.0).map(bybit_position).collect())
@@ -233,6 +287,22 @@ pub async fn open_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
     let rows = realtime(k, "linear", None).await?;
     // TP/SL rows live in the same list; they are reported by tpsl::list instead
     Ok(rows.iter().filter(|o| tpsl::bybit_row(o).is_none()).map(bybit_order).collect())
+}
+
+/// An order row found by orderLinkId: open while New / PartiallyFilled / Untriggered.
+fn bybit_found(o: &Value) -> Found {
+    if matches!(o["orderStatus"].as_str(), Some("New" | "PartiallyFilled" | "Untriggered")) { return Found::Open(bybit_order(o)); }
+    Found::Done { id: o["orderId"].as_str().unwrap_or_default().into(), filled: crate::opt_num(&o["cumExecQty"]).unwrap_or(0.0), status: o["orderStatus"].as_str().unwrap_or_default().into() }
+}
+
+/// Our order by orderLinkId, one call each (50/s per UID): realtime answers for open and the last
+/// 500 closed orders (openOnly does not apply to an orderLinkId query), then history (7 days).
+pub async fn order_by_client_id(k: &Keys, symbol: &str, cid: &str) -> Result<Option<Found>> {
+    for path in ["/v5/order/realtime", "/v5/order/history"] {
+        let v = bybit(k, true, path, json!({"category": "linear", "symbol": symbol, "orderLinkId": cid})).await?;
+        if let Some(o) = v["list"].as_array().and_then(|l| l.first()) { return Ok(Some(bybit_found(o))); }
+    }
+    Ok(None)
 }
 
 /// Unified account totals from a wallet row (REST `wallet-balance` list[0] and the `wallet` push share the fields).
@@ -282,14 +352,14 @@ pub async fn stream(k: Keys, tx: AccTx) {
             .sub(json!({"op": "subscribe", "req_id": "opt", "args": ["position.option"]}).to_string())
             .sub(json!({"op": "subscribe", "req_id": "spot", "args": ["order.spot"]}).to_string())
             .ping(std::time::Duration::from_secs(20), r#"{"op":"ping"}"#);
-        let mut auth_failed = false;
+        let (mut auth_failed, mut up) = (false, false);
         let r = ws::once(&spec, |f| {
             let ws::Frame::Text(s) = f else { return true };
             let Ok(v) = serde_json::from_str::<Value>(s) else { return true };
             let send = |e: AccEvent| { let _ = tx.send((ex, e)); };
             match (v["op"].as_str(), v["topic"].as_str()) {
                 (Some("auth"), _) if v["success"] == false => { eprintln!("[bybit account] auth failed: {}", v["ret_msg"]); auth_failed = true; return false; }
-                (Some("subscribe"), _) if v["success"] == true && v["req_id"] != "opt" && v["req_id"] != "spot" => send(AccEvent::Resync),
+                (Some("subscribe"), _) if v["success"] == true && v["req_id"] != "opt" && v["req_id"] != "spot" => { up = true; send(AccEvent::Resync) }
                 (_, Some("order.spot")) => send(AccEvent::SpotDirty),
                 (_, Some("position.option")) => for p in v["data"].as_array().into_iter().flatten().filter_map(bybit_opt_pos) { send(AccEvent::OptPos(p)); },
                 (_, Some("position.linear")) => for p in v["data"].as_array().into_iter().flatten() {
@@ -304,7 +374,10 @@ pub async fn stream(k: Keys, tx: AccTx) {
                     let open = matches!(o["orderStatus"].as_str(), Some("New" | "PartiallyFilled" | "Untriggered"));
                     send(if open { AccEvent::Order(bybit_order(o)) } else { AccEvent::OrderDone { id: o["orderId"].as_str().unwrap_or_default().into() } });
                 },
-                (_, Some("execution.linear")) => for f in v["data"].as_array().into_iter().flatten().filter_map(bybit_fill) { send(AccEvent::Fill(f)); },
+                (_, Some("execution.linear")) => for f in v["data"].as_array().into_iter().flatten() {
+                    if let Some(l) = bybit_liquidation(f) { send(l); }
+                    if let Some(f) = bybit_fill(f) { send(AccEvent::Fill(f)); }
+                },
                 (_, Some("wallet")) => for w in v["data"].as_array().into_iter().flatten().filter(|w| w["accountType"] == "UNIFIED") {
                     send(AccEvent::Wallet(balance_of(w)));
                 },
@@ -313,8 +386,18 @@ pub async fn stream(k: Keys, tx: AccTx) {
             true
         }).await;
         if let Err(e) = r { eprintln!("[bybit account] {e:#}"); }
+        // once per lost session (a reconnect that never subscribes sends nothing)
+        if up { let _ = tx.send((ex, AccEvent::Down)); }
         tokio::time::sleep(std::time::Duration::from_secs(if auth_failed { 60 } else { 2 })).await;
     }
+}
+
+/// One of our positions closed by the venue: a liquidation (BustTrade) or auto-deleveraging (AdlTrade)
+/// execution, one event per execution. `side` is the position's (the execution closes it: the opposite side).
+fn bybit_liquidation(f: &Value) -> Option<AccEvent> {
+    if !matches!(f["execType"].as_str(), Some("BustTrade" | "AdlTrade")) { return None; }
+    Some(AccEvent::Liquidated { symbol: f["symbol"].as_str()?.into(), side: if f["side"] == "Sell" { Side::Buy } else { Side::Sell },
+        qty: crate::opt_num(&f["execQty"]).unwrap_or(0.0), price: crate::opt_num(&f["execPrice"]).unwrap_or(0.0) })
 }
 
 /// One Bybit execution (REST list or `execution.linear` push); funding / settlement rows are not fills.
@@ -519,6 +602,62 @@ mod tests {
         // a full page with an empty cursor is the last one; a missing list is an empty page
         assert_eq!(realtime_page(&json!({"list": rows(0, 50), "nextPageCursor": ""})).1, None);
         assert_eq!(realtime_page(&json!({})), (vec![], None));
+    }
+
+    #[test]
+    fn cancel_all_scope_and_leftovers() {
+        assert_eq!(cancel_all_body(false), json!({"category": "linear", "settleCoin": "USDT", "orderFilter": "Order"}));
+        assert_eq!(cancel_all_body(true), json!({"category": "linear", "settleCoin": "USDT", "orderFilter": "StopOrder", "stopOrderType": "Stop"}));
+        // documented answer shape; success "0" is a failure
+        let ids = cancelled_ids(&json!({"list": [{"orderId": "1616024329462743808", "orderLinkId": "1616024329462743809"}, {"orderId": "b", "orderLinkId": ""}], "success": "1"})).unwrap();
+        assert_eq!(ids, ["1616024329462743808", "b"]);
+        assert!(cancelled_ids(&json!({"list": [], "success": "0"})).is_err());
+        assert_eq!(cancelled_ids(&json!({"list": []})).unwrap(), Vec::<String>::new());
+        let row = |id: &str, trigger: Option<f64>| OpenOrder { ex: Exchange::Bybit, symbol: "BTCUSDT".into(), id: id.into(), side: Side::Sell, price: 0.0, qty: 1.0, filled: 0.0,
+            kind: "Market".into(), tif: String::new(), reduce_only: true, ts: 0, pos: None, client_id: None, trigger };
+        let orders = [row("plain", None), row("cond", Some(90.0)), row("trail", Some(95.0)), row("filled", None)];
+        let done: std::collections::HashSet<String> = ["plain".to_string(), "cond".to_string()].into();
+        let ids = |plain_ok| leftovers(&orders, &done, plain_ok).map(|o| o.id.as_str()).collect::<Vec<_>>();
+        // the trailing stop no bulk call reached goes one by one; a plain row missing from a good answer is gone already
+        assert_eq!(ids(true), ["trail"]);
+        // the resting-order call failed: its plain rows go one by one too
+        assert_eq!(ids(false), ["trail", "filled"]);
+    }
+
+    #[test]
+    fn liquidation_executions() {
+        // execution.linear push row (docs fields) of a liquidated long: not a fill, one Liquidated for the long
+        let bust = json!({"category": "linear", "symbol": "BTCUSDT", "execFee": "0.3", "execId": "7e2ae69c", "execPrice": "84000.5", "execQty": "0.25",
+            "execType": "BustTrade", "execValue": "21000", "isMaker": false, "orderId": "1b4e", "orderLinkId": "", "orderPrice": "84000.5", "orderQty": "0.25",
+            "orderType": "Market", "side": "Sell", "execTime": "1672364174443", "closedSize": "0.25", "execPnl": "-900"});
+        assert!(bybit_fill(&bust).is_none());
+        assert!(matches!(bybit_liquidation(&bust), Some(AccEvent::Liquidated { ref symbol, side: Side::Buy, qty, price }) if symbol == "BTCUSDT" && qty == 0.25 && price == 84000.5));
+        // auto-deleveraged short (the closing execution buys)
+        let adl = json!({"symbol": "ETHUSDT", "execType": "AdlTrade", "side": "Buy", "execQty": "1", "execPrice": "2500"});
+        assert!(matches!(bybit_liquidation(&adl), Some(AccEvent::Liquidated { side: Side::Sell, .. })));
+        // ordinary trades and funding rows are not liquidations
+        for t in ["Trade", "Funding"] {
+            let mut r = bust.clone();
+            r["execType"] = t.into();
+            assert!(bybit_liquidation(&r).is_none());
+        }
+    }
+
+    #[test]
+    fn found_by_order_link_id() {
+        // /v5/order/realtime rows (docs fields): open while New, done with its status and fill otherwise
+        let row = json!({"orderId": "fd4300ae", "orderLinkId": "t1a2l0", "symbol": "ETHUSDT", "price": "1600.00", "qty": "0.10", "side": "Buy", "positionIdx": 1,
+            "orderStatus": "New", "orderType": "Limit", "timeInForce": "GTC", "cumExecQty": "0.00", "reduceOnly": false, "triggerPrice": "", "createdTime": "1684738540559"});
+        let Found::Open(o) = bybit_found(&row) else { panic!("open") };
+        assert_eq!((o.id.as_str(), o.client_id.as_deref(), o.pos, o.price, o.trigger), ("fd4300ae", Some("t1a2l0"), Some(Side::Buy), 1600.0, None));
+        let mut done = row.clone();
+        done["orderStatus"] = "PartiallyFilledCanceled".into();
+        done["cumExecQty"] = "0.04".into();
+        let Found::Done { id, filled, status } = bybit_found(&done) else { panic!("done") };
+        assert_eq!((id.as_str(), filled, status.as_str()), ("fd4300ae", 0.04, "PartiallyFilledCanceled"));
+        let mut cond = row.clone();
+        cond["orderStatus"] = "Untriggered".into();
+        assert!(matches!(bybit_found(&cond), Found::Open(_)));
     }
 
     #[test]

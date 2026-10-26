@@ -502,7 +502,7 @@ mod tests {
         assert!(close(b.maint_margin.unwrap(), 10.0) && close(b.mm_rate.unwrap(), 10.0 / 9950.0));
         // a resting opening buy of 1 @90 at 10x holds 9; a resting close holds nothing
         let o = |id: &str, close| DemoOrder { id: id.into(), ex: Exchange::Bybit, market: Market::Perp, req: OrderReq { symbol: BTC.into(), pos: Buy, close,
-            kind: Kind::Limit { price: 90.0, tif: Tif::Gtc }, qty: 1.0, client_id: None }, filled: 0.0, avg: 0.0, ts: 3, dir: 0 };
+            kind: Kind::Limit { price: 90.0, tif: Tif::Gtc }, qty: 1.0, client_id: None, attach: None }, filled: 0.0, avg: 0.0, ts: 3, dir: 0 };
         s.record(3, EvKind::Place { o: o("open", false) });
         s.record(3, EvKind::Place { o: o("close", true) });
         assert!(close(s.balance().available, 9741.0));
@@ -609,7 +609,7 @@ mod tests {
         let mut s = sim(1000.0);
         s.record(1, by(Buy, Buy, 100.123456789, 0.001, 0.1 + 0.2));
         let o = DemoOrder { id: "o".into(), ex: Exchange::Okx, market: Market::Spot, req: OrderReq { symbol: BTC.into(), pos: Sell, close: false,
-            kind: Kind::Stop { trigger: 1e-7, limit: Some(3.0), by_mark: false }, qty: 1.0 / 3.0, client_id: Some("c".into()) }, filled: 0.0, avg: 0.0, ts: 2, dir: -1 };
+            kind: Kind::Stop { trigger: 1e-7, limit: Some(3.0), by_mark: false }, qty: 1.0 / 3.0, client_id: Some("c".into()), attach: None }, filled: 0.0, avg: 0.0, ts: 2, dir: -1 };
         s.record(2, EvKind::Place { o });
         s.record(3, EvKind::TpSl { t: TpSl { id: "t".into(), ex: Exchange::Bybit, symbol: BTC.into(), pos: Buy, take_profit: false, trigger_px: 90.5, qty: Some(0.5), trigger: trade::tpsl::Trigger::Last } });
         for e in &s.pending { assert_eq!(Ev::from_row(&e.row()).as_ref(), Some(e)); }

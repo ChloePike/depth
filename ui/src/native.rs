@@ -285,7 +285,7 @@ impl App {
                 let p = self.eng.account.lock().unwrap().positions.iter().find(|p| p.ex == e && p.symbol == symbol && p.side == pos).cloned().ok_or("position not found")?;
                 let qty = f("qty").unwrap_or(p.qty).min(p.qty);
                 let kind = match f("price") { Some(px) => Kind::Limit { price: px, tif: Tif::Gtc }, None => Kind::Market };
-                self.eng.submit(e, OrderReq { symbol, pos, close: true, kind, qty, client_id: None }, p.mark, ctx);
+                self.eng.submit(e, OrderReq { symbol, pos, close: true, kind, qty, client_id: None, attach: None }, p.mark, ctx);
             }
             "reverse_position" => {
                 // close at market, then open the same size on the other side, both on the position's venue
@@ -295,8 +295,8 @@ impl App {
                 let pos = if s("side") == "short" { Side::Sell } else { Side::Buy };
                 let p = self.eng.account.lock().unwrap().positions.iter().find(|p| p.ex == e && p.symbol == symbol && p.side == pos).cloned().ok_or("position not found")?;
                 let other = if pos == Side::Buy { Side::Sell } else { Side::Buy };
-                self.eng.submit(e, OrderReq { symbol: symbol.clone(), pos, close: true, kind: Kind::Market, qty: p.qty, client_id: None }, p.mark, ctx);
-                self.eng.submit(e, OrderReq { symbol, pos: other, close: false, kind: Kind::Market, qty: p.qty, client_id: None }, p.mark, ctx);
+                self.eng.submit(e, OrderReq { symbol: symbol.clone(), pos, close: true, kind: Kind::Market, qty: p.qty, client_id: None, attach: None }, p.mark, ctx);
+                self.eng.submit(e, OrderReq { symbol, pos: other, close: false, kind: Kind::Market, qty: p.qty, client_id: None, attach: None }, p.mark, ctx);
             }
             "set_tpsl" => {
                 let pos = if s("pos") == "short" { Side::Sell } else { Side::Buy };
@@ -430,7 +430,7 @@ impl App {
             _ => Kind::Limit { price, tif },
         };
         if matches!(kind, Kind::Limit { .. }) && !(price > 0.0) { return Err("price must be positive".into()); }
-        Ok(OrderReq { symbol: trade::symbol(&self.eng.base), pos, close: v["close"].as_bool().unwrap_or(false), kind, qty, client_id: None })
+        Ok(OrderReq { symbol: trade::symbol(&self.eng.base), pos, close: v["close"].as_bool().unwrap_or(false), kind, qty, client_id: None, attach: None })
     }
 
     /// Route through the planner (fixed venue = one leg) from local books and account state.

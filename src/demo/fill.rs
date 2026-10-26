@@ -305,7 +305,7 @@ impl Sim {
         let held = self.held(t.ex, &t.symbol, t.pos);
         let qty = t.qty.map_or(held, |q| q.min(held));
         if qty <= 0.0 { return; }
-        let req = OrderReq { symbol: t.symbol.clone(), pos: t.pos, close: true, kind: Kind::Market, qty, client_id: None };
+        let req = OrderReq { symbol: t.symbol.clone(), pos: t.pos, close: true, kind: Kind::Market, qty, client_id: None, attach: None };
         let o = DemoOrder { id: t.id.clone(), ex: t.ex, market: Market::Perp, req, filled: 0.0, avg: 0.0, ts: now, dir: 0 };
         let levels = self.sweep(o.req.side() == Side::Buy, qty, px, book);
         self.record(now, EvKind::Place { o: o.clone() });
@@ -353,7 +353,7 @@ mod tests {
     const R: Rules = Rules { tick: 0.1, step: 0.001, min_qty: 0.001, min_notional: 0.0 };
     const BY: Exchange = Exchange::Bybit;
 
-    fn req(pos: Side, close: bool, kind: Kind, qty: f64) -> OrderReq { OrderReq { symbol: BTC.into(), pos, close, kind, qty, client_id: None } }
+    fn req(pos: Side, close: bool, kind: Kind, qty: f64) -> OrderReq { OrderReq { symbol: BTC.into(), pos, close, kind, qty, client_id: None, attach: None } }
     fn lim(price: f64, tif: Tif) -> Kind { Kind::Limit { price, tif } }
     fn bk<'a>(bids: &'a [(f64, f64)], asks: &'a [(f64, f64)]) -> Option<Levels<'a>> { Some(Levels { bids, asks }) }
     fn close(a: f64, b: f64) -> bool { (a - b).abs() < 1e-9 }

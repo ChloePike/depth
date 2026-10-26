@@ -33,6 +33,7 @@ fn pm_path(fapi: &str) -> &str {
         "/fapi/v3/account" => "/papi/v1/account",
         "/fapi/v3/positionRisk" => "/papi/v1/um/positionRisk",
         "/fapi/v1/openOrders" => "/papi/v1/um/openOrders",
+        "/fapi/v1/allOpenOrders" => "/papi/v1/um/allOpenOrders",
         "/fapi/v1/order" => "/papi/v1/um/order",
         "/fapi/v1/positionSide/dual" => "/papi/v1/um/positionSide/dual",
         "/fapi/v1/symbolConfig" => "/papi/v1/um/symbolConfig",
@@ -197,6 +198,8 @@ pub async fn can_trade(k: &Keys) -> Result<Option<bool>> {
 }
 
 pub async fn amend(k: &Keys, o: &OpenOrder, px: String, r: &Rules) -> Result<()> {
+    // the algo service has no modify
+    if o.trigger.is_some() { bail!("binance: a conditional or trailing order cannot be amended; cancel it and place a new one"); }
     binance(k, reqwest::Method::PUT, "/fapi/v1/order", &[("symbol", o.symbol.clone()), ("orderId", o.id.clone()),
         ("side", side_str(Exchange::Binance, o.side).into()), ("quantity", fmt_step(o.qty, r.step, true)), ("price", px)]).await?;
     Ok(())
@@ -205,6 +208,40 @@ pub async fn amend(k: &Keys, o: &OpenOrder, px: String, r: &Rules) -> Result<()>
 pub async fn cancel(k: &Keys, symbol: &str, id: &str) -> Result<()> {
     binance(k, reqwest::Method::DELETE, "/fapi/v1/order", &[("symbol", symbol.into()), ("orderId", id.into())]).await?;
     Ok(())
+}
+
+/// Algo-service rows (trigger Some: conditional and trailing orders) cancel by algoId, the rest by orderId.
+pub async fn cancel_order(k: &Keys, o: &OpenOrder) -> Result<()> {
+    if o.trigger.is_some() { tpsl::binance_cancel(k, &o.id).await } else { cancel(k, &o.symbol, &o.id).await }
+}
+
+/// Distinct symbols in first-seen order, with how many of the orders each has.
+fn by_symbol<'a>(orders: impl Iterator<Item = &'a OpenOrder>) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = vec![];
+    for o in orders { match out.iter_mut().find(|(s, _)| *s == o.symbol) { Some(e) => e.1 += 1, None => out.push((o.symbol.clone(), 1)) } }
+    out
+}
+
+/// One bulk call per symbol; a refused symbol is reported and the others still go out. `sent` counts
+/// the given orders of each accepted symbol (the venue does not say how many it cancelled).
+async fn per_symbol<F, Fut>(rep: &mut CancelReport, groups: Vec<(String, usize)>, mut call: F)
+where F: FnMut(String) -> Fut, Fut: std::future::Future<Output = Result<()>> {
+    for (sym, n) in groups {
+        match call(sym.clone()).await { Ok(()) => rep.sent += n, Err(e) => rep.failed.push(format!("binance {sym} all open orders: {e:#}")) }
+    }
+}
+
+/// Every resting order of each symbol in `orders` (DELETE allOpenOrders, weight 1 per symbol; PM
+/// /papi/v1/um/allOpenOrders; symbols not in `orders` are not touched), then each algo row
+/// (conditional / trailing) by algoId, weight 1 each. TP/SL stay (tpsl::cancel_all): the venue's
+/// per-symbol algo cancel-all would take them too.
+pub async fn cancel_all(k: &Keys, orders: &[OpenOrder]) -> Result<CancelReport> {
+    let mut rep = CancelReport::default();
+    per_symbol(&mut rep, by_symbol(orders.iter().filter(|o| o.trigger.is_none())), |s| async move {
+        binance(k, reqwest::Method::DELETE, "/fapi/v1/allOpenOrders", &[("symbol", s)]).await.map(|_| ())
+    }).await;
+    for o in orders.iter().filter(|o| o.trigger.is_some()) { rep.add(format!("{} {}", o.symbol, o.id), tpsl::binance_cancel(k, &o.id).await); }
+    Ok(rep)
 }
 
 pub async fn positions(k: &Keys) -> Result<Vec<Position>> {
@@ -224,16 +261,58 @@ pub async fn positions(k: &Keys) -> Result<Vec<Position>> {
     }).collect())
 }
 
-pub async fn open_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
-    let ex = Exchange::Binance;
-    let v = binance(k, reqwest::Method::GET, "/fapi/v1/openOrders", &[]).await?;
-    Ok(v.as_array().into_iter().flatten().map(|o| OpenOrder {
-        ex, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].to_string(),
+/// One REST order row (`openOrders`, `order` query).
+fn binance_order(o: &Value) -> OpenOrder {
+    OpenOrder {
+        ex: Exchange::Binance, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].to_string(),
         side: if o["side"] == "SELL" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["origQty"]), filled: n(&o["executedQty"]),
         tif: o["timeInForce"].as_str().unwrap_or_default().into(), kind: o["type"].as_str().unwrap_or_default().into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: o["time"].as_i64().unwrap_or(0),
         pos: match o["positionSide"].as_str() { Some("LONG") => Some(Side::Buy), Some("SHORT") => Some(Side::Sell), _ => None },
         client_id: opt_id(&o["clientOrderId"]), trigger: None,
-    }).collect())
+    }
+}
+
+pub async fn open_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
+    let v = binance(k, reqwest::Method::GET, "/fapi/v1/openOrders", &[]).await?;
+    let mut out: Vec<OpenOrder> = v.as_array().into_iter().flatten().map(binance_order).collect();
+    // conditional entries and trailing stops live in the algo service (its TP/SL rows go to tpsl::list,
+    // which shares this fetch)
+    out.extend(tpsl::binance_algo_rows(k).await?.iter().filter_map(tpsl::binance_algo_order));
+    Ok(out)
+}
+
+/// A queried order (`/fapi/v1/order`): open while NEW / PARTIALLY_FILLED.
+fn binance_found(o: &Value) -> Found {
+    match o["status"].as_str() {
+        Some("NEW" | "PARTIALLY_FILLED") => Found::Open(binance_order(o)),
+        s => Found::Done { id: o["orderId"].to_string(), filled: crate::opt_num(&o["executedQty"]).unwrap_or(0.0), status: s.unwrap_or_default().into() },
+    }
+}
+
+/// A queried algo order (`algoOrder`): open while NEW.
+fn binance_algo_found(o: &Value) -> Option<Found> {
+    Some(match o["algoStatus"].as_str() {
+        Some("NEW") => Found::Open(tpsl::binance_algo_as_order(o)?),
+        s => Found::Done { id: o["algoId"].to_string(), filled: crate::opt_num(&o["executedQty"]).unwrap_or(0.0), status: s.unwrap_or_default().into() },
+    })
+}
+
+/// Our order by client id, one call each, weight 1: `/fapi/v1/order?origClientOrderId=` (PM
+/// /papi/v1/um/order); when that does not know it (-2013) the algo service by clientAlgoId
+/// (conditional and trailing orders; PM /papi/v1/um/algo/algoOrder). Any other answer is an error.
+pub async fn order_by_client_id(k: &Keys, symbol: &str, cid: &str) -> Result<Option<Found>> {
+    let unknown = |e: &anyhow::Error| format!("{e:#}").contains("(-2013)");
+    match binance(k, reqwest::Method::GET, "/fapi/v1/order", &[("symbol", symbol.into()), ("origClientOrderId", cid.into())]).await {
+        Ok(v) => return Ok(Some(binance_found(&v))),
+        Err(e) if !unknown(&e) => return Err(e),
+        Err(_) => {}
+    }
+    let (base, path) = if binance_pm(k).await? { (papi_url(), "/papi/v1/um/algo/algoOrder") } else { (binance_url(), "/fapi/v1/algoOrder") };
+    match binance_at(k, base, reqwest::Method::GET, path, &[("clientAlgoId", cid.into())]).await {
+        Ok(v) => Ok(binance_algo_found(&v)),
+        Err(e) if unknown(&e) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn balance(k: &Keys) -> Result<Balance> {
@@ -275,12 +354,14 @@ pub async fn stream(k: Keys, tx: AccTx) {
         }
     }));
     loop {
+        let mut up = false;
         let res: Result<()> = async {
             let pm = binance_pm(&k).await?;
             let key = listen_key(&k, pm, reqwest::Method::POST).await?;
             // Portfolio Margin: /pm/ws/<key>; USD-M: the routed /private endpoint (unrouted /ws
             // URLs only carry public data since the 2026 split)
             let url = if pm { format!("{}/pm/ws/{key}", binance_ws()) } else { format!("{}/private/ws?listenKey={key}", binance_ws()) };
+            up = true;
             let _ = tx.send((ex, AccEvent::Resync));
             let k2 = k.clone();
             let keepalive = async move {
@@ -317,6 +398,7 @@ pub async fn stream(k: Keys, tx: AccTx) {
                                 price: n(&o["L"]), qty: n(&o["l"]), fee: n(&o["n"]), realized: crate::opt_num(&o["rp"]), ts: o["T"].as_i64().unwrap_or(0),
                             }));
                         }
+                        if let Some(l) = binance_liquidation(o) { send(l); }
                         if matches!(o["X"].as_str(), Some("NEW" | "PARTIALLY_FILLED")) {
                             send(AccEvent::Order(OpenOrder {
                                 ex, symbol: o["s"].as_str().unwrap_or_default().into(), id, side: if o["S"] == "SELL" { Side::Sell } else { Side::Buy },
@@ -332,6 +414,8 @@ pub async fn stream(k: Keys, tx: AccTx) {
                     Some("balanceUpdate" | "outboundAccountPosition") => send(AccEvent::BalanceDirty),
                     Some("ALGO_UPDATE") => if let Some((t, active)) = tpsl::binance_algo_update(&v) {
                         send(if active { AccEvent::TpSl(t) } else { AccEvent::TpSlDone { id: t.id } });
+                    } else if let Some((o, open)) = tpsl::binance_algo_push_order(&v) {
+                        send(if open { AccEvent::Order(o) } else { AccEvent::OrderDone { id: o.id } });
                     },
                     Some("listenKeyExpired") => return false,
                     _ => {}
@@ -341,9 +425,25 @@ pub async fn stream(k: Keys, tx: AccTx) {
             tokio::select! { r = session => r, _ = keepalive => Ok(()) }
         }.await;
         if let Err(e) = res { eprintln!("[binance account] {e:#}"); }
+        // once per session that announced itself with Resync (a failing listenKey sends nothing)
+        if up { let _ = tx.send((ex, AccEvent::Down)); }
         // a paused host (rate limit) fails fast: wait long enough not to spin
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
+}
+
+/// One of our positions closed by the venue: an ORDER_TRADE_UPDATE execution (TRADE, or CALCULATED,
+/// Binance's liquidation execution) of a liquidation or ADL order: type / original type LIQUIDATION,
+/// or the venue's client ids "autoclose-..." / "adl_autoclose". One event per execution; `side` is the
+/// position's (hedge: positionSide; one-way: the opposite of the closing order's side).
+fn binance_liquidation(o: &Value) -> Option<AccEvent> {
+    let c = o["c"].as_str().unwrap_or_default();
+    let liq = o["o"] == "LIQUIDATION" || o["ot"] == "LIQUIDATION" || c.starts_with("autoclose-") || c.starts_with("adl_autoclose");
+    if !liq || !matches!(o["x"].as_str(), Some("TRADE" | "CALCULATED")) { return None; }
+    let px = |f: &str| crate::opt_num(&o[f]).filter(|x| *x > 0.0);
+    Some(AccEvent::Liquidated { symbol: o["s"].as_str()?.into(),
+        side: match o["ps"].as_str() { Some("LONG") => Side::Buy, Some("SHORT") => Side::Sell, _ => if o["S"] == "SELL" { Side::Buy } else { Side::Sell } },
+        qty: px("l").or(px("z")).unwrap_or(0.0), price: px("L").or(px("ap")).unwrap_or(0.0) })
 }
 
 pub async fn fills_window(k: &Keys, symbol: &str, base: &str, path: &str, t0: i64, t1: i64, out: &mut Vec<Fill>) -> Result<()> {
@@ -550,7 +650,7 @@ mod tests {
     #[test]
     fn binance_twap_params_by_mode() {
         let get = |v: &[(&str, String)], k: &str| v.iter().find(|(a, _)| *a == k).map(|(_, b)| b.clone());
-        let o = |pos: Side, close: bool| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind: Kind::Market, qty: 1.0, client_id: None };
+        let o = |pos: Side, close: bool| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind: Kind::Market, qty: 1.0, client_id: None, attach: None };
         let h = binance_twap_params(&o(Side::Buy, true), Mode::Hedge, "0.5", 15, Some("90000"), "t1twap1");
         assert_eq!((get(&h, "side").as_deref(), get(&h, "positionSide").as_deref(), get(&h, "reduceOnly"), get(&h, "duration").as_deref(), get(&h, "limitPrice").as_deref()),
                    (Some("SELL"), Some("LONG"), None, Some("900"), Some("90000")));
@@ -558,5 +658,65 @@ mod tests {
         assert_eq!((get(&w, "side").as_deref(), get(&w, "reduceOnly").as_deref(), get(&w, "positionSide")), (Some("BUY"), Some("true"), None));
         assert_eq!(native_twap(Exchange::Bybit), None);
         assert_eq!(native_twap(Exchange::Binance), Some((5, 1440)));
+    }
+
+    #[test]
+    fn liquidation_updates() {
+        // ORDER_TRADE_UPDATE `o` of a one-way long's liquidation fill (docs field set): the fill arm takes it (x TRADE) and it is a Liquidated for the long
+        let o: Value = serde_json::from_str(r#"{"s":"BTCUSDT","c":"autoclose-1596107620040000020","S":"SELL","o":"LIQUIDATION","f":"IOC","q":"0.014","p":"9910","ap":"9910.5",
+            "sp":"0","x":"TRADE","X":"FILLED","i":8886774,"l":"0.014","z":"0.014","L":"9910.5","N":"USDT","n":"0.5","T":1568879465650,"t":1863,"b":"0","a":"0",
+            "m":false,"R":false,"wt":"CONTRACT_PRICE","ot":"LIQUIDATION","ps":"BOTH","cp":false,"rp":"-120.5","pP":false,"si":0,"ss":0}"#).unwrap();
+        assert_eq!(o["x"], "TRADE");
+        assert!(matches!(binance_liquidation(&o), Some(AccEvent::Liquidated { ref symbol, side: Side::Buy, qty, price }) if symbol == "BTCUSDT" && qty == 0.014 && price == 9910.5));
+        // ADL of a hedge short reported as CALCULATED with only cumulative / average figures
+        let adl = json!({"s": "ETHUSDT", "c": "adl_autoclose", "S": "BUY", "o": "LIMIT", "ot": "LIMIT", "x": "CALCULATED", "X": "FILLED", "l": "0", "z": "2", "L": "0", "ap": "2500", "ps": "SHORT"});
+        assert!(matches!(binance_liquidation(&adl), Some(AccEvent::Liquidated { side: Side::Sell, qty, price, .. }) if qty == 2.0 && price == 2500.0));
+        // our own orders, and a liquidation order that is only acknowledged, are not liquidations
+        let mut own = o.clone();
+        for (k, v) in [("c", "t1m19a2"), ("o", "MARKET"), ("ot", "MARKET")] { own[k] = v.into(); }
+        assert!(binance_liquidation(&own).is_none());
+        let mut ack = o.clone();
+        ack["x"] = "NEW".into();
+        assert!(binance_liquidation(&ack).is_none());
+    }
+
+    #[test]
+    fn found_by_client_id() {
+        // GET /fapi/v1/order (docs fields): FILLED is done with its filled size, NEW is open
+        let q: Value = serde_json::from_str(r#"{"avgPrice":"0.00000","clientOrderId":"t1m19a2","cumQuote":"0","executedQty":"0.004","orderId":1917641,"origQty":"0.40",
+            "origType":"LIMIT","price":"95000","reduceOnly":false,"side":"BUY","positionSide":"BOTH","status":"FILLED","stopPrice":"0","closePosition":false,"symbol":"BTCUSDT",
+            "time":1579276756075,"timeInForce":"GTC","type":"LIMIT","updateTime":1579276756075,"workingType":"CONTRACT_PRICE","priceProtect":false}"#).unwrap();
+        let Found::Done { id, filled, status } = binance_found(&q) else { panic!("done") };
+        assert_eq!((id.as_str(), filled, status.as_str()), ("1917641", 0.004, "FILLED"));
+        let mut open = q.clone();
+        open["status"] = "PARTIALLY_FILLED".into();
+        let Found::Open(o) = binance_found(&open) else { panic!("open") };
+        assert_eq!((o.id.as_str(), o.client_id.as_deref(), o.qty, o.filled, o.trigger), ("1917641", Some("t1m19a2"), 0.4, 0.004, None));
+        // algo query: a reducing stop is still found as an open order (not filtered as TP/SL), a cancelled one is done
+        let a = json!({"algoId": 2146760, "clientAlgoId": "t1m19a3", "algoType": "CONDITIONAL", "orderType": "STOP_MARKET", "symbol": "BTCUSDT", "side": "SELL",
+            "positionSide": "BOTH", "quantity": "0.01", "algoStatus": "NEW", "triggerPrice": "90000", "price": "0", "reduceOnly": true, "createTime": 1750485492076u64});
+        let Some(Found::Open(o)) = binance_algo_found(&a) else { panic!("open algo") };
+        assert_eq!((o.id.as_str(), o.kind.as_str(), o.trigger, o.reduce_only), ("2146760", "stop_market", Some(90000.0), true));
+        let mut c = a.clone();
+        c["algoStatus"] = "CANCELED".into();
+        assert!(matches!(binance_algo_found(&c), Some(Found::Done { ref id, ref status, .. }) if id == "2146760" && status == "CANCELED"));
+    }
+
+    #[test]
+    fn cancel_all_groups_symbols_and_reports_each() {
+        use futures_util::FutureExt;
+        let row = |sym: &str, trigger: Option<f64>| OpenOrder { ex: Exchange::Binance, symbol: sym.into(), id: "1".into(), side: Side::Buy, price: 1.0, qty: 1.0, filled: 0.0,
+            kind: "LIMIT".into(), tif: "GTC".into(), reduce_only: false, ts: 0, pos: None, client_id: None, trigger };
+        let orders = [row("BTCUSDT", None), row("ETHUSDT", None), row("BTCUSDT", None), row("SOLUSDT", Some(150.0)), row("XRPUSDT", None)];
+        let groups = by_symbol(orders.iter().filter(|o| o.trigger.is_none()));
+        assert_eq!(groups, [("BTCUSDT".to_string(), 2), ("ETHUSDT".to_string(), 1), ("XRPUSDT".to_string(), 1)]);
+        // ETH is refused: BTC and XRP still go out and count, ETH is named
+        let mut rep = CancelReport::default();
+        let calls = std::cell::RefCell::new(vec![]);
+        per_symbol(&mut rep, groups, |s| { calls.borrow_mut().push(s.clone()); async move { if s == "ETHUSDT" { Err(anyhow!("binance /fapi/v1/allOpenOrders: busy (-1008)")) } else { Ok(()) } } })
+            .now_or_never().unwrap();
+        assert_eq!(calls.into_inner(), ["BTCUSDT", "ETHUSDT", "XRPUSDT"]);
+        assert_eq!((rep.sent, rep.failed), (3, vec!["binance ETHUSDT all open orders: binance /fapi/v1/allOpenOrders: busy (-1008)".to_string()]));
+        assert_eq!(pm_path("/fapi/v1/allOpenOrders"), "/papi/v1/um/allOpenOrders");
     }
 }

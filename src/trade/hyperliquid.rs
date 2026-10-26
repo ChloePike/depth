@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn orders_from_intent() {
         let a = Asset { coin: "BTC".into(), index: 0, sz_dec: 5 };
-        let req = |pos, close, kind| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind, qty: 0.001, client_id: None };
+        let req = |pos, close, kind| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind, qty: 0.001, client_id: None, attach: None };
         let w = order_wire(&req(Side::Buy, false, Kind::Market), &a, 100_000.0).unwrap();
         assert_eq!((w.b, w.p.as_str(), w.s.as_str(), w.r, w.t.limit.tif), (true, "105000", "0.001", false, "Ioc"));
         // close long = reduce-only sell through the mid
