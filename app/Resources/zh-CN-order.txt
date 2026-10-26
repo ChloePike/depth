@@ -238,3 +238,5 @@ Close this position at market? = 市价平掉这个仓位？
 Close this position at market = 市价平掉这个仓位
 Fill the form with a limit close of the whole position at the touch = 在盘口价填入整个仓位的限价平仓单
 TP/SL is not available on this venue yet = 该交易所暂不支持止盈止损
+placed with the order on %@: the venue protects the position from the fill on. = 随订单一起提交到 %@：从成交那一刻起由交易所保护仓位。
+set by Depth on %@ once this order has filled (kept across restarts). = 此订单在 %@ 成交后由 Depth 设置（重启后仍保留）。

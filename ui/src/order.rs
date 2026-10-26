@@ -7,7 +7,6 @@ use super::{fmt_dp, fmt_px, fmt_qty, l, lf, theme::*};
 use eframe::egui::{self, Align2, Color32, Rect, Response, RichText, Sense, Stroke, Ui};
 use crate::hotkeys::Act;
 use serde_json::{json, Value};
-use std::time::{Duration, Instant};
 
 /// Sends one op to the app (`App::call`) and returns its reply.
 pub type Call<'a> = dyn FnMut(Value) -> Result<Value, String> + 'a;
@@ -36,10 +35,6 @@ fn title(pos: &str, close: bool) -> &'static str {
 
 /// A scaled / TWAP request waiting for confirmation.
 struct Algo { op: &'static str, args: Value, title: String, message: String }
-
-/// TP/SL attached to an opening order: set for the whole position once that venue's position grew
-/// past its size at placement (or given up after two minutes without a resting order).
-struct Waiting { ex: String, symbol: String, pos: String, base_qty: f64, tp: Option<f64>, sl: Option<f64>, trigger: &'static str, until: Instant }
 
 /// One staged TP/SL level of the position sheet; `pct` = amount is % of the position.
 struct Level { tp: bool, price: String, amount: String, pct: bool }
@@ -85,7 +80,6 @@ pub struct OrderPanel {
     twap_random: bool,
     /// leverage sheet open, with the value being chosen
     lev: Option<f64>,
-    waiting: Vec<Waiting>,
     sheet: Option<TpSlSheet>,
     /// last symbol / venue / book click seen, to react to changes
     seen: (String, String, Option<(String, f64)>),
@@ -115,7 +109,7 @@ impl Default for OrderPanel {
             trigger: String::new(), trigger_last: false, stop_limit: false, callback: "1.0".into(), activation: String::new(),
             scaled_from: String::new(), scaled_to: String::new(), scaled_count: 5, scaled_skew: 0.0, scaled_post: true,
             twap_minutes: "15".into(), twap_slices: "10".into(), twap_slip: "10".into(), twap_limit: String::new(), twap_native: true, twap_random: false,
-            lev: None, waiting: vec![], sheet: None, seen: Default::default(), open_settings: None, open_transfer: None, preview: vec![], tick: None, flatten: None, qty_usdt: false, dial_price: false, dial_size: false, sent_ms: 0,
+            lev: None, sheet: None, seen: Default::default(), open_settings: None, open_transfer: None, preview: vec![], tick: None, flatten: None, qty_usdt: false, dial_price: false, dial_size: false, sent_ms: 0,
         }
     }
 }
@@ -418,7 +412,6 @@ impl OrderPanel {
         self.seen = (symbol.clone(), venue.clone(), click);
         if self.price.is_empty() { if let Some(b) = bid { self.price = px_str(b, tick); } }
         if !bbo_levels.contains(&self.bbo_level) { self.bbo_level = bbo_levels.first().copied().unwrap_or(1); }
-        self.check_waiting(st, call);
 
         let use_bbo = self.kind == Kind::Limit && self.bbo_on && !bbo_levels.is_empty();
         let typed_price = (self.kind == Kind::Limit && !use_bbo) || (self.kind == Kind::Stop && self.stop_limit);
@@ -571,19 +564,18 @@ impl OrderPanel {
             self.summary(ui, t, &base, qty_v * ref_px, use_bbo, has_key, qty_v);
             if let Some(e) = &self.error { kit::note(ui, e, dn()); }
             self.position_rows(ui, st, &positions, can_trade, call);
-            let mine: Vec<&Waiting> = self.waiting.iter().filter(|w| w.symbol == symbol).collect();
+            // TP/SL the engine sets once their entry order fills (kept across restarts)
+            let mine: Vec<&Value> = st["tpsl_wait"].as_array().map(|a| a.iter().filter(|w| s(&w["symbol"]) == symbol).collect()).unwrap_or_default();
             if !mine.is_empty() {
                 kit::overline(ui, l("TP/SL waiting for fill"));
-                let mut drop = None;
-                for (i, w) in mine.iter().enumerate() {
+                for w in mine {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("{} · TP {} · SL {}", w.ex, w.tp.map(fmt_px).unwrap_or("–".into()), w.sl.map(fmt_px).unwrap_or("–".into()))).font(mono_m(11.5)).color(fg()));
+                        ui.label(RichText::new(format!("{} · TP {} · SL {}", s(&w["ex"]), f(&w["tp"]).map(fmt_px).unwrap_or("–".into()), f(&w["sl"]).map(fmt_px).unwrap_or("–".into()))).font(mono_m(11.5)).color(fg()));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if close_x(ui, 20.0).on_hover_text(l("Forget this TP/SL")).clicked() { drop = Some(i); }
+                            if close_x(ui, 20.0).on_hover_text(l("Forget this TP/SL")).clicked() { let _ = call(json!({"op": "cancel_tpsl_wait", "ex": w["ex"], "client_id": w["client_id"]})); }
                         });
                     });
                 }
-                if let Some(i) = drop { let id = (mine[i].ex.clone(), mine[i].until); self.waiting.retain(|w| (w.ex.clone(), w.until) != id); }
             }
         });
         ui.add_space(8.0);
@@ -1181,43 +1173,21 @@ impl OrderPanel {
         }
         let tk = Ticket { pos: pos.into(), close: self.close, args, plan, tp, sl, trigger: if self.trig_last { "last" } else { "mark" }, err: None };
         if st["prefs"]["confirm"].as_bool().unwrap_or(true) { self.ticket = Some(tk); }
-        else if let Err(e) = self.place(&tk, st, call) { self.error = Some(e); }
+        else if let Err(e) = self.place(&tk, call) { self.error = Some(e); }
     }
 
-    /// Send a previewed ticket; its TP/SL waits for each leg's position to exist.
-    fn place(&mut self, tk: &Ticket, st: &Value, call: &mut Call) -> Result<(), String> {
+    /// Send a previewed ticket; the place op attaches its TP/SL to the order or has the engine set it
+    /// once the order filled.
+    fn place(&mut self, tk: &Ticket, call: &mut Call) -> Result<(), String> {
         let mut args = tk.args.clone();
         args["op"] = "place".into();
         args["expect"] = tk.plan["legs"].as_array().map(|a| a.iter().map(|l| json!({"ex": l["ex"], "qty": l["qty"]})).collect::<Vec<_>>()).unwrap_or_default().into();
-        let plan = call(args)?;
+        if let Some(v) = tk.tp { args["tp"] = v.into(); }
+        if let Some(v) = tk.sl { args["sl"] = v.into(); }
+        args["trigger"] = tk.trigger.into();
+        call(args)?;
         self.sent_ms = depth::now_ms();
-        if tk.tp.is_some() || tk.sl.is_some() {
-            let symbol = s(&st["trade"]["symbol"]).to_string();
-            let mut exs: Vec<String> = plan["legs"].as_array().map(|a| a.iter().map(|l| s(&l["ex"]).to_string()).collect()).unwrap_or_default();
-            exs.dedup();
-            for ex in exs {
-                let base_qty = st["positions"].as_array().and_then(|a| a.iter().find(|p| s(&p["ex"]) == ex && s(&p["symbol"]) == symbol && s(&p["side"]) == tk.pos)).and_then(|p| f(&p["qty"])).unwrap_or(0.0);
-                self.waiting.push(Waiting { ex, symbol: symbol.clone(), pos: tk.pos.clone(), base_qty, tp: tk.tp, sl: tk.sl, trigger: tk.trigger, until: Instant::now() + Duration::from_secs(120) });
-            }
-        }
         Ok(())
-    }
-
-    /// Applies waiting TP/SL once the position grew; drops them after the window without a resting order.
-    fn check_waiting(&mut self, st: &Value, call: &mut Call) {
-        let positions = st["positions"].as_array().cloned().unwrap_or_default();
-        let orders = st["orders"].as_array().cloned().unwrap_or_default();
-        self.waiting.retain(|w| {
-            let q = positions.iter().find(|p| s(&p["ex"]) == w.ex && s(&p["symbol"]) == w.symbol && s(&p["side"]) == w.pos).and_then(|p| f(&p["qty"])).unwrap_or(0.0);
-            if q > w.base_qty * (1.0 + 1e-9) + 1e-12 {
-                let mut a = json!({"op": "set_tpsl", "ex": w.ex, "symbol": w.symbol, "pos": w.pos, "trigger": w.trigger});
-                if let Some(tp) = w.tp { a["tp"] = tp.into(); }
-                if let Some(sl) = w.sl { a["sl"] = sl.into(); }
-                let _ = call(a);
-                return false;
-            }
-            !(Instant::now() > w.until && !orders.iter().any(|o| s(&o["ex"]) == w.ex && s(&o["symbol"]) == w.symbol))
-        });
     }
 
     fn confirm_modal(&mut self, ui: &mut Ui, st: &Value, call: &mut Call, enter_ok: bool) {
@@ -1284,7 +1254,18 @@ impl OrderPanel {
                 if tk.buy() { f(&t["ask"]).is_some_and(|a| p >= a) } else { f(&t["bid"]).is_some_and(|b| p <= b) }
             });
             if crosses { kit::note(ui, l("The limit price crosses the book: the order fills at once as a taker."), WARN); }
-            if tk.tp.is_some() || tk.sl.is_some() { kit::note(ui, &format!("TP / SL: {}", l("set for the whole position once the order has filled and the position exists.")), mu()); }
+            if tk.tp.is_some() || tk.sl.is_some() {
+                // per venue: attached to the order (the venue protects the fill), or set by Depth after the fill
+                let (mut on, mut after): (Vec<&str>, Vec<&str>) = (vec![], vec![]);
+                for lg in &legs {
+                    let ex = s(&lg["ex"]);
+                    let attach = depth::Exchange::parse(ex).is_some_and(|e| depth::trade::caps(e).attach_tpsl);
+                    let v = if attach { &mut on } else { &mut after };
+                    if !v.contains(&ex) { v.push(ex); }
+                }
+                if !on.is_empty() { kit::note(ui, &format!("TP / SL: {}", lf("placed with the order on %@: the venue protects the position from the fill on.", &[on.join(", ")])), mu()); }
+                if !after.is_empty() { kit::note(ui, &format!("TP / SL: {}", lf("set by Depth on %@ once this order has filled (kept across restarts).", &[after.join(", ")])), mu()); }
+            }
             let unverified = legs.iter().any(|lg| st["keys"].as_array().is_some_and(|k| k.iter().any(|k| k["ex"] == lg["ex"] && k["verified"] == false)));
             if unverified { kit::note(ui, l("Order placement on this venue is not yet verified on a live account: start with the minimum size."), WARN); }
             kit::note(ui, l("Prices and sizes are rounded to the venue's tick and step."), dim());
@@ -1298,7 +1279,7 @@ impl OrderPanel {
             Some(false) => self.ticket = None,
             Some(true) => {
                 let tk = self.ticket.take().unwrap();
-                if let Err(e) = self.place(&tk, st, call) { self.ticket = Some(Ticket { err: Some(e), ..tk }); }
+                if let Err(e) = self.place(&tk, call) { self.ticket = Some(Ticket { err: Some(e), ..tk }); }
             }
             None => {}
         }

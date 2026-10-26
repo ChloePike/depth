@@ -152,6 +152,8 @@ impl App {
             "native": j.venue_id.is_some(),
         })).collect();
         let log: Vec<Value> = acc.log.iter().rev().take(200).map(|(ts, m, ok)| json!({"ts": ts, "msg": m, "ok": ok})).collect();
+        let tpsl_wait: Vec<Value> = acc.tpsl_wait.iter().map(|w| json!({"ex": ex_name(w.ex), "symbol": w.symbol, "pos": side_name(w.pos), "tp": w.tp, "sl": w.sl,
+            "trigger": if w.trigger == trade::tpsl::Trigger::Last { "last" } else { "mark" }, "client_id": w.client_id, "order_id": w.order_id, "filled": w.filled_ms.is_some(), "created_ms": w.created_ms})).collect();
         let tests = self.eng.key_tests.lock().unwrap().clone();
         let keys: Vec<Value> = trade::KEY_VENUES.iter().map(|&e| {
             let tail: Option<String> = acc.keys.get(&e).map(|k| k.key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect());
@@ -197,7 +199,7 @@ impl App {
         json!({
             "base": self.eng.base, "mode": format!("{:?}", self.mode), "lang": super::lang_code(), "langs": super::LANGS,
             "header": header, "venues": venues, "stats": stats, "trade": trade_v,
-            "positions": positions, "opt_positions": opt_positions, "orders": orders, "tpsl": tpsl,
+            "positions": positions, "opt_positions": opt_positions, "orders": orders, "tpsl": tpsl, "tpsl_wait": tpsl_wait,
             "history": {"orders": hist.0, "fills": hist.1, "closed": hist.2, "updated_ms": (hist.3 != i64::MAX).then_some(hist.3),
                         "loading": !self.eng.account.lock().unwrap().history_loading.is_empty()},
             "wallets": wallets, "balances": balances, "algos": algos, "transferring": transferring, "binance_pm": pm, "log": log, "keys": keys,
@@ -264,7 +266,19 @@ impl App {
                             e["ex"].as_str() == Some(ex_name(l.ex).as_str()) && e["qty"].as_f64().is_some_and(|q| (q - l.req.qty).abs() <= 1e-9 * q.abs().max(1.0)));
                         if !same { return Err("the route changed since the preview; review it again".into()); }
                     }
-                    for leg in &plan.legs { self.eng.submit(leg.ex, leg.req.clone(), leg.ref_px, ctx); }
+                    // TP/SL: attached to the order where the venue takes it (protected at fill), else set by the
+                    // engine once this very order has filled (`TpSlWait`)
+                    let trigger = if s("trigger") == "last" { trade::tpsl::Trigger::Last } else { trade::tpsl::Trigger::Mark };
+                    let attach = (f("tp").is_some() || f("sl").is_some()).then_some(trade::tpsl::Attach { tp: f("tp"), sl: f("sl"), trigger }).filter(|_| !req.close);
+                    for leg in &plan.legs {
+                        let mut r = leg.req.clone();
+                        match attach {
+                            Some(at) if trade::caps(leg.ex).attach_tpsl => r.attach = Some(at),
+                            Some(at) => { if let Some(w) = super::engine::TpSlWait::new(leg.ex, &r, at, now_ms()) { self.eng.account.lock().unwrap().tpsl_wait.push(w); } }
+                            None => {}
+                        }
+                        self.eng.submit(leg.ex, r, leg.ref_px, ctx);
+                    }
                 }
                 return Ok(plan_json(&plan));
             }
@@ -311,6 +325,10 @@ impl App {
                 let pos = if s("pos") == "short" { Side::Sell } else { Side::Buy };
                 let trigger = if s("trigger") == "last" { trade::tpsl::Trigger::Last } else { trade::tpsl::Trigger::Mark };
                 self.eng.set_tpsl(exv()?, s("symbol"), pos, f("tp"), f("sl"), f("partial_qty"), trigger, ctx);
+            }
+            "cancel_tpsl_wait" => {
+                let (e, cid) = (exv()?, s("client_id"));
+                self.eng.account.lock().unwrap().tpsl_wait.retain(|w| !(w.ex == e && w.client_id == cid));
             }
             "cancel_tpsl" => {
                 let (e, id) = (exv()?, s("id"));

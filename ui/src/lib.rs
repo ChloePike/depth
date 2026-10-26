@@ -182,10 +182,12 @@ pub fn hms(ms: i64) -> String {
 #[derive(Default)]
 struct Settings { route: Option<depth::route::Policy>, prefs: Option<settings::Prefs>, lang: Option<String>, base: Option<String>, mode: Option<Market>, chart: Option<chart::Chart>, layout: Option<String>, cell: Option<usize>, charts: Option<Vec<(usize, chart::Chart)>>, trade_ex: Option<Exchange>, off: Option<Vec<Exchange>>, auto: Option<HashMap<Exchange, engine::AutoTopUp>>, order_panel: Option<bool>, window: Option<[f32; 4]>, book: Option<book::BookView>,
     /// the daily loss stop's baseline: (local day number, equity per venue at its start)
-    risk_day: Option<(i64, Vec<(Exchange, f64)>)> }
+    risk_day: Option<(i64, Vec<(Exchange, f64)>)>,
+    /// TP/SL still waiting for their entry order (engine::TpSlWait)
+    tpsl_wait: Option<Vec<engine::TpSlWait>> }
 
 #[derive(serde::Serialize)]
-struct SettingsRef<'a> { route: &'a depth::route::Policy, prefs: &'a settings::Prefs, lang: &'static str, base: &'a str, mode: Market, chart: &'a chart::Chart, layout: &'a str, cell: usize, charts: &'a [(usize, chart::Chart)], trade_ex: Exchange, off: Vec<Exchange>, auto: std::collections::BTreeMap<String, engine::AutoTopUp>, order_panel: bool, window: Option<[f32; 4]>, book: &'a book::BookView, risk_day: (i64, Vec<(Exchange, f64)>) }
+struct SettingsRef<'a> { route: &'a depth::route::Policy, prefs: &'a settings::Prefs, lang: &'static str, base: &'a str, mode: Market, chart: &'a chart::Chart, layout: &'a str, cell: usize, charts: &'a [(usize, chart::Chart)], trade_ex: Exchange, off: Vec<Exchange>, auto: std::collections::BTreeMap<String, engine::AutoTopUp>, order_panel: bool, window: Option<[f32; 4]>, book: &'a book::BookView, risk_day: (i64, Vec<(Exchange, f64)>), tpsl_wait: Vec<engine::TpSlWait> }
 
 fn settings_path() -> Option<std::path::PathBuf> {
     Some(depth::sys::data_dir()?.join("settings.json"))
@@ -277,7 +279,7 @@ fn load_settings(text: &str) -> (Settings, bool) {
         route: d.obj("route"), prefs: d.obj("prefs"), lang: d.get("lang"), base: d.get("base"), mode: d.get("mode"), chart: d.obj("chart"), layout: d.get("layout"), cell: d.get("cell"),
         charts: d.list("charts"), trade_ex: d.get("trade_ex"), off: d.list("off"),
         auto: d.take("auto").and_then(|x| { let r = lenient_map(x); d.keep("auto", r) }),
-        order_panel: d.get("order_panel"), window: d.get("window"), book: d.obj("book"), risk_day: d.get("risk_day"),
+        order_panel: d.get("order_panel"), window: d.get("window"), book: d.obj("book"), risk_day: d.get("risk_day"), tpsl_wait: d.list("tpsl_wait"),
     };
     // keys left over belong to a newer build
     let unknown = d.v.as_object().is_some_and(|m| !m.is_empty());
@@ -398,6 +400,8 @@ impl App {
             a.auto = st.auto.clone().unwrap_or_default();
             a.limits = prefs.risk;
             if let Some((d, v)) = st.risk_day.clone() { a.day_start = (d, v.into_iter().collect()); }
+            // checked against each venue after its first snapshot
+            a.tpsl_wait = st.tpsl_wait.clone().unwrap_or_default().into_iter().map(|w| engine::TpSlWait { restored: true, ..w }).collect();
         }
         eng.start_account(&cc.egui_ctx);
         eng.off = st.off.unwrap_or_default().into_iter().collect();
@@ -848,13 +852,13 @@ impl App {
         let mut off: Vec<Exchange> = self.eng.off.iter().copied().collect();
         off.sort_by_key(|e| *e as u8);
         // sorted keys so an unchanged state serializes identically (no rewrite every second)
-        let (auto, risk_day) = {
+        let (auto, risk_day, tpsl_wait) = {
             let a = self.eng.account.lock().unwrap();
             let mut day: Vec<(Exchange, f64)> = a.day_start.1.iter().map(|(e, x)| (*e, *x)).collect();
             day.sort_by_key(|x| x.0 as u8);
-            (a.auto.iter().map(|(e, r)| (format!("{e:?}"), *r)).collect(), (a.day_start.0, day))
+            (a.auto.iter().map(|(e, r)| (format!("{e:?}"), *r)).collect(), (a.day_start.0, day), a.tpsl_wait.clone())
         };
-        let s = SettingsRef { route: &self.route, prefs: &self.prefs, lang: lang_code(), base: &self.eng.base, mode: self.mode, chart: &self.chart, layout: &self.layout, cell: self.cell, charts: &self.others, trade_ex: self.trade.ex, off, auto, order_panel: self.order_panel, window: self.window, book: &self.book, risk_day };
+        let s = SettingsRef { route: &self.route, prefs: &self.prefs, lang: lang_code(), base: &self.eng.base, mode: self.mode, chart: &self.chart, layout: &self.layout, cell: self.cell, charts: &self.others, trade_ex: self.trade.ex, off, auto, order_panel: self.order_panel, window: self.window, book: &self.book, risk_day, tpsl_wait };
         let Ok(json) = serde_json::to_string_pretty(&s) else { return };
         if json == self.saved.0 { return; }
         let Some(p) = settings_path() else { return };

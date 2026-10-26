@@ -83,6 +83,152 @@ pub struct Account {
     /// each keyed venue's equity at the start of the local day (day number in the display time
     /// zone): the daily loss stop's baseline, persisted in settings.json
     pub day_start: (i64, HashMap<Exchange, f64>),
+    /// TP/SL waiting for their entry order to fill (persisted in settings.json)
+    pub tpsl_wait: Vec<TpSlWait>,
+}
+
+/// A TP/SL sent with an opening order on a venue that cannot attach it to the order
+/// (`Caps.attach_tpsl` false): set for the whole position once that order is known to have filled
+/// and the position exists, dropped with a note when the order ended without a fill. The order is
+/// matched by its client id / venue id only, never by "some order on the symbol", so it can never
+/// land on an unrelated later fill. Kept across restarts and checked against the venue again.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TpSlWait {
+    pub ex: Exchange, pub symbol: String, pub pos: depth::Side,
+    pub tp: Option<f64>, pub sl: Option<f64>, pub trigger: trade::tpsl::Trigger,
+    /// the entry order: our client id, and the venue's id once known
+    pub client_id: String, pub order_id: Option<String>,
+    pub created_ms: i64,
+    /// when the entry order was first seen filling (local ms)
+    pub filled_ms: Option<i64>,
+    /// a lookup by client id is running
+    #[serde(skip)] pub checking: bool,
+    /// the venue's positions are loaded since it was created (false when read from disk until the
+    /// venue's first snapshot); `restored`: read from disk
+    #[serde(skip)] pub armed: bool,
+    #[serde(skip)] pub restored: bool,
+}
+
+impl TpSlWait {
+    pub fn new(ex: Exchange, req: &OrderReq, a: trade::tpsl::Attach, now: i64) -> Option<Self> {
+        Some(TpSlWait { ex, symbol: req.symbol.clone(), pos: req.pos, tp: a.tp, sl: a.sl, trigger: a.trigger, client_id: req.client_id.clone()?,
+            order_id: None, created_ms: now, filled_ms: None, checking: false, armed: true, restored: false })
+    }
+}
+
+/// What a waiting TP/SL asks for, run after the account lock is released.
+#[derive(Debug, PartialEq)]
+pub enum WaitAct { Fire(TpSlWait), Check(TpSlWait) }
+
+/// A pushed order change for the waiting TP/SL: the entry order's venue id is learnt from its
+/// client id, a fill of it marks the entry filled, and its end without a known fill asks the venue
+/// (one lookup by client id: OrderDone does not say filled or cancelled).
+fn wait_touch(a: &mut Account, ex: Exchange, ev: &trade::AccEvent, now: i64) -> Vec<WaitAct> {
+    use trade::AccEvent as E;
+    let mut out = vec![];
+    for w in a.tpsl_wait.iter_mut().filter(|w| w.ex == ex) {
+        match ev {
+            E::Order(o) if o.client_id.as_deref() == Some(w.client_id.as_str()) || w.order_id.as_deref() == Some(o.id.as_str()) => {
+                w.order_id = Some(o.id.clone());
+                if o.filled > 0.0 { w.filled_ms.get_or_insert(now); }
+            }
+            E::OrderDone { id } if w.order_id.as_deref() == Some(id.as_str()) && w.filled_ms.is_none() && !w.checking => {
+                w.checking = true;
+                out.push(WaitAct::Check(w.clone()));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Filled entries fire once their position exists (or are dropped when it does not appear within
+/// 30 s: closed again before its TP/SL was set); entries unfilled after a day are dropped.
+fn settle(a: &mut Account, now: i64) -> Vec<WaitAct> {
+    let (mut out, mut notes) = (vec![], vec![]);
+    let positions = &a.positions;
+    a.tpsl_wait.retain(|w| {
+        if !w.armed { return true; }
+        let held = positions.iter().any(|p| p.ex == w.ex && p.symbol == w.symbol && p.side == w.pos && p.qty > 0.0);
+        match w.filled_ms {
+            Some(_) if held => { out.push(WaitAct::Fire(w.clone())); false }
+            Some(t) if now - t > 30_000 => { notes.push(format!("NOTE {:?} {}: TP/SL not set, the position its order {} opened is gone", w.ex, w.symbol, w.client_id)); false }
+            None if now - w.created_ms > 86_400_000 => { notes.push(format!("NOTE {:?} {}: TP/SL dropped, its order {} has not filled in a day", w.ex, w.symbol, w.client_id)); false }
+            _ => true,
+        }
+    });
+    for n in notes { a.note(n, false); }
+    out
+}
+
+/// After a snapshot of `ex` (connect, reconnect, the 5-minute reconcile): entries read from disk are
+/// armed, and an entry whose order is not resting and whose fill is not known is checked with the
+/// venue once (pushes missed while away or disconnected). A fresh entry still being placed waits.
+fn rearm(a: &mut Account, ex: Exchange, now: i64) -> Vec<WaitAct> {
+    let mut out = vec![];
+    let orders = &a.orders;
+    for w in a.tpsl_wait.iter_mut().filter(|w| w.ex == ex) {
+        w.armed = true;
+        let resting = orders.iter().find(|o| o.ex == ex && (w.order_id.as_deref() == Some(o.id.as_str()) || o.client_id.as_deref() == Some(w.client_id.as_str())));
+        if let Some(o) = resting {
+            w.order_id = Some(o.id.clone());
+            if o.filled > 0.0 { w.filled_ms.get_or_insert(now); }
+        } else if w.filled_ms.is_none() && !w.checking && (w.order_id.is_some() || w.restored || now - w.created_ms > 15_000) {
+            w.checking = true;
+            out.push(WaitAct::Check(w.clone()));
+        }
+    }
+    out.extend(settle(a, now));
+    out
+}
+
+/// The venue's answer for a checked entry: still open (filled or not), finished with a fill, or
+/// finished / unknown without one (dropped with a note; a failed lookup too: never a stale TP/SL).
+fn resolve(a: &mut Account, w: &TpSlWait, r: anyhow::Result<Option<trade::Found>>, now: i64) {
+    let Some(i) = a.tpsl_wait.iter().position(|x| x.ex == w.ex && x.client_id == w.client_id) else { return };
+    let x = &mut a.tpsl_wait[i];
+    x.checking = false;
+    let gone = match r {
+        Ok(Some(trade::Found::Open(o))) => { x.order_id = Some(o.id); if o.filled > 0.0 { x.filled_ms.get_or_insert(now); } None }
+        Ok(Some(trade::Found::Done { filled, .. })) if filled > 0.0 => { x.filled_ms.get_or_insert(now); None }
+        Ok(Some(trade::Found::Done { status, .. })) => Some(format!("its order {} ended {status} without a fill", w.client_id)),
+        Ok(None) => Some(format!("its order {} is not on the venue", w.client_id)),
+        Err(e) => Some(format!("could not confirm a fill of its order {} ({e:#}); set it from the positions table if it filled", w.client_id)),
+    };
+    if let Some(why) = gone {
+        a.tpsl_wait.remove(i);
+        a.note(format!("NOTE {:?} {}: TP/SL dropped, {why}", w.ex, w.symbol), false);
+    }
+}
+
+/// Runs what the waiting TP/SL asked for: set a TP/SL (the venue's whole-position one), or look an
+/// entry order up by client id (once) and act on the answer.
+fn run_wait(account: &Arc<Mutex<Account>>, acts: Vec<WaitAct>, ctx: &eframe::egui::Context) {
+    for act in acts {
+        let (account, ctx) = (account.clone(), ctx.clone());
+        tokio::spawn(async move {
+            match act {
+                WaitAct::Fire(w) => {
+                    if w.restored { account.lock().unwrap().note(format!("NOTE {:?} {}: its order filled while Depth was closed, setting its TP/SL now", w.ex, w.symbol), true); }
+                    set_tpsl_logged(&account, w.ex, w.symbol, w.pos, w.tp, w.sl, None, w.trigger).await;
+                }
+                WaitAct::Check(w) => {
+                    let k = account.lock().unwrap().keys.get(&w.ex).cloned();
+                    let r = match k { Some(k) => trade::order_by_client_id(w.ex, &k, &w.symbol, &w.client_id).await, None => Err(anyhow::anyhow!("no API key")) };
+                    let acts = { let mut a = account.lock().unwrap(); resolve(&mut a, &w, r, now_ms()); settle(&mut a, now_ms()) };
+                    run_wait(&account, acts, &ctx);
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+}
+
+/// A REST snapshot of `ex`, then the waiting TP/SL checked against it.
+async fn snapshot(account: &Arc<Mutex<Account>>, ex: Exchange, ctx: &eframe::egui::Context) {
+    refresh_venue(account, ex).await;
+    let acts = rearm(&mut account.lock().unwrap(), ex, now_ms());
+    run_wait(account, acts, ctx);
 }
 
 /// Keep the margin account's available balance topped up: when it drops below `min` USD, move
@@ -240,6 +386,28 @@ async fn place_logged(account: &Arc<Mutex<Account>>, ex: Exchange, req: &OrderRe
         }
         Err(e) => { a.note(format!("FAIL {what}: {e:#}"), false); None }
     }
+}
+
+/// Set / replace whole-position TP and/or SL, or add one partial level; the result lands in the order log.
+#[allow(clippy::too_many_arguments)]
+async fn set_tpsl_logged(account: &Arc<Mutex<Account>>, ex: Exchange, symbol: String, pos: depth::Side, tp: Option<f64>, sl: Option<f64>, partial: Option<f64>, trigger: trade::tpsl::Trigger) {
+    let Some(k) = account.lock().unwrap().keys.get(&ex).cloned() else { return };
+    let cached = account.lock().unwrap().modes.get(&(ex, symbol.clone())).copied().flatten();
+    let mode = match cached { Some(m) => Ok(m), None => trade::mode(ex, &k, &symbol).await };
+    let res = match mode {
+        Err(e) => Err(e),
+        Ok(m) => match partial {
+            None => trade::tpsl::set_position_tpsl(ex, &k, &symbol, pos, m, tp, sl, trigger).await.map(|_| String::new()),
+            Some(q) => {
+                let (take, px) = match (tp, sl) { (Some(p), _) => (true, p), (_, Some(p)) => (false, p), _ => (true, 0.0) };
+                trade::tpsl::add_partial(ex, &k, &symbol, pos, m, take, px, q, trigger).await
+            }
+        },
+    };
+    let what = format!("{ex:?} {symbol} {} TP {} SL {}{}", if pos == depth::Side::Buy { "long" } else { "short" },
+        tp.map(|x| x.to_string()).unwrap_or("-".into()), sl.map(|x| x.to_string()).unwrap_or("-".into()), partial.map(|q| format!(" size {q}")).unwrap_or_default());
+    let mut a = account.lock().unwrap();
+    match res { Ok(_) => a.note(format!("OK TP/SL {what}"), true), Err(e) => a.note(format!("FAIL TP/SL {what}: {e:#}"), false) }
 }
 
 /// Funding-since-open of one position: the last result (None until fetched, or on venues that do not
@@ -655,6 +823,7 @@ impl Engine {
                         let mut changed = false;
                         let mut resync = vec![];
                         let mut top_ups = vec![];
+                        let mut waits = vec![];
                         {
                             let mut a = account.lock().unwrap();
                             for (ex, ev) in buf.drain(..) {
@@ -669,18 +838,23 @@ impl Engine {
                                     ev => {
                                         if let trade::AccEvent::Position { p, .. } = &ev { if wants_liq_refetch(ex, p) { pos_dirty.insert(ex); } }
                                         let wallet = matches!(ev, trade::AccEvent::Wallet(_));
+                                        waits.extend(wait_touch(&mut a, ex, &ev, now_ms()));
                                         changed |= apply(&mut a, ex, ev);
                                         // run after the lock is released: spawn_top_up locks the account itself
                                         if wallet { if let Some(need) = auto_due(&mut a, ex) { top_ups.push((ex, need)); } }
                                     }
                                 }
                             }
+                            waits.extend(settle(&mut a, now_ms()));
                         }
-                        for ex in resync { let acc = account.clone(); tokio::spawn(async move { refresh_venue(&acc, ex).await }); }
+                        run_wait(&account, waits, &ctx);
+                        for ex in resync { let (acc, ctx) = (account.clone(), ctx.clone()); tokio::spawn(async move { snapshot(&acc, ex, &ctx).await }); }
                         for (ex, need) in top_ups { spawn_top_up(&account, ex, need, &ctx); }
                         if changed { ctx.request_repaint(); }
                     }
                     _ = bal_tick.tick() => {
+                        let waits = settle(&mut account.lock().unwrap(), now_ms());
+                        run_wait(&account, waits, &ctx);
                         // funding since open: in-memory check each tick, a REST fetch only when `funding_due` says so
                         let due = { let mut a = account.lock().unwrap(); let f = funding.lock().unwrap(); funding_due(&mut a, &f, now_ms()) };
                         for (k, p, known) in due {
@@ -731,7 +905,7 @@ impl Engine {
                     }
                     _ = reconcile.tick() => {
                         let venues: Vec<Exchange> = account.lock().unwrap().keys.keys().copied().collect();
-                        for ex in venues { let acc = account.clone(); tokio::spawn(async move { refresh_venue(&acc, ex).await }); }
+                        for ex in venues { let (acc, ctx) = (account.clone(), ctx.clone()); tokio::spawn(async move { snapshot(&acc, ex, &ctx).await }); }
                     }
                 }
             }
@@ -874,7 +1048,15 @@ impl Engine {
     pub fn submit(&self, ex: Exchange, req: OrderReq, ref_px: f64, ctx: &eframe::egui::Context) {
         let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
         rt.spawn(async move {
-            place_logged(&account, ex, &req, ref_px).await;
+            let id = place_logged(&account, ex, &req, ref_px).await;
+            // a TP/SL waiting on this order: its venue id, or nothing to wait for
+            let mut a = account.lock().unwrap();
+            if let Some(i) = a.tpsl_wait.iter().position(|w| w.ex == ex && Some(&w.client_id) == req.client_id.as_ref()) {
+                match id {
+                    Some(id) => { a.tpsl_wait[i].order_id.get_or_insert(id); }
+                    None => { a.tpsl_wait.remove(i); a.note(format!("NOTE {ex:?} {}: TP/SL dropped, its order was not placed", req.symbol), false); }
+                }
+            }
             ctx.request_repaint();
         });
     }
@@ -1289,23 +1471,7 @@ impl Engine {
         let Some(rt) = self.acct_rt.as_ref() else { return };
         let (account, ctx) = (self.account.clone(), ctx.clone());
         rt.spawn(async move {
-            let Some(k) = account.lock().unwrap().keys.get(&ex).cloned() else { return };
-            let cached = account.lock().unwrap().modes.get(&(ex, symbol.clone())).copied().flatten();
-            let mode = match cached { Some(m) => Ok(m), None => trade::mode(ex, &k, &symbol).await };
-            let res = match mode {
-                Err(e) => Err(e),
-                Ok(m) => match partial {
-                    None => trade::tpsl::set_position_tpsl(ex, &k, &symbol, pos, m, tp, sl, trigger).await.map(|_| String::new()),
-                    Some(q) => {
-                        let (take, px) = match (tp, sl) { (Some(p), _) => (true, p), (_, Some(p)) => (false, p), _ => (true, 0.0) };
-                        trade::tpsl::add_partial(ex, &k, &symbol, pos, m, take, px, q, trigger).await
-                    }
-                },
-            };
-            let what = format!("{ex:?} {symbol} {} TP {} SL {}{}", if pos == depth::Side::Buy { "long" } else { "short" },
-                tp.map(|x| x.to_string()).unwrap_or("-".into()), sl.map(|x| x.to_string()).unwrap_or("-".into()), partial.map(|q| format!(" size {q}")).unwrap_or_default());
-            let mut a = account.lock().unwrap();
-            match res { Ok(_) => a.note(format!("OK TP/SL {what}"), true), Err(e) => a.note(format!("FAIL TP/SL {what}: {e:#}"), false) }
+            set_tpsl_logged(&account, ex, symbol, pos, tp, sl, partial, trigger).await;
             ctx.request_repaint();
         });
     }
@@ -1796,6 +1962,103 @@ mod tests {
         assert_eq!(a.orders[0].filled, 0.5);
         apply(&mut a, ex, E::OrderDone { id: "7".into() });
         assert!(a.orders.is_empty());
+    }
+
+    fn wait(cid: &str) -> TpSlWait {
+        TpSlWait::new(Exchange::Binance, &OrderReq { symbol: "BTCUSDT".into(), pos: Side::Buy, close: false, kind: trade::Kind::Market, qty: 1.0, client_id: Some(cid.into()), attach: None },
+            trade::tpsl::Attach { tp: Some(120.0), sl: Some(90.0), trigger: trade::tpsl::Trigger::Mark }, 0).unwrap()
+    }
+    fn order(id: &str, cid: Option<&str>, filled: f64) -> OpenOrder {
+        OpenOrder { ex: Exchange::Binance, symbol: "BTCUSDT".into(), id: id.into(), side: Side::Buy, price: 99.0, qty: 1.0, filled, kind: "LIMIT".into(), tif: String::new(), reduce_only: false, ts: 0, pos: None, client_id: cid.map(String::from), trigger: None }
+    }
+    fn fired(acts: &[WaitAct]) -> usize { acts.iter().filter(|a| matches!(a, WaitAct::Fire(_))).count() }
+
+    #[test]
+    fn tpsl_wait_fires_once_on_its_own_fill() {
+        let ex = Exchange::Binance;
+        let mut a = Account::default();
+        a.tpsl_wait.push(wait("t1al0"));
+        // the venue id comes with the order's push, matched by our client id
+        assert!(wait_touch(&mut a, ex, &E::Order(order("55", Some("t1al0"), 0.0)), 1).is_empty());
+        assert_eq!(a.tpsl_wait[0].order_id.as_deref(), Some("55"));
+        // a partial fill: waits for the position, then fires once
+        wait_touch(&mut a, ex, &E::Order(order("55", None, 0.4)), 2);
+        assert!(settle(&mut a, 3).is_empty());
+        a.positions.push(pos(Side::Buy, 0.4));
+        let acts = settle(&mut a, 4);
+        assert_eq!(fired(&acts), 1);
+        assert!(matches!(&acts[0], WaitAct::Fire(w) if w.tp == Some(120.0) && w.sl == Some(90.0)));
+        assert!(a.tpsl_wait.is_empty() && settle(&mut a, 5).is_empty());
+    }
+
+    #[test]
+    fn tpsl_wait_drops_when_its_order_ends_unfilled() {
+        let ex = Exchange::Binance;
+        let mut a = Account::default();
+        a.tpsl_wait.push(wait("t1al0"));
+        wait_touch(&mut a, ex, &E::Order(order("55", Some("t1al0"), 0.0)), 1);
+        // done without a known fill: one lookup, never two
+        let acts = wait_touch(&mut a, ex, &E::OrderDone { id: "55".into() }, 2);
+        assert!(matches!(&acts[..], [WaitAct::Check(w)] if w.client_id == "t1al0"));
+        assert!(wait_touch(&mut a, ex, &E::OrderDone { id: "55".into() }, 3).is_empty());
+        resolve(&mut a, &wait("t1al0"), Ok(Some(trade::Found::Done { id: "55".into(), filled: 0.0, status: "CANCELED".into() })), 4);
+        assert!(a.tpsl_wait.is_empty());
+        assert!(a.log.back().is_some_and(|l| l.1.contains("TP/SL dropped") && l.1.contains("CANCELED")));
+        // a market order that filled: the lookup says so and the position is there
+        a.tpsl_wait.push(wait("t1bl0"));
+        a.positions.push(pos(Side::Buy, 1.0));
+        resolve(&mut a, &wait("t1bl0"), Ok(Some(trade::Found::Done { id: "56".into(), filled: 1.0, status: "FILLED".into() })), 5);
+        assert_eq!(fired(&settle(&mut a, 6)), 1);
+        // a lookup that fails drops it with a note
+        a.tpsl_wait.push(wait("t1cl0"));
+        resolve(&mut a, &wait("t1cl0"), Err(anyhow::anyhow!("timeout")), 7);
+        assert!(a.tpsl_wait.is_empty());
+    }
+
+    #[test]
+    fn tpsl_wait_ignores_other_orders_and_growth() {
+        let ex = Exchange::Binance;
+        let mut a = Account::default();
+        a.tpsl_wait.push(wait("t1al0"));
+        wait_touch(&mut a, ex, &E::Order(order("55", Some("t1al0"), 0.0)), 1);
+        // another order on the symbol fills and ends, the position grows: nothing fires, nothing is asked
+        assert!(wait_touch(&mut a, ex, &E::Order(order("77", Some("other"), 0.5)), 2).is_empty());
+        assert!(wait_touch(&mut a, ex, &E::OrderDone { id: "77".into() }, 3).is_empty());
+        assert!(wait_touch(&mut a, Exchange::Bybit, &E::OrderDone { id: "55".into() }, 3).is_empty());
+        a.positions.push(pos(Side::Buy, 0.5));
+        assert!(settle(&mut a, 4).is_empty());
+        assert_eq!(a.tpsl_wait.len(), 1);
+        // entries without a fill expire after a day
+        assert!(settle(&mut a, 86_400_001).is_empty() && a.tpsl_wait.is_empty());
+    }
+
+    #[test]
+    fn tpsl_wait_restores_and_applies_when_filled_while_away() {
+        let ex = Exchange::Binance;
+        let mut a = Account::default();
+        let mut w = wait("t1al0");
+        w.order_id = Some("55".into());
+        // settings.json round trip: what matters survives, the runtime flags start over
+        let mut back: TpSlWait = serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
+        assert!(!back.armed && back.order_id.as_deref() == Some("55") && back.client_id == "t1al0");
+        back.restored = true;
+        a.tpsl_wait.push(back);
+        // before the venue's snapshot nothing happens, even with a position on screen
+        a.positions.push(pos(Side::Buy, 1.0));
+        assert!(settle(&mut a, 10).is_empty());
+        // snapshot: the order is not resting any more, so the venue is asked
+        let acts = rearm(&mut a, ex, 11);
+        assert!(matches!(&acts[..], [WaitAct::Check(_)]));
+        resolve(&mut a, &wait("t1al0"), Ok(Some(trade::Found::Done { id: "55".into(), filled: 1.0, status: "FILLED".into() })), 12);
+        let acts = settle(&mut a, 13);
+        assert!(matches!(&acts[..], [WaitAct::Fire(w)] if w.restored));
+        // still resting after the restart: re-armed, waiting
+        let mut w = wait("t1bl0");
+        w.order_id = Some("56".into());
+        a.tpsl_wait.push(TpSlWait { armed: false, restored: true, ..w });
+        a.orders.push(order("56", Some("t1bl0"), 0.0));
+        assert!(rearm(&mut a, ex, 14).is_empty());
+        assert!(a.tpsl_wait[0].armed);
     }
 
     #[test]
