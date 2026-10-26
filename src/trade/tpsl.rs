@@ -21,11 +21,12 @@
 //! - Bybit `order.linear` rows have the REST shape: `bybit_row(o)`; open while `Untriggered`.
 //! - Binance user data `{"e":"ALGO_UPDATE"}` (USD-M payload in `o`, PM in `ao` with `fs`):
 //!   `binance_algo_update(v)`; open while `X == "NEW"`.
-use super::{bybit, binance_at, binance_pm, binance_url, fmt_step, papi_url, rules, CancelReport, Keys, Mode, Rules};
+use super::{bybit, binance_at, binance_pm, binance_url, fmt_step, papi_url, rules, CancelReport, Keys, Mode, OpenOrder, Rules};
 use crate::{Exchange, Side};
 use anyhow::{anyhow, bail, Result};
 use reqwest::Method;
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 /// Price the trigger compares against. Mark is the default (wicks on the last price don't fire it).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -140,15 +141,45 @@ pub fn binance_row(o: &Value) -> Option<TpSl> {
     })
 }
 
-/// A user-data `ALGO_UPDATE` event (USD-M: `o`, Portfolio Margin: `ao`) as a TP/SL plus whether
-/// it is still active (status NEW; CANCELED / TRIGGERING / TRIGGERED / FINISHED / REJECTED /
+/// Every other algo row (an opening STOP / TAKE_PROFIT, any TRAILING_STOP_MARKET) as an open order.
+/// `trigger` is always Some on these rows (trailing: the activation price, 0 when none): that is
+/// what routes their cancel to the algo endpoint. None for TP/SL rows (`binance_row`).
+pub fn binance_algo_order(o: &Value) -> Option<OpenOrder> {
+    if o["algoType"] != "CONDITIONAL" || binance_row(o).is_some() { return None; }
+    let kind = o["orderType"].as_str().filter(|k| !k.is_empty())?.to_lowercase();
+    let px = |f: &str| crate::opt_num(&o[f]).filter(|x| *x > 0.0);
+    let trigger = if kind == "trailing_stop_market" { px("activatePrice").or(px("triggerPrice")) } else { px("triggerPrice") };
+    Some(OpenOrder {
+        ex: Exchange::Binance, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["algoId"].to_string(),
+        side: if o["side"] == "SELL" { Side::Sell } else { Side::Buy }, price: px("price").unwrap_or(0.0), qty: px("quantity").unwrap_or(0.0), filled: 0.0, kind,
+        tif: o["timeInForce"].as_str().unwrap_or_default().into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: o["createTime"].as_i64().unwrap_or(0),
+        pos: match o["positionSide"].as_str() { Some("LONG") => Some(Side::Buy), Some("SHORT") => Some(Side::Sell), _ => None },
+        client_id: super::opt_id(&o["clientAlgoId"]), trigger: Some(trigger.unwrap_or(0.0)),
+    })
+}
+
+/// A user-data `ALGO_UPDATE` event (USD-M: `o`, Portfolio Margin: `ao`) in the REST row shape, plus
+/// whether it is still active (status NEW; CANCELED / TRIGGERING / TRIGGERED / FINISHED / REJECTED /
 /// EXPIRED end it). The id is the same `algoId` the REST list returns.
-pub fn binance_algo_update(v: &Value) -> Option<(TpSl, bool)> {
+fn binance_algo_push(v: &Value) -> Option<(Value, bool)> {
     if v["e"] != "ALGO_UPDATE" { return None; }
     let o = if v["ao"].is_object() { &v["ao"] } else { &v["o"] };
     let row = json!({"algoId": o["aid"], "algoType": o["at"], "orderType": o["o"], "symbol": o["s"], "side": o["S"], "positionSide": o["ps"],
-                     "quantity": o["q"], "triggerPrice": o["tp"], "workingType": o["wt"], "closePosition": o["cp"], "reduceOnly": o["R"]});
-    Some((binance_row(&row)?, o["X"] == "NEW"))
+                     "quantity": o["q"], "triggerPrice": o["tp"], "workingType": o["wt"], "closePosition": o["cp"], "reduceOnly": o["R"],
+                     "price": o["p"], "timeInForce": o["f"], "clientAlgoId": o["caid"], "createTime": v["T"]});
+    Some((row, o["X"] == "NEW"))
+}
+
+/// `ALGO_UPDATE` of a TP/SL, with whether it is still active.
+pub fn binance_algo_update(v: &Value) -> Option<(TpSl, bool)> {
+    let (row, active) = binance_algo_push(v)?;
+    Some((binance_row(&row)?, active))
+}
+
+/// `ALGO_UPDATE` of any other algo order (`binance_algo_order`), with whether it is still open.
+pub fn binance_algo_push_order(v: &Value) -> Option<(OpenOrder, bool)> {
+    let (row, active) = binance_algo_push(v)?;
+    Some((binance_algo_order(&row)?, active))
 }
 
 /// Algo-order endpoints, routed to /papi/v1/um/algo/* on Portfolio Margin accounts.
@@ -161,11 +192,30 @@ async fn binance_algo(k: &Keys, method: Method, fapi: &str, params: &[(&str, Str
     }
 }
 
-/// Weight 1 with a symbol, 40 without (on demand only: snapshots, never on a timer).
+fn open_rows(v: Value) -> Vec<Value> {
+    v.as_array().into_iter().flatten().filter(|o| o["algoStatus"].as_str().is_none_or(|s| s == "NEW")).cloned().collect()
+}
+
+/// The account's open algo orders (`openAlgoOrders` without symbol, weight 40). A snapshot reads
+/// them twice back to back (open orders, then TP/SL), so one fetch is shared for 2 s; the async lock
+/// makes a concurrent second caller wait for the first fetch instead of fetching again.
+/// ponytail: one process-wide memo keyed by API key; changes inside the 2 s arrive as ALGO_UPDATE pushes
+pub(super) async fn binance_algo_rows(k: &Keys) -> Result<Arc<Vec<Value>>> {
+    static MEMO: tokio::sync::Mutex<Option<(String, std::time::Instant, Arc<Vec<Value>>)>> = tokio::sync::Mutex::const_new(None);
+    let mut m = MEMO.lock().await;
+    if let Some((key, at, rows)) = m.as_ref() { if *key == k.key && at.elapsed() < std::time::Duration::from_secs(2) { return Ok(rows.clone()); } }
+    let rows = Arc::new(open_rows(binance_algo(k, Method::GET, "/fapi/v1/openAlgoOrders", &[]).await?));
+    *m = Some((k.key.clone(), std::time::Instant::now(), rows.clone()));
+    Ok(rows)
+}
+
+/// Weight 1 with a symbol (always fetched), 40 without (shared memo; on demand only: snapshots, never on a timer).
 async fn binance_open(k: &Keys, symbol: Option<&str>) -> Result<Vec<TpSl>> {
-    let q: Vec<(&str, String)> = symbol.map(|s| ("symbol", s.to_string())).into_iter().collect();
-    let v = binance_algo(k, Method::GET, "/fapi/v1/openAlgoOrders", &q).await?;
-    Ok(v.as_array().into_iter().flatten().filter(|o| o["algoStatus"].as_str().is_none_or(|s| s == "NEW")).filter_map(binance_row).collect())
+    let rows = match symbol {
+        Some(s) => Arc::new(open_rows(binance_algo(k, Method::GET, "/fapi/v1/openAlgoOrders", &[("symbol", s.to_string())]).await?)),
+        None => binance_algo_rows(k).await?,
+    };
+    Ok(rows.iter().filter_map(binance_row).collect())
 }
 
 /// Order-count 1 per 10s / 1m, IP weight 0 (USD-M); IP weight 1 (PM). Returns the algoId.
@@ -174,7 +224,7 @@ pub(crate) async fn binance_place(k: &Keys, p: &[(&str, String)]) -> Result<Stri
 }
 
 /// IP weight 1.
-async fn binance_cancel(k: &Keys, id: &str) -> Result<()> {
+pub(super) async fn binance_cancel(k: &Keys, id: &str) -> Result<()> {
     binance_algo(k, Method::DELETE, "/fapi/v1/algoOrder", &[("algoId", id.into())]).await.map(|_| ())
 }
 
@@ -405,5 +455,41 @@ mod tests {
         assert!(!open);
         assert_eq!(u.id, "7");
         assert!(binance_algo_update(&json!({"e": "ORDER_TRADE_UPDATE"})).is_none());
+        // a TP/SL is never also an open order
+        assert!(binance_algo_order(&o).is_none() && binance_algo_push_order(&ev("o", "NEW")).is_none());
+    }
+
+    #[test]
+    fn binance_algo_entries_are_open_orders() {
+        // the documented sample (an opening SELL TAKE_PROFIT) is an open order with its trigger and client id
+        let doc: Value = serde_json::from_str(r#"{"algoId":2148627,"clientAlgoId":"MRumok0dkhrP4kCm12AHaB","algoType":"CONDITIONAL","orderType":"TAKE_PROFIT","symbol":"BNBUSDT","side":"SELL","positionSide":"BOTH","timeInForce":"GTC","quantity":"0.01","algoStatus":"NEW","actualOrderId":"","actualPrice":"0.00000","triggerPrice":"750.000","price":"750.000","icebergQuantity":"null","tpTriggerPrice":"0.000","tpPrice":"0.000","slTriggerPrice":"0.000","slPrice":"0.000","tpOrderType":"","selfTradePreventionMode":"EXPIRE_MAKER","workingType":"CONTRACT_PRICE","priceMatch":"NONE","closePosition":false,"priceProtect":false,"reduceOnly":false,"createTime":1750514941540,"updateTime":1750514941540,"triggerTime":0,"goodTillDate":0}"#).unwrap();
+        let o = binance_algo_order(&doc).unwrap();
+        assert_eq!((o.id.as_str(), o.symbol.as_str(), o.side, o.kind.as_str(), o.price, o.qty, o.trigger, o.client_id.as_deref(), o.tif.as_str(), o.reduce_only, o.pos, o.ts),
+                   ("2148627", "BNBUSDT", Side::Sell, "take_profit", 750.0, 0.01, Some(750.0), Some("MRumok0dkhrP4kCm12AHaB"), "GTC", false, None, 1750514941540));
+        // trailing stops are open orders even when they reduce; trigger is Some (activation, or 0 without one)
+        let tr = json!({"algoId": 9, "algoType": "CONDITIONAL", "orderType": "TRAILING_STOP_MARKET", "symbol": "BTCUSDT", "side": "SELL", "positionSide": "LONG",
+                        "quantity": "0.5", "price": "0", "triggerPrice": "0", "activatePrice": "95000", "callbackRate": "1.0", "reduceOnly": false});
+        let t = binance_algo_order(&tr).unwrap();
+        assert_eq!((t.kind.as_str(), t.trigger, t.price, t.pos), ("trailing_stop_market", Some(95000.0), 0.0, Some(Side::Buy)));
+        let mut tr0 = tr.clone();
+        tr0["activatePrice"] = Value::Null;
+        assert_eq!(binance_algo_order(&tr0).unwrap().trigger, Some(0.0));
+        // a hedge opening STOP_MARKET (BUY on LONG): open order, no TP/SL
+        let st = json!({"algoId": 11, "algoType": "CONDITIONAL", "orderType": "STOP_MARKET", "symbol": "BTCUSDT", "side": "BUY", "positionSide": "LONG",
+                        "quantity": "0.1", "price": "0.00", "triggerPrice": "101000", "workingType": "MARK_PRICE", "closePosition": false, "reduceOnly": false});
+        assert!(binance_row(&st).is_none());
+        assert_eq!(binance_algo_order(&st).map(|o| (o.kind, o.trigger, o.price)), Some(("stop_market".to_string(), Some(101000.0), 0.0)));
+        // other algo types are neither
+        assert!(binance_algo_order(&json!({"algoType": "TWAP", "orderType": "MARKET"})).is_none());
+        // ALGO_UPDATE of a non-reducing order: open while NEW, done (by algoId) once cancelled
+        let ev = |x: &str| json!({"e": "ALGO_UPDATE", "T": 1750515742297u64, "E": 1, "o": {"caid": "t1abc", "aid": 2148719, "at": "CONDITIONAL", "o": "TAKE_PROFIT",
+            "s": "BNBUSDT", "S": "SELL", "ps": "BOTH", "f": "GTC", "q": "0.01", "X": x, "tp": "750", "p": "750", "wt": "CONTRACT_PRICE", "cp": false, "R": false}});
+        let (o, open) = binance_algo_push_order(&ev("NEW")).unwrap();
+        assert!(open);
+        assert_eq!((o.id.as_str(), o.kind.as_str(), o.trigger, o.price, o.client_id.as_deref(), o.ts), ("2148719", "take_profit", Some(750.0), 750.0, Some("t1abc"), 1750515742297));
+        let (o, open) = binance_algo_push_order(&ev("CANCELED")).unwrap();
+        assert!(!open);
+        assert_eq!(o.id, "2148719");
+        assert!(binance_algo_update(&ev("NEW")).is_none());
     }
 }

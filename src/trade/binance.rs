@@ -197,6 +197,8 @@ pub async fn can_trade(k: &Keys) -> Result<Option<bool>> {
 }
 
 pub async fn amend(k: &Keys, o: &OpenOrder, px: String, r: &Rules) -> Result<()> {
+    // the algo service has no modify
+    if o.trigger.is_some() { bail!("binance: a conditional or trailing order cannot be amended; cancel it and place a new one"); }
     binance(k, reqwest::Method::PUT, "/fapi/v1/order", &[("symbol", o.symbol.clone()), ("orderId", o.id.clone()),
         ("side", side_str(Exchange::Binance, o.side).into()), ("quantity", fmt_step(o.qty, r.step, true)), ("price", px)]).await?;
     Ok(())
@@ -205,6 +207,11 @@ pub async fn amend(k: &Keys, o: &OpenOrder, px: String, r: &Rules) -> Result<()>
 pub async fn cancel(k: &Keys, symbol: &str, id: &str) -> Result<()> {
     binance(k, reqwest::Method::DELETE, "/fapi/v1/order", &[("symbol", symbol.into()), ("orderId", id.into())]).await?;
     Ok(())
+}
+
+/// Algo-service rows (trigger Some: conditional and trailing orders) cancel by algoId, the rest by orderId.
+pub async fn cancel_order(k: &Keys, o: &OpenOrder) -> Result<()> {
+    if o.trigger.is_some() { tpsl::binance_cancel(k, &o.id).await } else { cancel(k, &o.symbol, &o.id).await }
 }
 
 pub async fn positions(k: &Keys) -> Result<Vec<Position>> {
@@ -227,13 +234,17 @@ pub async fn positions(k: &Keys) -> Result<Vec<Position>> {
 pub async fn open_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
     let ex = Exchange::Binance;
     let v = binance(k, reqwest::Method::GET, "/fapi/v1/openOrders", &[]).await?;
-    Ok(v.as_array().into_iter().flatten().map(|o| OpenOrder {
+    let mut out: Vec<OpenOrder> = v.as_array().into_iter().flatten().map(|o| OpenOrder {
         ex, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].to_string(),
         side: if o["side"] == "SELL" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["origQty"]), filled: n(&o["executedQty"]),
         tif: o["timeInForce"].as_str().unwrap_or_default().into(), kind: o["type"].as_str().unwrap_or_default().into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: o["time"].as_i64().unwrap_or(0),
         pos: match o["positionSide"].as_str() { Some("LONG") => Some(Side::Buy), Some("SHORT") => Some(Side::Sell), _ => None },
         client_id: opt_id(&o["clientOrderId"]), trigger: None,
-    }).collect())
+    }).collect();
+    // conditional entries and trailing stops live in the algo service (its TP/SL rows go to tpsl::list,
+    // which shares this fetch)
+    out.extend(tpsl::binance_algo_rows(k).await?.iter().filter_map(tpsl::binance_algo_order));
+    Ok(out)
 }
 
 pub async fn balance(k: &Keys) -> Result<Balance> {
@@ -332,6 +343,8 @@ pub async fn stream(k: Keys, tx: AccTx) {
                     Some("balanceUpdate" | "outboundAccountPosition") => send(AccEvent::BalanceDirty),
                     Some("ALGO_UPDATE") => if let Some((t, active)) = tpsl::binance_algo_update(&v) {
                         send(if active { AccEvent::TpSl(t) } else { AccEvent::TpSlDone { id: t.id } });
+                    } else if let Some((o, open)) = tpsl::binance_algo_push_order(&v) {
+                        send(if open { AccEvent::Order(o) } else { AccEvent::OrderDone { id: o.id } });
                     },
                     Some("listenKeyExpired") => return false,
                     _ => {}

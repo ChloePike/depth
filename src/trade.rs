@@ -219,9 +219,10 @@ pub struct OpenOrder { pub ex: Exchange, pub symbol: String, pub id: String, pub
     pub tif: String, pub reduce_only: bool, pub ts: i64,
     /// hedge mode: which position the order belongs to
     pub pos: Option<Side>,
-    /// our id for the order, where the venue row carries it (Bybit orderLinkId, Binance clientOrderId); None elsewhere
+    /// our id for the order, where the venue row carries it (Bybit orderLinkId, Binance clientOrderId / clientAlgoId); None elsewhere
     pub client_id: Option<String>,
-    /// trigger price when the row is a conditional order waiting on the venue; None for plain resting orders
+    /// trigger price when the row is a conditional order waiting on the venue; None for plain resting orders.
+    /// Binance: Some on every algo-service row (trailing without activation: Some(0)), which routes its cancel
     pub trigger: Option<f64> }
 
 /// The trading (margin) account, USD. Every other account is listed by `wallets`.
@@ -545,9 +546,14 @@ pub async fn amend(ex: Exchange, k: &Keys, o: &OpenOrder, price: f64, r: &Rules)
     Ok(())
 }
 
-/// Cancels one resting order row. ponytail: plain cancel by id on every venue; trigger rows
-/// (`o.trigger`) get their venue's algo cancel here once those rows are listed.
-pub async fn cancel_order(ex: Exchange, k: &Keys, o: &OpenOrder) -> Result<()> { cancel(ex, k, &o.symbol, &o.id).await }
+/// Cancels one resting order row. Binance trigger rows (`o.trigger`, algo service) go to the algo
+/// cancel; everywhere else a plain cancel by id (Bybit cancels conditional rows the same way).
+pub async fn cancel_order(ex: Exchange, k: &Keys, o: &OpenOrder) -> Result<()> {
+    match ex {
+        Exchange::Binance => binance::cancel_order(k, o).await,
+        _ => cancel(ex, k, &o.symbol, &o.id).await,
+    }
+}
 
 /// Outcome of a bulk cancel: how many cancels the venue accepted, and one line per refusal.
 #[derive(Clone, Debug, Default, PartialEq)]
