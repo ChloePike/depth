@@ -344,7 +344,7 @@ mod tests {
     use super::*;
 
     fn row(base: &str, vol24: f64, m5: Option<f64>, venues: Vec<Exchange>) -> Row {
-        Row { base: base.into(), px: 1.0, chg: [m5, None, None], vmult: None, vol24, spot24: 0.0, fund: None, oi_chg: [None; 2], liq15: None, gap: None, lead: None, venues, odd: vec![], flags: vec![],
+        Row { base: base.into(), px: 1.0, chg: [m5, None, None], vmult: None, vol24, ps24: (vol24, 0.0), fund: None, oi_chg: [None; 2], liq15: None, gap: None, lead: None, venues, odd: vec![], flags: vec![],
             op: m5.map(|x| Op::Score { score: x.abs() * 10.0, parts: vec![] }) }
     }
 

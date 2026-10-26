@@ -14,6 +14,8 @@ use std::collections::{HashMap, VecDeque};
 pub const VENUES: [Exchange; 7] = [Exchange::Binance, Exchange::Bybit, Exchange::Okx, Exchange::Bitget, Exchange::Gate, Exchange::Mexc, Exchange::Hyperliquid];
 /// Venues with an all-market liquidation feed (Binance's is one snapshot per symbol per second).
 pub const LIQ_VENUES: [Exchange; 2] = [Exchange::Binance, Exchange::Okx];
+/// venues whose spot is scanned: the perp / spot turnover ratio compares these only
+pub const SPOT_VENUES: [Exchange; 5] = [Exchange::Binance, Exchange::Bybit, Exchange::Okx, Exchange::Bitget, Exchange::Gate];
 
 const MIN: i64 = 60_000;
 /// history kept per series: the 1 h window and some slack
@@ -113,9 +115,10 @@ pub struct Row {
     pub chg: [Option<f64>; 3],
     /// last 15 min volume / the 24 h average rate (from the rolling 24 h volumes)
     pub vmult: Option<f64>,
-    /// 24 h perp volume summed over venues, USD; and spot
+    /// 24 h perp volume summed over venues, USD
     pub vol24: f64,
-    pub spot24: f64,
+    /// 24 h (perp, spot) volume over SPOT_VENUES only, USD (perp-only venues would inflate the ratio)
+    pub ps24: (f64, f64),
     /// most extreme hourly funding and its venue
     pub fund: Option<(Exchange, f64)>,
     /// OI change over 15 m and 1 h, summed over the venues that report OI
@@ -219,7 +222,7 @@ fn row(base: &str, vs: &[Venue], liq: Option<&VecDeque<(i64, f64)>>, now: i64) -
     Some(Row {
         base: base.to_string(), px, chg, vmult,
         vol24: perps.iter().map(|x| x.0.qvol).sum(),
-        spot24: ok.iter().filter(|x| x.0.spot).map(|x| x.0.qvol).sum(),
+        ps24: [false, true].map(|spot| ok.iter().filter(|x| x.0.spot == spot && SPOT_VENUES.contains(&x.0.ex)).map(|x| x.0.qvol).sum()).into(),
         fund: perps.iter().filter_map(|x| Some((x.0.ex, x.0.fund?))).max_by(|a, b| a.1.abs().total_cmp(&b.1.abs())),
         oi_chg,
         liq15: perps.iter().any(|x| LIQ_VENUES.contains(&x.0.ex)).then(|| liq.map_or(0.0, |q| q.iter().map(|x| x.1).sum())),
@@ -328,7 +331,7 @@ pub enum Op {
 /// volume in at least 40% of 72 h blocks (the cases 40-84%, ordinary alts about 19%); a two-sided
 /// wick (each wick longer than the body, range over 3x the median) in at least 25% of blocks; two
 /// or more days moving over 20%; listed under 60 days ago (when a venue says); perp turnover over
-/// 15x spot, or no spot on the scanned venues; a 7-day run-up over 100%. Values: block shares,
+/// 30x spot (about twice the market's 90th percentile: ETH and HYPE sit near 15x), or no spot on the scanned venues; a 7-day run-up over 100%. Values: block shares,
 /// day count, age in days, perp / spot ratio (infinite: no spot), run-up fraction.
 /// ponytail: equal weights and hand-set thresholds, uncalibrated; fit them on the 37 cases with scripts/althunt.py
 pub fn op_score(bars: &[HourBar], now: i64, perp24: f64, spot24: f64, listed: Option<i64>) -> Op {
@@ -365,11 +368,11 @@ pub fn op_score(bars: &[HourBar], now: i64, perp24: f64, spot24: f64, listed: Op
     let ratio = if spot24 > 0.0 { perp24 / spot24 } else { f64::INFINITY };
     let mut parts = vec![("spikes", spikes, spikes >= 0.4), ("wicks", wicks, wicks >= 0.25), ("days", days as f64, days >= 2)];
     if let Some(t) = listed { let age = (now - t) as f64 / DAY as f64; parts.push(("new", age, age < 60.0)); }
-    parts.extend([("perp", ratio, ratio > 15.0), ("runup", run, run > 1.0)]);
+    parts.extend([("perp", ratio, ratio > 30.0), ("runup", run, run > 1.0)]);
     Op::Score { score: 100.0 * parts.iter().filter(|p| p.2).count() as f64 / parts.len() as f64, parts }
 }
 
-/// Scores of the coins in `vols` ((perp, spot) 24 h volume by base) from the stored hours by base,
+/// Scores of the coins in `vols` ((perp, spot) 24 h volume on SPOT_VENUES by base) from the stored hours by base,
 /// each coin on the venue with the most hours. Coins with no hours that are not recorded either get none.
 pub fn op_scores(bars: &HashMap<String, Vec<(Exchange, HourBar)>>, vols: &HashMap<String, (f64, f64)>, listed: &HashMap<String, i64>, now: i64) -> HashMap<String, Op> {
     let mut out = HashMap::new();

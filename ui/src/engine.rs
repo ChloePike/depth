@@ -3140,7 +3140,7 @@ fn spawn_hunter(rt: &tokio::runtime::Runtime, off: &std::collections::HashSet<Ex
             };
             if let Some(listed) = listed.filter(|_| !rows.is_empty()) {
                 let (bars, s, prune) = (std::mem::take(&mut fresh), scores.clone(), scored_at == 0);
-                let vols: HashMap<String, (f64, f64)> = rows.iter().map(|r| (r.base.clone(), (r.vol24, r.spot24))).collect();
+                let vols: HashMap<String, (f64, f64)> = rows.iter().map(|r| (r.base.clone(), r.ps24)).collect();
                 (rescore, scored_at) = (false, now);
                 job = Some(tokio::task::spawn_blocking(move || {
                     depth::db::hunt_put(&bars);
