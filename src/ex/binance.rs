@@ -12,8 +12,9 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
     let sym = format!("{}{}", sub.base, sub.quote).to_uppercase();
     let s = sym.to_lowercase();
     match sub.market {
-        // ponytail: margin borrow rates need an API key, so margin is spot data only; add /sapi/v1/margin/interestRateHistory once keys exist
-        Market::Spot | Market::Margin => {
+        // ponytail: margin borrow rates need an API key and margin shares the spot book (Spot streams it), so Margin opens nothing; add /sapi/v1/margin/interestRateHistory once keys exist
+        Market::Margin => vec![],
+        Market::Spot => {
             let url = format!("wss://stream.binance.com:9443/stream?streams={s}@trade/{s}@bookTicker");
             let depth = format!("wss://stream.binance.com:9443/stream?streams={s}@depth@100ms");
             let snap = format!("https://api.binance.com/api/v3/depth?symbol={sym}&limit=1000");

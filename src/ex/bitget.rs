@@ -11,6 +11,11 @@ const REST: &str = "https://api.bitget.com";
 pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
     let e = Emit { ex: Exchange::Bitget, market: sub.market, tx };
     let sym = format!("{}{}", sub.base, sub.quote).to_uppercase();
+    // the margin book is the spot book (Spot already streams it): only the borrow rates are new
+    if sub.market == Market::Margin {
+        let assets = [sub.base.to_uppercase(), sub.quote.to_uppercase()];
+        return vec![tokio::spawn(ws::poll("bitget borrow".into(), Duration::from_secs(60), move || poll_borrow(e.clone(), sym.clone(), assets.clone())))];
+    }
     let inst = match sub.market {
         Market::Spot | Market::Margin => "SPOT",
         Market::Perp => "USDT-FUTURES",
@@ -34,16 +39,9 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
             move |f| on_msg(&e, &sym, hours, &mut seq, f)
         }).await
     })];
-    match sub.market {
-        Market::Margin => {
-            let assets = [sub.base.to_uppercase(), sub.quote.to_uppercase()];
-            tasks.push(tokio::spawn(ws::poll("bitget borrow".into(), Duration::from_secs(60), move || poll_borrow(e.clone(), sym.clone(), assets.clone()))));
-        }
-        Market::Perp => {
-            // ponytail: no public liquidation feed on Bitget v2 (WS or REST); add if one appears
-            tasks.push(tokio::spawn(ws::poll("bitget ls".into(), Duration::from_secs(60), move || poll_ls(e.clone(), sym.clone()))));
-        }
-        _ => {}
+    if perp {
+        // ponytail: no public liquidation feed on Bitget v2 (WS or REST); add if one appears
+        tasks.push(tokio::spawn(ws::poll("bitget ls".into(), Duration::from_secs(60), move || poll_ls(e.clone(), sym.clone()))));
     }
     tasks
 }

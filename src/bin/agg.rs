@@ -1,7 +1,7 @@
 //! Live aggregation dashboard: `agg <base> [seconds=60]`.
 //! Streams spot, perp and options for `base` from every exchange into one `Agg`, prints the
 //! cross-venue view every 5s, then runs sanity checks. Non-zero exit if a check fails.
-//! ponytail: margin is not streamed here (same books as spot); run `probe <ex> margin` for borrow rates.
+//! ponytail: margin is not streamed here (the margin connectors only poll borrow rates; the books are spot's); run `probe <ex> margin` for those.
 use std::time::Duration;
 use depth::{agg::Agg, *};
 

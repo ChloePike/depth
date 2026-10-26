@@ -16,17 +16,17 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
     let sym = format!("{}{}", sub.base, sub.quote).to_uppercase();
     let topics = |names: &[&str]| names.iter().map(|n| format!("{n}.{sym}")).collect::<Vec<_>>();
     match sub.market {
-        Market::Spot | Market::Margin => {
+        Market::Spot => {
             let args = topics(&["publicTrade", "orderbook.1000", "orderbook.1"]);
             let (e1, sym1) = (e.clone(), sym.clone());
             let mut book = 0i64;
-            let mut v = vec![tokio::spawn(session(format!("bybit {:?}", sub.market), format!("{WS}/spot"), args,
-                move |m| on_market(&e1, &sym1, m, &mut book, &mut Map::new())))];
-            if sub.market == Market::Margin {
-                let assets = [sub.base.to_uppercase(), sub.quote.to_uppercase()];
-                v.push(tokio::spawn(ws::poll("bybit borrow".into(), Duration::from_secs(300), move || poll_borrow(e.clone(), sym.clone(), assets.clone()))));
-            }
-            v
+            vec![tokio::spawn(session("bybit Spot".into(), format!("{WS}/spot"), args,
+                move |m| on_market(&e1, &sym1, m, &mut book, &mut Map::new())))]
+        }
+        // the margin book is the spot book (Spot already streams it): only the borrow rates are new
+        Market::Margin => {
+            let assets = [sub.base.to_uppercase(), sub.quote.to_uppercase()];
+            vec![tokio::spawn(ws::poll("bybit borrow".into(), Duration::from_secs(300), move || poll_borrow(e.clone(), sym.clone(), assets.clone())))]
         }
         Market::Perp => {
             let args = topics(&["publicTrade", "orderbook.1000", "orderbook.1", "tickers", "allLiquidation"]);

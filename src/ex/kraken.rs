@@ -28,8 +28,10 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
     let xbt = if base == "BTC" { "XBT".to_string() } else { base.clone() };
     match sub.market {
         // ponytail: margin borrow (rollover) fees are not in any public endpoint (AssetPairs has no
-        // margin fee fields any more), so margin is spot data only; needs private API to add BorrowRate
-        Market::Spot | Market::Margin => vec![tokio::spawn(async move {
+        // margin fee fields any more), and margin shares the spot book (Spot streams it), so Margin
+        // opens nothing; needs private API to add BorrowRate
+        Market::Margin => vec![],
+        Market::Spot => vec![tokio::spawn(async move {
             // ponytail: a failed lookup (network) also falls back to USD
             let listed = ws::get_json(&format!("https://api.kraken.com/0/public/AssetPairs?pair={xbt}{quote}")).await
                 .is_ok_and(|v| v["result"].as_object().is_some_and(|r| !r.is_empty()));

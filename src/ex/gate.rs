@@ -13,20 +13,16 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
     let (base, quote) = (sub.base.to_uppercase(), sub.quote.to_uppercase());
     let sym = format!("{base}_{quote}");
     match sub.market {
-        Market::Spot | Market::Margin => {
-            let spec = subscribe(Spec::new(format!("gate {:?}", sub.market), "wss://api.gateio.ws/ws/v4/"), "spot", &[
+        Market::Spot => {
+            let spec = subscribe(Spec::new("gate Spot", "wss://api.gateio.ws/ws/v4/"), "spot", &[
                 ("spot.trades", vec![sym.clone()]),
                 ("spot.order_book", vec![sym.clone(), "50".into(), "100ms".into()]),
                 ("spot.book_ticker", vec![sym.clone()]),
             ]);
-            let e2 = e.clone();
-            let mut tasks = vec![tokio::spawn(ws::run(spec, move |f| on_spot(&e, f)))];
-            if sub.market == Market::Margin {
-                tasks.push(tokio::spawn(ws::poll("gate borrow".into(), Duration::from_secs(300),
-                    move || poll_borrow(e2.clone(), [base.clone(), quote.clone()]))));
-            }
-            tasks
+            vec![tokio::spawn(ws::run(spec, move |f| on_spot(&e, f)))]
         }
+        // the margin book is the spot book (Spot already streams it): only the borrow rates are new
+        Market::Margin => vec![tokio::spawn(ws::poll("gate borrow".into(), Duration::from_secs(300), move || poll_borrow(e.clone(), [base.clone(), quote.clone()])))],
         Market::Perp => {
             let (e2, sym2) = (e.clone(), sym.clone());
             vec![

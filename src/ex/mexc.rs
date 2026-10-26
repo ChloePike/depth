@@ -9,12 +9,13 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
     let e = Emit { ex: Exchange::Mexc, market: sub.market, tx };
     let (b, q) = (sub.base.to_uppercase(), sub.quote.to_uppercase());
     match sub.market {
-        // ponytail: MEXC publishes no public margin borrow rates, so margin is spot data only
-        Market::Spot | Market::Margin => {
+        // ponytail: MEXC publishes no public margin borrow rates and margin shares the spot book (Spot streams it), so Margin opens nothing
+        Market::Margin => vec![],
+        Market::Spot => {
             let sym = format!("{b}{q}");
             let params = [format!("spot@public.aggre.deals.v3.api.pb@100ms@{sym}"),
                           format!("spot@public.aggre.bookTicker.v3.api.pb@100ms@{sym}")];
-            let spec = Spec::new(format!("mexc {:?}", sub.market), "wss://wbs-api.mexc.com/ws")
+            let spec = Spec::new("mexc Spot", "wss://wbs-api.mexc.com/ws")
                 .sub(json!({"method": "SUBSCRIPTION", "params": params}).to_string())
                 .ping(Duration::from_secs(20), r#"{"method":"PING"}"#);
             let (e1, sym1) = (e.clone(), sym.clone());

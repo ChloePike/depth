@@ -24,8 +24,9 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
             let coin = coin(&sub.base);
             vec![tokio::spawn(stream(e, coin, &["trades", "l2", "bbo", "activeAssetCtx", "fastAssetCtxs"]))]
         }
-        // no margin borrowing on Hyperliquid spot, so margin is plain spot data
-        Market::Spot | Market::Margin => {
+        // no margin borrowing on Hyperliquid spot: Margin opens nothing (Spot streams the book)
+        Market::Margin => vec![],
+        Market::Spot => {
             let (base, quote) = (sub.base.to_uppercase(), sub.quote.to_uppercase());
             vec![tokio::spawn(async move {
                 let coin = loop {
