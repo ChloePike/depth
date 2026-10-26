@@ -32,7 +32,7 @@ pub struct Policy {
     pub fees: HashMap<Exchange, (f64, f64)>,
 }
 
-const DEFAULT_FEES: (f64, f64) = (0.00055, 0.0002);
+pub(crate) const DEFAULT_FEES: (f64, f64) = (0.00055, 0.0002);
 
 impl Default for Policy {
     fn default() -> Self {

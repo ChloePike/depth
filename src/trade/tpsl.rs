@@ -32,7 +32,7 @@ use serde_json::{json, Value};
 pub enum Trigger { #[default] Mark, Last }
 
 /// One active TP/SL. `pos` is the position side it protects (Buy = long); `qty` None = whole position.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TpSl { pub id: String, pub ex: Exchange, pub symbol: String, pub pos: Side, pub take_profit: bool, pub trigger_px: f64, pub qty: Option<f64>, pub trigger: Trigger }
 
 fn n(v: &Value) -> f64 { crate::num(v) }
