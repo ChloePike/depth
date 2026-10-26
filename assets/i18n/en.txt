@@ -445,6 +445,5 @@ opt.close_hint = Click to load a closing order
 tray.last_hour = Last hour
 tray.open = Open Depth
 tray.quit = Quit
-# P4
 run.title = Already running
 run.body = Depth is open in another window.

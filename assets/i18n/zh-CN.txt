@@ -444,6 +444,5 @@ opt.close_hint = 点击填入平仓单
 tray.last_hour = 最近一小时
 tray.open = 打开 Depth
 tray.quit = 退出
-# P4
 run.title = 已在运行
 run.body = Depth 已在另一个窗口中打开。

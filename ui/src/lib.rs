@@ -233,7 +233,9 @@ pub(crate) fn lenient_map<'de, D: serde::Deserializer<'de>, K: serde::de::Deseri
 /// Lists per key (drawings per base asset), each list read with `lenient_vec`.
 pub(crate) fn lenient_map_vec<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(d: D) -> Result<HashMap<String, Vec<T>>, D::Error> {
     let all: HashMap<String, serde_json::Value> = serde::Deserialize::deserialize(d)?;
-    Ok(all.into_iter().map(|(k, v)| (k, lenient_vec(v).unwrap_or_default())).collect())
+    // a value that is not a list is lost too: count it as dropped
+    let lost = || { DROPPED.with(|c| c.set(c.get() + 1)); vec![] };
+    Ok(all.into_iter().map(|(k, v)| (k, lenient_vec(v).unwrap_or_else(|_| lost()))).collect())
 }
 
 /// settings.json read key by key: what this build cannot parse (a newer build's enum variant or
@@ -271,6 +273,29 @@ impl Doc {
     }
 }
 
+/// settings.json as text plus whether it exists but could not be read. A file that is not UTF-8
+/// (UTF-16 from a Windows editor) comes through lossy, which `load_settings` flags.
+fn read_settings(p: &std::path::Path) -> (String, bool) {
+    match std::fs::read(p) {
+        Ok(b) => (String::from_utf8_lossy(&b).into_owned(), false),
+        Err(e) => (String::new(), e.kind() != std::io::ErrorKind::NotFound),
+    }
+}
+
+/// Copy settings.json to settings.json.<ext>; false (said on stderr) when the copy failed.
+fn keep_copy(p: &std::path::Path, ext: &str) -> bool {
+    std::fs::copy(p, p.with_extension(format!("json.{ext}"))).map_err(|e| eprintln!("[settings] cannot keep a copy of {} as .{ext}: {e}", p.display())).is_ok()
+}
+
+/// Write settings.json (temp file + rename, so a crash cannot truncate it). The first write of a launch
+/// keeps the file it replaces as settings.json.prev: nested fields this build does not know (a newer
+/// build's) and lists it cannot read are dropped on load without any other trace.
+fn write_settings(p: &std::path::Path, json: &str, prev_kept: &mut bool) -> bool {
+    if !std::mem::replace(prev_kept, true) && p.exists() { keep_copy(p, "prev"); }
+    let tmp = p.with_extension("json.tmp");
+    p.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, p).is_ok()
+}
+
 fn load_settings(text: &str) -> (Settings, bool) {
     DROPPED.with(|c| c.set(0));
     let v: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
@@ -303,6 +328,10 @@ pub struct App {
     pop: Option<(egui::Pos2, bool)>,
     /// last settings JSON written, and when it was last checked
     saved: (String, Instant),
+    /// settings.json exists but could not be read at start: nothing is saved until it reads
+    unreadable: bool,
+    /// settings.json.prev written this launch (`write_settings`)
+    prev_kept: bool,
     /// own window's position and size [x, y, w, h] (not hosted; kept while maximized / full screen)
     window: Option<[f32; 4]>,
     mode: Market,
@@ -386,10 +415,11 @@ impl App {
             subsecond::register_handler(std::sync::Arc::new(move || c.request_repaint()));
         }
         let env = |k: &str| std::env::var(k).ok();
-        let saved = settings_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+        let (saved, unreadable) = settings_path().map_or((String::new(), false), |p| read_settings(&p));
         let (st, lossy) = load_settings(&saved);
         // part of the file was dropped (or is newer than this build): keep a copy before the first save rewrites it
-        if lossy && let Some(p) = settings_path() && std::fs::copy(&p, p.with_extension("json.bad")).is_ok() { eprintln!("[settings] original kept in {}.bad", p.display()); }
+        // (screenshot runs never write settings, and never save either)
+        if (lossy || unreadable) && env("T1_SHOT").is_none() && let Some(p) = settings_path() && keep_copy(&p, "bad") { eprintln!("[settings] original kept in {}.bad", p.display()); }
         set_lang(&env("T1_LANG").or(st.lang.clone()).unwrap_or_default());
         let prefs = st.prefs.clone().unwrap_or_default();
         prefs.apply(&cc.egui_ctx);
@@ -422,7 +452,7 @@ impl App {
         if let Some(tf) = env("T1_TF").and_then(|s| s.parse().ok()) { chart.tf = tf; }
         let layout = env("T1_LAYOUT").or(st.layout).unwrap_or_else(|| "1".into());
         App {
-            eng, prefs, settings: Default::default(), command: Default::default(), back: None, help: false, kbd: kbd::Kbd::start(), tray: None, pop: None, saved: (saved, Instant::now()), window: st.window, mode, chart, book, opt: Default::default(), picker, trade, spot: Default::default(),
+            eng, prefs, settings: Default::default(), command: Default::default(), back: None, help: false, kbd: kbd::Kbd::start(), tray: None, pop: None, saved: (saved, Instant::now()), unreadable, prev_kept: false, window: st.window, mode, chart, book, opt: Default::default(), picker, trade, spot: Default::default(),
             rate: (Instant::now(), 0, 0.0),
             shot: env("T1_SHOT").map(|p| (p, env("T1_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(30.0))),
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
@@ -796,7 +826,9 @@ impl App {
                         let on = !self.eng.off.contains(&e);
                         let lat = stats.latency(e);
                         let lat_col = match lat { Some(l) if l < 150.0 => up(), Some(l) if l < 400.0 => WARN, Some(_) => dn(), None => dim() };
-                        let resp = status_venue(ui, e, on, alive, lat, lat_col, names)
+                        // Deribit streams options only: with nothing to stream it is idle, not down
+                        let idle = e == Exchange::Deribit && !depth::ex::deribit::streams(self.mode, &self.eng.base);
+                        let resp = status_venue(ui, e, on, alive, idle, lat, lat_col, names)
                             .on_hover_text(format!("{e:?}: {}", if on { t("status.scope_on") } else { t("status.scope_off") }));
                         // switching a venue off disconnects only that venue; on connects only it
                         // applied after the frame's agg lock is released (set_venue takes it): doing it here deadlocked
@@ -867,8 +899,12 @@ impl App {
         let Ok(json) = serde_json::to_string_pretty(&s) else { return };
         if json == self.saved.0 { return; }
         let Some(p) = settings_path() else { return };
-        let tmp = p.with_extension("json.tmp");
-        let ok = p.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::write(&tmp, &json).is_ok() && std::fs::rename(&tmp, &p).is_ok();
+        // saving now would replace the real file with defaults: wait until it reads, and keep it as .bad first
+        if self.unreadable {
+            if !(std::fs::read(&p).is_ok() && keep_copy(&p, "bad")) { return; }
+            self.unreadable = false;
+        }
+        let ok = write_settings(&p, &json, &mut self.prev_kept);
         if ok { self.saved.0 = json; } else { eprintln!("settings: cannot write {}", p.display()); }
     }
 
@@ -1325,17 +1361,18 @@ fn window_controls_right(ui: &mut Ui, maximized: bool) {
     }
 }
 
-/// Status bar venue: state dot (green streaming, red silent, grey switched off), name, push latency.
-fn status_venue(ui: &mut Ui, e: Exchange, on: bool, alive: bool, lat: Option<f64>, lat_col: Color32, names: bool) -> egui::Response {
+/// Status bar venue: state dot (green streaming, red silent, grey switched off or idle: nothing to stream), name, push latency.
+#[allow(clippy::too_many_arguments)]
+fn status_venue(ui: &mut Ui, e: Exchange, on: bool, alive: bool, idle: bool, lat: Option<f64>, lat_col: Color32, names: bool) -> egui::Response {
     let name = ui.painter().layout_no_wrap(if names { format!("{e:?}") } else { String::new() }, prop(11.5), if on { mu() } else { dim() });
-    let ms_col = if !on { dim() } else if alive { lat_col } else { dn() };
+    let ms_col = if !on || idle { dim() } else if alive { lat_col } else { dn() };
     let ms = ui.painter().layout_no_wrap(if on { lat.map(|l| format!("{l:.0}ms")).unwrap_or("–".into()) } else { "off".into() }, mono(11.5), ms_col);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(30.0 + name.size().x + 5.0 + ms.size().x, 18.0), egui::Sense::click());
     let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered(), 0.1);
     let p = ui.painter();
     if hv > 0.0 { p.rect_filled(rect.expand2(egui::vec2(5.0, 1.0)), 3, hl().gamma_multiply(0.7 * hv)); }
     let y = rect.center().y;
-    p.circle_filled(egui::pos2(rect.left() + 3.0, y), 3.0, if !on { dim() } else if alive { up() } else { dn() });
+    p.circle_filled(egui::pos2(rect.left() + 3.0, y), 3.0, if !on || idle { dim() } else if alive { up() } else { dn() });
     theme::icon(p, e, egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, y), egui::vec2(12.0, 12.0)), !on);
     let x = rect.left() + 30.0;
     p.galley(egui::pos2(x, y - name.size().y / 2.0), name.clone(), mu());
@@ -1382,5 +1419,41 @@ mod tests {
         // a key only a newer build writes, broken JSON: flagged; no file yet: not
         assert!(load_settings(r#"{"base": "BTC", "from_the_future": 1}"#).1 && load_settings("{oops").1);
         assert!(!load_settings("").1);
+        // drawings that are not a list lose them: flagged
+        assert!(load_settings(r#"{"chart": {"drawings": {"BTC": "oops"}}}"#).1);
+    }
+
+    #[test]
+    fn first_write_keeps_the_replaced_file_as_prev() {
+        let dir = std::env::temp_dir().join(format!("depth-settings-prev-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (p, prev) = (dir.join("settings.json"), dir.join("settings.json.prev"));
+        let mut kept = false;
+        // no file yet: nothing to keep
+        assert!(write_settings(&p, "first", &mut kept) && !prev.exists());
+        kept = false;
+        std::fs::write(&p, "from a newer build").unwrap();
+        assert!(write_settings(&p, "one", &mut kept) && write_settings(&p, "two", &mut kept));
+        // later writes of the launch leave .prev alone
+        assert_eq!((std::fs::read_to_string(&p).unwrap(), std::fs::read_to_string(&prev).unwrap()), ("two".into(), "from a newer build".into()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn settings_file_is_never_read_as_empty() {
+        let dir = std::env::temp_dir().join(format!("depth-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("settings.json");
+        assert_eq!(read_settings(&p), (String::new(), false));
+        // UTF-16 from a Windows editor is not UTF-8: it reads lossy and is flagged, not taken for "no file"
+        let utf16: Vec<u8> = "{\"base\": \"ETH\"}".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        std::fs::write(&p, &utf16).unwrap();
+        let (text, unreadable) = read_settings(&p);
+        assert!(!unreadable && !text.is_empty() && load_settings(&text).1);
+        assert!(keep_copy(&p, "bad") && std::fs::read(dir.join("settings.json.bad")).unwrap() == utf16);
+        // exists but cannot be read (a folder here): flagged; a copy that fails says so
+        assert_eq!(read_settings(&dir), (String::new(), true));
+        assert!(!keep_copy(&dir.join("nope.json"), "bad"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

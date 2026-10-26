@@ -1,4 +1,5 @@
 import AppKit
+import CT1
 import SwiftUI
 
 @main
@@ -6,6 +7,9 @@ struct DepthApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
 
     init() {
+        // a second Depth would fight the first over the account streams and settings.json; the Rust side has
+        // already told the user, so quit before any window exists (T1_MULTI=1 skips the check)
+        if t1_instance_lock() == 0 { exit(0) }
         // the app was called Terminal One (bundle id local.terminal-one): carry its defaults over once
         let d = UserDefaults.standard
         if !d.bool(forKey: "t1.migrated"), let old = d.persistentDomain(forName: "local.terminal-one") {

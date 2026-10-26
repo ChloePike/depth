@@ -67,12 +67,13 @@ fn one_typo(a: &[u8], b: &[u8]) -> bool {
 const SHOWN: usize = 8;
 
 /// What one word can mean, best first (at most SHOWN): by `score`, keywords before coins, coins by
-/// 24h volume. A keyword needs three letters unless exact, so a stray key never switches the venue.
+/// 24h volume. A keyword needs three letters unless exact, so a stray key never switches the venue,
+/// and a venue that is only a partial match follows the coins of its tier ("hyp" is HYPE, not Hyperliquid).
 fn candidates(word: &str, tickers: &[Ticker]) -> Vec<Cmd> {
     let w = word.to_uppercase();
     let coin = w.strip_suffix("/USDT").or(w.strip_suffix("USDT")).filter(|c| !c.is_empty()).unwrap_or(&w);
     let mut c: Vec<(u8, u8, f64, Cmd)> = keywords().into_iter()
-        .filter_map(|(k, cmd)| score(&w, &k).filter(|s| *s == 0 || w.len() >= 3).map(|s| (s, 0, 0.0, cmd)))
+        .filter_map(|(k, cmd)| score(&w, &k).filter(|s| *s == 0 || w.len() >= 3).map(|s| (s, if s > 0 && matches!(cmd, Cmd::Venue(_)) { 2 } else { 0 }, 0.0, cmd)))
         .chain(tickers.iter().filter_map(|t| score(coin, &t.base).map(|s| (s, 1, -t.quote_vol, Cmd::Base(t.base.clone())))))
         .collect();
     c.sort_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)).then(x.2.total_cmp(&y.2)));
@@ -246,6 +247,13 @@ mod tests {
         assert_eq!(candidates("byb", &t), vec![Cmd::Venue(Exchange::Bybit)]);
         assert_eq!(candidates("bybt", &t)[0], Cmd::Venue(Exchange::Bybit));
         assert_eq!(candidates("hyper", &t), vec![Cmd::Venue(Exchange::Hyperliquid)]);
+        // a partial coin word that prefixes a venue is the coin; the venue follows it, and an exact venue word still wins
+        let mut t2 = t.clone();
+        t2.extend([tk("HYPE", 6.0), tk("OKX", 1.0)]);
+        assert_eq!(candidates("hyp", &t2), vec![base("HYPE"), Cmd::Venue(Exchange::Hyperliquid)]);
+        assert_eq!(parse("hyp", &t2, 0), Ok(vec![base("HYPE")]));
+        assert_eq!(candidates("hyper", &t2)[0], Cmd::Venue(Exchange::Hyperliquid));
+        assert_eq!(candidates("okx", &t2)[0], Cmd::Venue(Exchange::Okx));
         // the word being typed takes the picked row; finished words their best match
         assert_eq!(parse("so", &t, 1), Ok(vec![base("SOXL")]));
         assert_eq!(parse("so ", &t, 1), Ok(vec![base("SOL")]));

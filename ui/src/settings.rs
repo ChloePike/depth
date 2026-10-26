@@ -346,7 +346,7 @@ impl SettingsView {
                         .font(prop_m(12.5)).color(fg())).wrap());
                 });
             });
-        footer(ui, l(os("Stored in the macOS Keychain (service \"depth\"), never written to a file.", "Stored in the Windows Credential Manager (target \"depth\"), never written to a file.",
+        footer(ui, l(os("Stored in the macOS Keychain (service \"depth\"), never written to a file.", "Stored in the Windows Credential Manager (target \"depth:<account>\"), never written to a file.",
             "Stored in the system keyring (libsecret, service \"depth\"), never written to a file.")));
         let keys = st["keys"].as_array().cloned().unwrap_or_default();
         section(ui, l("Venues"), "", |ui| {
