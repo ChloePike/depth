@@ -135,22 +135,16 @@ pub async fn option_plan(symbol: &str, qty: f64) -> Result<OptBuy> {
     let asks: Vec<(f64, f64)> = b["result"]["a"].as_array().into_iter().flatten().map(|l| (n(&l[0]), n(&l[1]))).filter(|(p, q)| *p > 0.0 && *q > 0.0).collect();
     let qty = ceil_step(qty, step, min);
     let (limit, fill, avg) = sweep(&asks, qty).ok_or_else(|| anyhow!("{symbol}: no asks"))?;
-    Ok(OptBuy { ex, symbol: symbol.into(), qty, limit, tick, step, fill, avg, cost: fill * avg })
-}
-
-/// (base, expiry, strike, call) from a Bybit option symbol.
-pub fn bybit_opt_parts(s: &str) -> Option<(String, String, f64, bool)> {
-    let p: Vec<&str> = s.split('-').collect();
-    if p.len() < 4 { return None; }
-    Some((p[0].into(), p[1].into(), p[2].parse().ok()?, p[3] == "C"))
+    Ok(OptBuy { ex, symbol: symbol.into(), qty, limit, tick, step, fill, avg, cost: fill * avg, usd: 1.0 })
 }
 
 /// One Bybit option position row (REST list or `position.option` push); size 0 = closed.
 fn bybit_opt_pos(p: &Value) -> Option<OptPos> {
     let symbol = p["symbol"].as_str()?;
-    let (base, expiry, strike, call) = bybit_opt_parts(symbol)?;
+    let (base, expiry, strike, call) = opt_parts(symbol)?;
     Some(OptPos { ex: Exchange::Bybit, symbol: symbol.into(), base, expiry, strike, call,
-        side: if p["side"] == "Sell" { Side::Sell } else { Side::Buy }, qty: n(&p["size"]), avg: n(&p["avgPrice"]), mark: n(&p["markPrice"]), upnl: n(&p["unrealisedPnl"]) })
+        side: if p["side"] == "Sell" { Side::Sell } else { Side::Buy }, qty: n(&p["size"]), avg: n(&p["avgPrice"]), mark: n(&p["markPrice"]), upnl: n(&p["unrealisedPnl"]),
+        delta: z(&p["delta"]), gamma: z(&p["gamma"]), vega: z(&p["vega"]), theta: z(&p["theta"]) })
 }
 
 pub async fn option_positions(k: &Keys) -> Result<Vec<OptPos>> {
@@ -486,13 +480,6 @@ async fn bybit_usd_prices() -> Result<std::collections::HashMap<String, f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bybit_option_symbol() {
-        assert_eq!(bybit_opt_parts("HYPE-30OCT26-72-P-USDT"), Some(("HYPE".into(), "30OCT26".into(), 72.0, false)));
-        assert_eq!(bybit_opt_parts("BTC-25DEC26-105000-C"), Some(("BTC".into(), "25DEC26".into(), 105000.0, true)));
-        assert_eq!(bybit_opt_parts("BTCUSDT"), None);
-    }
 
     #[test]
     fn bybit_signature_layout() {

@@ -1,5 +1,6 @@
-//! Read-only account check: `account [BASE=BTC]`. Prints instrument rules for every tradable
-//! venue and, where Keychain keys exist, balance / positions / open orders. Never places orders.
+//! Read-only account check: `account [BASE=BTC]`. Prints perp instrument rules for every tradable
+//! venue and, where Keychain keys exist, balance / positions / open orders (and option positions /
+//! orders on the option venues). Never places orders.
 use depth::trade;
 
 #[tokio::main]
@@ -18,7 +19,7 @@ async fn main() {
     if std::env::args().nth(2).as_deref() == Some("stream") {
         let secs: u64 = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(30);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        for ex in trade::TRADABLE { if let Some(k) = trade::keychain(ex) { tokio::spawn(trade::stream(ex, k, tx.clone())); } }
+        for ex in trade::KEY_VENUES { if let Some(k) = trade::keychain(ex) { tokio::spawn(trade::stream(ex, k, tx.clone())); } }
         let end = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
         let mut marks = 0u64;
         while let Ok(Some((ex, ev))) = tokio::time::timeout_at(end, rx.recv()).await {
@@ -29,10 +30,13 @@ async fn main() {
     }
     println!("{}", if trade::testnet() { "TESTNET" } else { "MAINNET" });
     let mut bad = false;
-    for ex in trade::TRADABLE {
-        match trade::rules(ex, &sym).await {
-            Ok(r) => println!("{ex:?} {sym} rules: tick {} step {} min_qty {} min_notional {}", r.tick, r.step, r.min_qty, r.min_notional),
-            Err(e) => { println!("FAIL {ex:?} rules: {e:#}"); bad = true; }
+    for ex in trade::KEY_VENUES {
+        // Deribit has no perp order entry: no perp rules there
+        if trade::TRADABLE.contains(&ex) {
+            match trade::rules(ex, &sym).await {
+                Ok(r) => println!("{ex:?} {sym} rules: tick {} step {} min_qty {} min_notional {}", r.tick, r.step, r.min_qty, r.min_notional),
+                Err(e) => { println!("FAIL {ex:?} rules: {e:#}"); bad = true; }
+            }
         }
         let Some(k) = trade::keychain(ex) else { println!("{ex:?}: no keys in Keychain. Add with:\n{}", trade::keychain_hint(ex)); continue };
         match trade::balance(ex, &k).await {
@@ -51,6 +55,16 @@ async fn main() {
         match trade::open_orders(ex, &k).await {
             Ok(os) => { println!("{ex:?} open orders: {}", os.len()); for o in os { println!("  {} {:?} {} @ {} ({})", o.symbol, o.side, o.qty, o.price, o.kind); } }
             Err(e) => { println!("FAIL {ex:?} open orders: {e:#}"); bad = true; }
+        }
+        if trade::OPTION_VENUES.contains(&ex) {
+            match trade::option_positions(ex, &k).await {
+                Ok(ps) => { println!("{ex:?} option positions: {}", ps.len()); for p in ps { println!("  {} {:?} {} avg {} mark {} upnl {:.2} delta {:+.3} theta {:+.2}", p.symbol, p.side, p.qty, p.avg, p.mark, p.upnl, p.delta, p.theta); } }
+                Err(e) => { println!("FAIL {ex:?} option positions: {e:#}"); bad = true; }
+            }
+            match trade::option_orders(ex, &k).await {
+                Ok(os) => { println!("{ex:?} option orders: {}", os.len()); for o in os { println!("  {} {:?} {} @ {} {} ({} {})", o.symbol, o.side, o.qty, o.price, trade::option_quote(ex, &o.symbol), o.kind, o.tif); } }
+                Err(e) => { println!("FAIL {ex:?} option orders: {e:#}"); bad = true; }
+            }
         }
     }
     if bad { std::process::exit(1); }
