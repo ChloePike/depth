@@ -7,6 +7,7 @@ pub mod l3;
 pub mod algo;
 pub mod algoscan;
 pub mod ex;
+pub mod hunter;
 pub mod insure;
 pub mod quant;
 pub mod risk;
