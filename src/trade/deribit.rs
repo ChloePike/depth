@@ -223,16 +223,19 @@ fn auth_msg(k: &Keys, ts: i64, nonce: &str) -> String {
         "timestamp": ts, "nonce": nonce, "data": "", "signature": sign(&k.secret, ts, nonce, "")}}).to_string()
 }
 
-/// The subscription, sent only once the auth reply grants a token.
+/// The subscription and one account summary (every currency, to seed the pushed totals), sent only once the auth
+/// reply grants a token.
 fn after_auth(reply: &str) -> Vec<String> {
     let ok = serde_json::from_str::<Value>(reply).is_ok_and(|v| v["id"] == 1 && v["result"]["access_token"].is_string());
     if !ok { return vec![]; }
-    vec![json!({"jsonrpc": "2.0", "id": 2, "method": "private/subscribe", "params": {"channels": CHANNELS}}).to_string()]
+    vec![json!({"jsonrpc": "2.0", "id": 2, "method": "private/subscribe", "params": {"channels": CHANNELS}}).to_string(),
+        json!({"jsonrpc": "2.0", "id": 3, "method": "private/get_account_summaries", "params": {}}).to_string()]
 }
 
-/// Per-connection state: token lifetime (authorized at, lifetime ms) and the last portfolio row / index per currency.
+/// Per-connection state: token lifetime (authorized at, lifetime ms), the last portfolio row / index per currency,
+/// and whether the summary has seeded every currency (no pushed total before: it would count only the ones pushed).
 #[derive(Default)]
-struct Session { auth: Option<(i64, i64)>, portfolio: std::collections::HashMap<String, Value>, index: std::collections::HashMap<String, f64> }
+struct Session { auth: Option<(i64, i64)>, portfolio: std::collections::HashMap<String, Value>, index: std::collections::HashMap<String, f64>, seeded: bool }
 
 /// One frame -> account events. Err((reason, seconds to wait)) ends the session: auth refused, subscription refused,
 /// too_many_requests (the venue drops the session anyway) or the token past 80% of its life (reconnecting
@@ -254,6 +257,13 @@ fn on_frame(s: &mut Session, v: &Value, now: i64) -> Result<Vec<AccEvent>, (Stri
             eprintln!("[deribit account] authenticated, scope {}", v["result"]["scope"].as_str().unwrap_or("?"));
         }
         Some(2) => out.push(AccEvent::Resync),
+        Some(3) => {
+            // a currency pushed meanwhile keeps its newer row
+            for r in v["result"]["summaries"].as_array().into_iter().flatten() {
+                s.portfolio.entry(r["currency"].as_str().unwrap_or_default().to_uppercase()).or_insert_with(|| r.clone());
+            }
+            s.seeded = true;
+        }
         _ => {}
     }
     let (ch, d) = (v["params"]["channel"].as_str().unwrap_or_default(), &v["params"]["data"]);
@@ -267,12 +277,14 @@ fn on_frame(s: &mut Session, v: &Value, now: i64) -> Result<Vec<AccEvent>, (Stri
         out.extend(d["positions"].as_array().into_iter().flatten().filter_map(opt_pos).map(AccEvent::OptPos));
     } else if ch.starts_with("user.portfolio.") {
         s.portfolio.insert(d["currency"].as_str().unwrap_or_default().to_uppercase(), d.clone());
-        // no total until the indexes of the coins held have arrived
-        let idx = &s.index;
-        if let Some(b) = fold(s.portfolio.values(), |c| idx.get(c).copied()) { out.push(AccEvent::Wallet(b)); }
     } else if ch.starts_with("deribit_price_index.") {
         let c = d["index_name"].as_str().unwrap_or_default().trim_end_matches("_usd").to_uppercase();
         if let Some(px) = crate::opt_num(&d["price"]).filter(|p| *p > 0.0) { s.index.insert(c, px); }
+    }
+    // no total until the summary seeded every currency and the indexes of the coins held have arrived
+    if s.seeded && (v["id"] == 3 || ch.starts_with("user.portfolio.")) {
+        let idx = &s.index;
+        if let Some(b) = fold(s.portfolio.values(), |c| idx.get(c).copied()) { out.push(AccEvent::Wallet(b)); }
     }
     Ok(out)
 }
@@ -414,9 +426,11 @@ mod tests {
         assert_eq!(f(&mut s, refused, 0).unwrap_err().1, 60);
         let granted = r#"{"jsonrpc":"2.0","id":1,"result":{"access_token":"x","expires_in":100,"refresh_token":"y","scope":"connection mainaccount account:read trade:read_write","token_type":"bearer"}}"#;
         let sub = after_auth(granted);
-        assert_eq!(sub.len(), 1);
+        assert_eq!(sub.len(), 2);
         let v: Value = serde_json::from_str(&sub[0]).unwrap();
         assert_eq!((v["method"].as_str(), v["params"]["channels"].as_array().map(|c| c.len())), (Some("private/subscribe"), Some(CHANNELS.len())));
+        let v: Value = serde_json::from_str(&sub[1]).unwrap();
+        assert_eq!((v["id"].as_i64(), v["method"].as_str()), (Some(3), Some("private/get_account_summaries")));
         assert!(f(&mut s, granted, 1_000).unwrap().is_empty());
         // subscribe ack -> snapshot
         assert!(matches!(f(&mut s, r#"{"jsonrpc":"2.0","id":2,"result":["user.changes.option.any.raw","user.portfolio.any"]}"#, 2_000).unwrap()[..], [AccEvent::Resync]));
@@ -432,11 +446,16 @@ mod tests {
         assert!(matches!(&ev[1], AccEvent::OptOrder { o, open: false } if o.id == "BTC-2"));
         assert!(matches!(&ev[2], AccEvent::Fill(x) if x.id == "77" && x.side == Side::Sell && x.qty == 0.5 && x.price == 0.012 && x.ts == 3));
         assert!(matches!(&ev[3], AccEvent::OptPos(p) if p.qty == 0.5 && p.side == Side::Sell && p.delta == 0.1));
-        // portfolio: no total before the BTC index arrives, then USD totals
+        // portfolio: no total before the summary seeded every currency, nor before the BTC index arrives, then USD
+        // totals over every currency (USDC never pushed since connect still counts)
         let pf = r#"{"jsonrpc":"2.0","method":"subscription","params":{"channel":"user.portfolio.btc","data":{"currency":"BTC","equity":0.5,"available_funds":0.4,"maintenance_margin":0.05,"margin_balance":0.5,"margin_model":"segregated_sm"}}}"#;
         assert!(f(&mut s, pf, 4_000).unwrap().is_empty());
         assert!(f(&mut s, r#"{"jsonrpc":"2.0","method":"subscription","params":{"channel":"deribit_price_index.btc_usd","data":{"index_name":"btc_usd","price":80000.0,"timestamp":5}}}"#, 5_000).unwrap().is_empty());
-        assert!(matches!(&f(&mut s, pf, 6_000).unwrap()[..], [AccEvent::Wallet(b)] if b.equity == 40000.0 && b.available == 32000.0));
+        assert!(f(&mut s, pf, 5_500).unwrap().is_empty(), "not seeded yet: BTC alone is not the account");
+        let seed = r#"{"jsonrpc":"2.0","id":3,"result":{"summaries":[{"currency":"BTC","equity":9.0,"available_funds":9.0,"maintenance_margin":0.0,"margin_balance":9.0},
+            {"currency":"USDC","equity":1000.0,"available_funds":900.0,"maintenance_margin":10.0,"margin_balance":1000.0}]}}"#;
+        assert!(matches!(&f(&mut s, seed, 5_800).unwrap()[..], [AccEvent::Wallet(b)] if b.equity == 41000.0), "the pushed BTC row is newer than the summary's");
+        assert!(matches!(&f(&mut s, pf, 6_000).unwrap()[..], [AccEvent::Wallet(b)] if b.equity == 41000.0 && b.available == 32900.0));
         // keepalive replies pass; past 80% of the token's 100 s the session ends to re-authenticate
         assert!(f(&mut s, r#"{"jsonrpc":"2.0","id":0,"result":{"version":"1.2.26"}}"#, 81_000).unwrap().is_empty());
         assert_eq!(f(&mut s, r#"{"jsonrpc":"2.0","id":0,"result":{"version":"1.2.26"}}"#, 81_001).unwrap_err().1, 0);
