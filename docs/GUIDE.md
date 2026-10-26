@@ -187,11 +187,27 @@ threshold (at most once a minute per venue).
 **Position insurance**: hedge a perp with options (long → puts, short → calls) on Binance, Bybit, OKX
 and Gate; costs use the venue's real ask.
 
+**Demo trading** (Settings → Trading → *Demo account*): every venue trades one simulated account
+holding a shared balance (10,000 USDT; the *Starting balance* applies from the next *Reset*), no API
+keys needed. A **DEMO** tag shows in the title bar, the order panel, the confirmation and the account
+strip; nothing is sent to an exchange. Switching it reconnects only the account, never the market data.
+- Market orders walk the venue's own live book (refused when that book is stale or too thin for the
+  size). A resting limit fills only when a trade prints through its price: you are last in the queue
+  and the print's size is ignored.
+- Stops, trailing stops and TP / SL (Bybit, Binance) fire on the venue's mark or last price. Funding
+  settles at the venue's own rate and interval while Depth runs. Liquidation at a flat 0.5%
+  maintenance margin (cross: every position at once, no partial liquidation). Fees from the table in
+  Settings → Trading.
+- Not simulated: options, margin loans, transfers, venue-run TWAP, latency. A symbol not on screen is
+  marked from a spot last price, and its resting limits fill only once it is on screen again.
+- The account is an append-only event log in `depth.db` (`demo_events`); a reset is one more event.
+  Demo fills never mix with your real ones.
+
 ## 8. Settings
 
 General (language, time zone, cache, order book, data sources) · Appearance (theme, accent, green-up /
-red-up, interface size, corner radius) · Trading (routing, slippage and split limits, confirmation,
-fees per venue) · API Keys · About.
+red-up, interface size, corner radius) · Trading (demo trading, routing, slippage and split limits,
+confirmation, fees per venue) · API Keys · About.
 
 ## 9. Troubleshooting
 

@@ -21,9 +21,10 @@ const STALE_MS: i64 = 5_000;
 
 type Book = (Vec<(f64, f64)>, Vec<(f64, f64)>);
 type Shared<T> = Arc<Mutex<T>>;
-
 /// The engine's Agg, the base it streams, and the last prices of the watched other bases.
-static MARKET: Mutex<Option<(Shared<Agg>, String, Shared<HashMap<String, f64>>)>> = Mutex::new(None);
+type Feed = (Shared<Agg>, String, Shared<HashMap<String, f64>>);
+
+static MARKET: Mutex<Option<Feed>> = Mutex::new(None);
 /// (taker, maker) fractions per venue until the Sim exists
 static FEES: Mutex<BTreeMap<Exchange, (f64, f64)>> = Mutex::new(BTreeMap::new());
 static LIVE: OnceLock<Mutex<Live>> = OnceLock::new();
