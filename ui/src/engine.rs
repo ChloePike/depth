@@ -7,7 +7,7 @@ use std::time::Duration;
 use std::collections::VecDeque;
 use depth::trade::{self, Balance, Keys, Mode, OpenOrder, OrderReq, Position, Rules};
 use depth::{agg::Agg, ex, now_ms, Event, Exchange, History, Market, Msg, Sub};
-use depth::hunter::{Row, Scan, Src};
+use depth::hunter::{Op, Row, Scan, Src};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 pub const HISTORY_MINUTES: usize = 1000;
@@ -777,6 +777,8 @@ pub struct Hunt {
     pub log: VecDeque<(i64, String, String)>,
     /// per venue: last data (local ms) and the last request's error
     pub venue: HashMap<Exchange, (i64, Option<String>)>,
+    /// the coins on the page's top rows: those still collecting hours get Binance's (`spawn_hunter`)
+    pub want: Vec<String>,
 }
 
 /// The keys `ex` trades with: demo keys on every tradable venue in demo mode, else the real ones.
@@ -3038,8 +3040,10 @@ fn hunt_alive(hunt: &Mutex<Hunt>, ex: Exchange, err: Option<String>) {
 }
 
 /// Starts the scanner on `rt`: one polling task per REST venue (2 s apart), Binance's all-market
-/// streams (they also keep the picker's prices live), OKX's all-swap liquidations, and the 5 s
-/// rebuild that checks the alert rules. Venues switched off in the status bar are left out.
+/// streams (they also keep the picker's prices live), OKX's all-swap liquidations, the 5 s
+/// rebuild that checks the alert rules, and the operator-type score: each finished hour stored,
+/// scores from the stored hours, and 30 days of Binance 1h klines for top-row coins still
+/// collecting. Venues switched off in the status bar are left out.
 fn spawn_hunter(rt: &tokio::runtime::Runtime, off: &std::collections::HashSet<Exchange>, scan: Arc<Mutex<Scan>>, hunt: Arc<Mutex<Hunt>>,
     tickers: Arc<Mutex<Vec<Ticker>>>, funding: Arc<Mutex<HashMap<(Exchange, String), VenueFunding>>>, ctx: eframe::egui::Context) {
     use depth::hunter::{liqs, parse};
@@ -3079,23 +3083,73 @@ fn spawn_hunter(rt: &tokio::runtime::Runtime, off: &std::collections::HashSet<Ex
             for (b, ts, usd) in liqs(Exchange::Okx, &v, &sc.meta) { sc.liq(b, ts, usd); }
         }));
     }
+    // set when the klines bootstrap stored hours: score again
+    let boot = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if binance {
+        let (hunt, boot) = (hunt.clone(), boot.clone());
+        rt.spawn(async move {
+            // strictly one at a time, one request every 2 s at most, each coin once per run
+            let mut done = std::collections::HashSet::new();
+            let mut tick = tokio::time::interval(Duration::from_secs(2));
+            loop {
+                tick.tick().await;
+                let next = {
+                    let h = hunt.lock().unwrap();
+                    h.want.iter().find(|b| !done.contains(*b) && h.rows.iter().any(|r| &r.base == *b && r.venues.contains(&Exchange::Binance) && matches!(r.op, Some(Op::Collecting(_))))).cloned()
+                };
+                let Some(b) = next else { continue };
+                done.insert(b.clone());
+                match depth::ws::get_json(&format!("https://fapi.binance.com/fapi/v1/klines?symbol={b}USDT&interval=1h&limit=720")).await {
+                    Ok(v) => {
+                        let bars: Vec<_> = depth::hunter::kline_bars(&v, now_ms()).into_iter().map(|x| (Exchange::Binance, b.clone(), x)).collect();
+                        let _ = tokio::task::spawn_blocking(move || depth::db::hunt_put(&bars)).await;
+                        boot.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(e) => eprintln!("[hunter klines {b}] {e:#}"),
+                }
+            }
+        });
+    }
     rt.spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         let (mut cool, mut spot_at) = (HashMap::new(), 0);
+        // operator-type scores: finished hours wait in `fresh` until the next scoring job (blocking
+        // pool, at most one a minute) writes them, then scores every coin from the stored hours
+        let scores: Arc<Mutex<HashMap<String, Op>>> = Default::default();
+        let (mut rec_hour, mut fresh, mut rescore, mut scored_at) = (now_ms() / 3_600_000 * 3_600_000, vec![], true, 0i64);
+        let mut job: Option<tokio::task::JoinHandle<()>> = None;
         for n in 0u64.. {
             tick.tick().await;
             let now = now_ms();
+            rescore |= boot.swap(false, std::sync::atomic::Ordering::Relaxed);
+            // the first scores half a minute in, once the contract lists (listing dates) have come
+            let due = n >= 6 && rescore && now - scored_at >= 60_000 && job.as_ref().is_none_or(|j| j.is_finished());
             // Binance spot is the picker's minute poll; Binance funding intervals come from its funding map
             let spot = peek(Src::BinanceSpot.url(), 120_000).filter(|x| binance && x.0 > spot_at);
             let hours: Vec<(String, f64)> = if n % 12 == 0 {
                 funding.lock().unwrap().iter().filter(|((e, _), _)| *e == Exchange::Binance).map(|((_, s), f)| (s.clone(), f.interval_h)).collect()
             } else { vec![] };
-            let rows = {
+            let (mut rows, listed) = {
                 let mut sc = scan.lock().unwrap();
                 for (s, h) in hours { sc.meta.hours.insert((Exchange::Binance, s), h); }
                 if let Some((at, v)) = spot { spot_at = at; let t = parse(Src::BinanceSpot, &v, &mut sc.meta); sc.ingest(at, t); }
-                sc.rows(now)
+                // the hour before this one, two minutes in (a sample past its end has arrived)
+                let hour = now / 3_600_000 * 3_600_000;
+                if hour > rec_hour && now - hour >= 120_000 { rec_hour = hour; fresh.extend(sc.hour_bars(hour - 3_600_000)); rescore = true; }
+                (sc.rows(now), due.then(|| sc.meta.listed.clone()))
             };
+            if let Some(listed) = listed.filter(|_| !rows.is_empty()) {
+                let (bars, s, prune) = (std::mem::take(&mut fresh), scores.clone(), scored_at == 0);
+                let vols: HashMap<String, (f64, f64)> = rows.iter().map(|r| (r.base.clone(), (r.vol24, r.spot24))).collect();
+                (rescore, scored_at) = (false, now);
+                job = Some(tokio::task::spawn_blocking(move || {
+                    depth::db::hunt_put(&bars);
+                    if prune { depth::db::hunt_prune(now - 35 * 86_400_000); }
+                    let stored = depth::db::hunt_get(now - 30 * 86_400_000);
+                    *s.lock().unwrap() = depth::hunter::op_scores(&stored, &vols, &listed, now);
+                }));
+            }
+            { let s = scores.lock().unwrap(); for r in rows.iter_mut() { r.op = s.get(&r.base).cloned(); } }
             let rules = hunt.lock().unwrap().alerts;
             let lines: Vec<(String, String)> = depth::hunter::check(&rules, &rows, now, &mut cool).iter().map(|(r, k)| (r.base.clone(), alert_line(r, k))).collect();
             notify_hits(&lines);
