@@ -522,6 +522,13 @@ const TZS: [i32; 30] = [-600, -540, -480, -420, -360, -300, -240, -180, -120, -6
 
 fn prefs(st: &Value) -> Prefs { serde_json::from_value(st["prefs"].clone()).unwrap_or_default() }
 
+/// `cur` with the keys of `patch` replaced: the native hosts know only some of the prefs and send just those.
+pub(crate) fn merge_prefs(cur: &Prefs, patch: &Value) -> Result<Prefs, String> {
+    let mut base = serde_json::to_value(cur).map_err(|e| e.to_string())?;
+    for (k, v) in patch.as_object().ok_or("prefs must be an object")? { base[k] = v.clone(); }
+    serde_json::from_value(base).map_err(|e| e.to_string())
+}
+
 fn set_prefs(before: &Prefs, p: &Prefs, call: &mut Call) {
     if p != before { let _ = call(json!({"op": "set_prefs", "prefs": p})); }
 }
@@ -796,4 +803,19 @@ fn warn_triangle(p: &egui::Painter, r: egui::Rect) {
     p.add(egui::Shape::convex_polygon(vec![c + egui::vec2(0.0, -h), c + egui::vec2(h, h * 0.8), c + egui::vec2(-h, h * 0.8)], WARN, egui::Stroke::NONE));
     p.line_segment([c + egui::vec2(0.0, -h * 0.35), c + egui::vec2(0.0, h * 0.25)], egui::Stroke::new(1.6, Color32::WHITE));
     p.circle_filled(c + egui::vec2(0.0, h * 0.55), 1.0, Color32::WHITE);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_prefs_patch_keeps_the_rest() {
+        let cur = Prefs { proxy: ProxyMode::Custom, fill_sound: "none".into(), ..Default::default() };
+        let m = merge_prefs(&cur, &json!({"theme": "dark", "radius": 5})).unwrap();
+        assert!(m.theme == ThemePref::Dark && m.radius == 5);
+        assert!(m.hotkeys == cur.hotkeys && m.proxy == ProxyMode::Custom && m.fill_sound == "none");
+        // a value that does not parse is refused whole
+        assert!(merge_prefs(&cur, &json!({"zoom": "x"})).is_err() && merge_prefs(&cur, &json!([1])).is_err());
+    }
 }

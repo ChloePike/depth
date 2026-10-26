@@ -232,7 +232,7 @@ impl App {
             "set_lang" => super::set_lang(v["lang"].as_str().unwrap_or("en")),
             "set_prefs" => {
                 let old = (self.prefs.proxy, self.prefs.proxy_url.clone());
-                self.prefs = serde_json::from_value(v["prefs"].clone()).map_err(|e| e.to_string())?;
+                self.prefs = super::settings::merge_prefs(&self.prefs, &v["prefs"])?;
                 self.prefs.apply(ctx);
                 // every stream reconnects through the new route now; private ones re-snapshot
                 if old != (self.prefs.proxy, self.prefs.proxy_url.clone()) {
