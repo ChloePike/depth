@@ -782,8 +782,11 @@ impl Engine {
         let (tx, mut rx) = unbounded_channel::<Msg>();
         let (agg, stats) = (self.agg.clone(), self.stats.clone());
         let diag = std::env::var("T1_DIAG").is_ok();
+        // the open interest of this base is recorded (5-minute buckets, written every 30 s off this task)
+        let oi_sym = depth::db::oi_symbol(&self.sub(Market::Perp));
         rt.spawn(async move {
             let mut buf = Vec::with_capacity(4096);
+            let (mut rec, mut rec_at) = (depth::db::OiRec::default(), now_ms());
             let mut last_diag = now_ms();
             let mut lag_detail: HashMap<(Exchange, Market, &'static str), (f64, u64)> = HashMap::new();
             while rx.recv_many(&mut buf, 4096).await > 0 {
@@ -793,11 +796,19 @@ impl Engine {
                         // margin streams duplicate spot books; only their borrow rates are new
                         if m.market == Market::Margin && !matches!(m.ev, Event::BorrowRate { .. }) { continue; }
                         a.on(m);
+                        if let (Market::Perp, Event::OpenInterest { oi, oi_usd }) = (m.market, &m.ev) {
+                            rec.note(m.ex, m.recv, *oi, oi_usd.or_else(|| Some(a.venues.get(&(m.ex, m.market))?.price()? * oi)));
+                        }
                     }
                 }
                 // after the Agg lock: the demo account copies the venue books it needs itself
                 if depth::demo::on() { depth::demo::on_batch(&buf); }
                 let now = now_ms();
+                if now - rec_at >= 30_000 {
+                    rec_at = now;
+                    let rows = rec.take();
+                    if !rows.is_empty() { let sym = oi_sym.clone(); tokio::task::spawn_blocking(move || depth::db::oi_put(&sym, &rows)); }
+                }
                 let mut s = stats.lock().unwrap();
                 s.total += buf.len() as u64;
                 s.backlog = rx.len();
@@ -2043,10 +2054,22 @@ async fn cached_history(ex: Exchange, sub: &Sub, tf: u32, stats: &Arc<Mutex<Stat
         (c, Err(e), _) => {
             eprintln!("[history] {ex:?} {:?} {tf}m: {e:#}", sub.market);
             stats.lock().unwrap().hist_errors.push(format!("{ex:?} {:?} {tf}m: {e:#}", sub.market));
-            return c.unwrap_or_default();
+            return with_recorded_oi(c.unwrap_or_default(), ex, sub, tf);
         }
     };
     if !h.klines.is_empty() { if let Some(b) = h.encode() { depth::db::hist_put(&key, &b); } }
+    // after the cache write: the recording stays in its own table, the cache holds what venues served
+    with_recorded_oi(h, ex, sub, tf)
+}
+
+/// `h` with the open interest this app recorded live filling what the venue's own series lacks (before
+/// its start, after its end, holes): a venue with no OI history at all gets real values for every
+/// recorded period instead of the flat back-fill. Perp only.
+fn with_recorded_oi(mut h: History, ex: Exchange, sub: &Sub, tf: u32) -> History {
+    if let (Market::Perp, Some(t)) = (sub.market, h.klines.first().map(|k| k.t)) {
+        let step = tf as i64 * 60_000;
+        h.fill_oi(&depth::db::oi_get(ex, &depth::db::oi_symbol(sub), t - 8 * step, now_ms()), 3 * step.max(depth::db::OI_BUCKET_MS));
+    }
     h
 }
 

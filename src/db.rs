@@ -1,6 +1,7 @@
 //! Local SQLite store (`depth.db` in `sys::data_dir()`): the market history cache (`hist`,
 //! clearable from Settings), the account's own fills (`fills`, kept: venues only serve recent
-//! ones) and the demo account's event log (`demo_events`, kept). One connection behind a mutex;
+//! ones), the open interest the app saw live (`oi`, kept: venues serve little or none of it back)
+//! and the demo account's event log (`demo_events`, kept). One connection behind a mutex;
 //! every call is a few rows, fine from async tasks.
 
 use crate::trade::Fill;
@@ -21,6 +22,8 @@ fn db() -> Option<MutexGuard<'static, Connection>> {
              CREATE TABLE IF NOT EXISTS fills (ex TEXT NOT NULL, id TEXT NOT NULL, symbol TEXT NOT NULL, buy INTEGER NOT NULL,
                  price REAL NOT NULL, qty REAL NOT NULL, fee REAL NOT NULL, realized REAL, ts INTEGER NOT NULL, PRIMARY KEY (ex, id));
              CREATE INDEX IF NOT EXISTS fills_sym ON fills (symbol, ts);
+             CREATE TABLE IF NOT EXISTS oi (ex TEXT NOT NULL, symbol TEXT NOT NULL, ts INTEGER NOT NULL, oi REAL NOT NULL, oi_usd REAL,
+                 PRIMARY KEY (ex, symbol, ts)) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS demo_events (id TEXT PRIMARY KEY, device TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
                  kind TEXT NOT NULL, body TEXT NOT NULL, UNIQUE (device, seq));
              CREATE INDEX IF NOT EXISTS demo_order ON demo_events (ts, device, seq);
@@ -94,6 +97,53 @@ pub fn fills(symbol: &str, since: i64) -> Vec<Fill> {
             price: r.get(3)?, qty: r.get(4)?, fee: r.get(5)?, realized: r.get(6)?, ts: r.get(7)?,
         }))
     }).map(|rows| rows.flatten().flatten().collect()).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------- recorded open interest
+
+/// Width of a recorded open interest sample, ms.
+pub const OI_BUCKET_MS: i64 = 300_000;
+
+/// One recorded sample: venue, bucket start (ms), open interest in base units, and its value in the venue's quote when known.
+pub type OiRow = (Exchange, i64, f64, Option<f64>);
+
+/// Key of a base's open interest in `oi`: the UI symbol ("BTC/USDT"), not a venue's native one.
+pub fn oi_symbol(sub: &crate::Sub) -> String { format!("{}/{}", sub.base, sub.quote).to_uppercase() }
+
+/// The last open interest seen in each 5-minute bucket per venue, waiting to be written in a batch.
+#[derive(Default)]
+pub struct OiRec { rows: std::collections::HashMap<(Exchange, i64), (f64, Option<f64>)> }
+
+impl OiRec {
+    /// A live reading at `ts`; a later one in the same bucket replaces it. Zero / invalid readings are not data.
+    pub fn note(&mut self, ex: Exchange, ts: i64, oi: f64, oi_usd: Option<f64>) {
+        if oi.is_finite() && oi > 0.0 { self.rows.insert((ex, ts.div_euclid(OI_BUCKET_MS) * OI_BUCKET_MS), (oi, oi_usd.filter(|x| x.is_finite()))); }
+    }
+    /// The buckets noted since the last call. One still filling is written again, with its later
+    /// value, by the next batch (`oi_put` replaces).
+    pub fn take(&mut self) -> Vec<OiRow> {
+        let mut v: Vec<OiRow> = self.rows.drain().map(|((ex, ts), (oi, usd))| (ex, ts, oi, usd)).collect();
+        v.sort_by_key(|r| (r.1, r.0));
+        v
+    }
+}
+
+/// Store samples of `symbol` (a bucket already stored is replaced).
+pub fn oi_put(symbol: &str, rows: &[OiRow]) {
+    let Some(mut c) = db() else { return };
+    let Ok(tx) = c.transaction() else { return };
+    {
+        let Ok(mut st) = tx.prepare_cached("INSERT OR REPLACE INTO oi (ex, symbol, ts, oi, oi_usd) VALUES (?1, ?2, ?3, ?4, ?5)") else { return };
+        for (ex, ts, oi, usd) in rows { let _ = st.execute(params![format!("{ex:?}"), symbol, ts, oi, usd]); }
+    }
+    let _ = tx.commit();
+}
+
+/// A venue's recorded open interest of `symbol` in [from, to] ms, oldest first.
+pub fn oi_get(ex: Exchange, symbol: &str, from: i64, to: i64) -> Vec<(i64, f64)> {
+    let Some(c) = db() else { return vec![] };
+    let Ok(mut st) = c.prepare_cached("SELECT ts, oi FROM oi WHERE ex = ?1 AND symbol = ?2 AND ts >= ?3 AND ts <= ?4 ORDER BY ts") else { return vec![] };
+    st.query_map(params![format!("{ex:?}"), symbol, from, to], |r| Ok((r.get(0)?, r.get(1)?))).map(|rows| rows.flatten().collect()).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------- demo account event log
@@ -181,6 +231,35 @@ mod tests {
         assert!(fills("XUSDT", 0).is_empty());
         crate::demo::set_on(false);
         assert_eq!(fills("XUSDT", 0).len(), 2);
+        // recorded open interest: stored per (venue, symbol, bucket), a rewritten bucket is replaced,
+        // reads are bounded and per venue / symbol, and Clear Cache leaves it
+        let b = OI_BUCKET_MS;
+        oi_put("BTC/USDT", &[(Exchange::Mexc, 2 * b, 10.0, Some(1e6)), (Exchange::Mexc, b, 9.0, None), (Exchange::Okx, b, 5.0, None)]);
+        oi_put("BTC/USDT", &[(Exchange::Mexc, 2 * b, 11.0, None)]);
+        oi_put("ETH/USDT", &[(Exchange::Mexc, b, 99.0, None)]);
+        assert_eq!(oi_get(Exchange::Mexc, "BTC/USDT", 0, 9 * b), vec![(b, 9.0), (2 * b, 11.0)]);
+        assert_eq!(oi_get(Exchange::Mexc, "BTC/USDT", 2 * b, 2 * b), vec![(2 * b, 11.0)]);
+        assert_eq!(oi_get(Exchange::Okx, "BTC/USDT", 0, 9 * b), vec![(b, 5.0)]);
+        assert!(oi_get(Exchange::Bybit, "BTC/USDT", 0, 9 * b).is_empty());
+        hist_clear(None);
+        assert_eq!(oi_get(Exchange::Mexc, "ETH/USDT", 0, 9 * b), vec![(b, 99.0)]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn oi_buckets_keep_the_last_reading() {
+        let b = OI_BUCKET_MS;
+        let mut r = OiRec::default();
+        r.note(Exchange::Okx, 10 * b + 5, 1.0, None);
+        r.note(Exchange::Okx, 10 * b + b - 1, 2.0, Some(f64::NAN));
+        r.note(Exchange::Okx, 11 * b, 3.0, Some(30.0));
+        r.note(Exchange::Bybit, 10 * b, 4.0, Some(40.0));
+        // nothing that is not a reading
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] { r.note(Exchange::Gate, 10 * b, bad, None); }
+        assert_eq!(r.take(), vec![(Exchange::Bybit, 10 * b, 4.0, Some(40.0)), (Exchange::Okx, 10 * b, 2.0, None), (Exchange::Okx, 11 * b, 3.0, Some(30.0))]);
+        assert!(r.take().is_empty());
+        // a bucket still filling comes out again with its later value
+        r.note(Exchange::Okx, 11 * b + 1, 3.5, None);
+        assert_eq!(r.take(), vec![(Exchange::Okx, 11 * b, 3.5, None)]);
     }
 }

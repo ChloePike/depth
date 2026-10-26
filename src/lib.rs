@@ -243,6 +243,19 @@ impl History {
     pub fn encode(&self) -> Option<Vec<u8>> { rmp_serde::to_vec(self).ok() }
     pub fn decode(b: &[u8]) -> Option<History> { rmp_serde::from_slice(b).ok().or_else(|| serde_json::from_slice(b).ok()) }
 
+    /// Recorded open interest (`db::oi_get`, oldest first) fills what the venue's own series lacks:
+    /// before its first point, after its last and across holes wider than `gap` ms. The venue's
+    /// points always win.
+    pub fn fill_oi(&mut self, rec: &[(i64, f64)], gap: i64) {
+        let v = &self.oi;
+        let add: Vec<_> = rec.iter().copied().filter(|&(t, _)| {
+            let i = v.partition_point(|p| p.0 <= t);
+            !(i > 0 && (v[i - 1].0 == t || (i < v.len() && v[i].0 - v[i - 1].0 <= gap)))
+        }).collect();
+        self.oi.extend(add);
+        self.oi.sort_by_key(|p| p.0);
+    }
+
     /// `self` (older, e.g. from the local cache) updated with `newer` (a fresh fetch): rows are
     /// merged by time with the newer value winning, then trimmed to the last `bars` candles.
     /// A hole between the two (the venue could not reach back to the cache's tip) leaves `newer` alone.
@@ -316,6 +329,25 @@ mod tests {
         // adjacent (no overlap, no hole) still merges
         let next = History { klines: (5..8).map(|i| k(i, 3.0)).collect(), ..Default::default() };
         assert_eq!(old.merge(next, 100, 1).klines.len(), 8);
+    }
+
+    #[test]
+    fn recorded_oi_fills_gaps_and_never_overrides_the_venue() {
+        const M: i64 = 60_000;
+        let rec: Vec<_> = [(0, 9.0), (5, 9.0), (10, 9.0), (15, 9.0), (30, 7.0), (35, 7.0), (55, 7.0), (60, 9.0), (70, 8.0), (75, 8.0)].iter().map(|&(m, x)| (m * M, x)).collect();
+        // the venue serves 10..20 and 60..65, a 40 minute hole between; gaps over 15 minutes are holes
+        let venue = vec![(10 * M, 1.0), (15 * M, 2.0), (20 * M, 3.0), (60 * M, 4.0), (65 * M, 5.0)];
+        let mut h = History { oi: venue.clone(), ..Default::default() };
+        h.fill_oi(&rec, 15 * M);
+        assert_eq!(h.oi.iter().map(|&(t, x)| (t / M, x)).collect::<Vec<_>>(),
+            vec![(0, 9.0), (5, 9.0), (10, 1.0), (15, 2.0), (20, 3.0), (30, 7.0), (35, 7.0), (55, 7.0), (60, 4.0), (65, 5.0), (70, 8.0), (75, 8.0)]);
+        // a venue with no OI history gets the whole recording; no recording changes nothing
+        let mut none = History::default();
+        none.fill_oi(&rec, 15 * M);
+        assert_eq!(none.oi, rec);
+        let mut same = History { oi: venue.clone(), ..Default::default() };
+        same.fill_oi(&[], 15 * M);
+        assert_eq!(same.oi, venue);
     }
 
     #[test]

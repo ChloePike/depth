@@ -239,6 +239,8 @@ pub fn history_bars_tf(h: &History, bar_ms: i64) -> Vec<Bar> {
         }
     }
     ffill(&mut bars, &h.oi, bar_ms, |b, v| b.oi = Some(v));
+    // a series that starts late (a venue's retention, a recording begun an hour ago) is flat before its start
+    backfill_oi(bars.iter().find_map(|b| b.oi), bars.iter_mut());
     ffill(&mut bars, &h.funding, bar_ms, |b, v| b.funding_settled = Some(v));
     ffill(&mut bars, &h.long_short, bar_ms, |b, v| b.ls = Some(v));
     bars
@@ -1566,6 +1568,26 @@ mod tests {
         assert!(bars.iter().all(|b| b.oi == Some(50.0)));
         a.on(&msg(Exchange::Okx, Market::Perp, "X", t0 + 7 * BAR_MS, Event::OpenInterest { oi: 7.0, oi_usd: None }));
         assert!(a.series[&(None, Market::Perp)].bars.iter().all(|b| b.oi == Some(57.0)));
+    }
+
+    #[test]
+    fn recorded_oi_replaces_the_flat_backfill_for_the_recorded_period() {
+        let mut a = Agg::default();
+        let t0 = 1_000 * BAR_MS;
+        let k = |i: i64| Kline { t: t0 + i * BAR_MS, o: 1.0, h: 1.0, l: 1.0, c: 1.0, vol: 1.0, buy: Some(1.0) };
+        // a venue with no OI history, and a recording that began at minute 4
+        let mut h = History { klines: (0..8).map(k).collect(), ..Default::default() };
+        h.fill_oi(&[(t0 + 4 * BAR_MS, 5.0), (t0 + 6 * BAR_MS, 6.0)], 15 * BAR_MS);
+        a.load_history(Exchange::Mexc, Market::Perp, &h);
+        a.finish_history();
+        let oi = |a: &Agg, k| a.series[&(k, Market::Perp)].bars.iter().map(|b| b.oi).collect::<Vec<_>>();
+        // recorded values where recorded, flat at the first one before it (no step in the cross-venue OI)
+        let want = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 6.0, 6.0].map(Some).to_vec();
+        assert_eq!(oi(&a, Some(Exchange::Mexc)), want);
+        assert_eq!(oi(&a, None), want);
+        // the first live reading is a normal update, not a second flat back-fill over the recording
+        a.on(&msg(Exchange::Mexc, Market::Perp, "X", t0 + 7 * BAR_MS, Event::OpenInterest { oi: 7.0, oi_usd: None }));
+        assert_eq!(oi(&a, Some(Exchange::Mexc)), [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 6.0, 7.0].map(Some).to_vec());
     }
 
     #[test]
