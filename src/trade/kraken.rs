@@ -147,7 +147,7 @@ fn rest_order(o: &Value) -> Option<OpenOrder> {
     Some(OpenOrder { ex: Exchange::Kraken, symbol, id: o["order_id"].as_str()?.into(), side: if o["side"] == "sell" { Side::Sell } else { Side::Buy },
         price: crate::opt_num(&o["limitPrice"]).unwrap_or(0.0), qty: crate::opt_num(&o["unfilledSize"]).unwrap_or(0.0) + filled, filled,
         tif: String::new(), kind: o["orderType"].as_str().unwrap_or_default().into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false),
-        ts: o["receivedTime"].as_str().map(crate::iso_ms).unwrap_or(0), pos: None })
+        ts: o["receivedTime"].as_str().map(crate::iso_ms).unwrap_or(0), pos: None, client_id: None, trigger: None })
 }
 
 pub async fn open_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
@@ -188,7 +188,7 @@ fn ws_order(o: &Value) -> Option<OpenOrder> {
     let filled = n(&o["filled"]);
     Some(OpenOrder { ex: Exchange::Kraken, symbol, id: o["order_id"].as_str()?.into(), side: if o["direction"] == 1 { Side::Sell } else { Side::Buy },
         price: crate::opt_num(&o["limit_price"]).unwrap_or(0.0), qty: n(&o["qty"]) + filled, filled,
-        tif: String::new(), kind: o["type"].as_str().unwrap_or_default().into(), reduce_only: o["reduce_only"].as_bool().unwrap_or(false), ts: o["time"].as_i64().unwrap_or(0), pos: None })
+        tif: String::new(), kind: o["type"].as_str().unwrap_or_default().into(), reduce_only: o["reduce_only"].as_bool().unwrap_or(false), ts: o["time"].as_i64().unwrap_or(0), pos: None, client_id: None, trigger: None })
 }
 
 /// Maps one private-feed message. `held` = unified symbols with an open position from the last
@@ -215,7 +215,7 @@ fn on_msg(v: &Value, held: &mut Vec<String>, send: &mut impl FnMut(AccEvent)) {
         }
         Some("balances" | "balances_snapshot") => {
             let f = &v["flex_futures"];
-            if f.is_object() { send(AccEvent::Wallet { equity: n(&f["portfolio_value"]), available: n(&f["available_margin"]) }); }
+            if f.is_object() { send(AccEvent::Wallet(Balance { equity: n(&f["portfolio_value"]), available: n(&f["available_margin"]), ..Default::default() })); }
         }
         _ => {}
     }
@@ -356,7 +356,7 @@ mod tests {
             AccEvent::Position { p, one_way } => format!("pos {} {:?} {} {} {:?} {:.2} {one_way}", p.symbol, p.side, p.qty, p.mark, p.liq, p.lev),
             AccEvent::Order(o) => format!("order {} {} {:?} {} {} {}", o.symbol, o.id, o.side, o.price, o.qty, o.reduce_only),
             AccEvent::OrderDone { id } => format!("done {id}"),
-            AccEvent::Wallet { equity, available } => format!("wallet {equity} {available}"),
+            AccEvent::Wallet(b) => format!("wallet {} {}", b.equity, b.available),
             e => format!("{e:?}"),
         }).collect();
         assert_eq!(s, vec![
@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn login_handshake() {
-        let k = Keys { key: "KEY".into(), secret: "7zxMEF5p/Z8l2p2U7Ghv6x14Af+Fx+92tPgUdVQ748FOIrEoT9bgT+bTRfXc5pz8na+hL/QdrCVG7bh9KpT0eMTm".into(), extra: None };
+        let k = Keys { key: "KEY".into(), secret: "7zxMEF5p/Z8l2p2U7Ghv6x14Af+Fx+92tPgUdVQ748FOIrEoT9bgT+bTRfXc5pz8na+hL/QdrCVG7bh9KpT0eMTm".into(), extra: None, demo: false };
         assert!(login_subs(&k, r#"{"event":"info","version":1}"#).is_empty());
         let m = login_subs(&k, r#"{"event":"challenge","message":"c100b894-1729-464d-ace1-52dbce11db42"}"#);
         assert_eq!(m.len(), 3);

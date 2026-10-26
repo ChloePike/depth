@@ -296,7 +296,7 @@ fn open_order(o: &Value) -> OpenOrder {
         side: if o["side"] == "A" { Side::Sell } else { Side::Buy }, price: f(&o["limitPx"]), qty: orig, filled: (orig - left).max(0.0),
         // WS order updates document fewer fields than frontendOpenOrders; read them when present
         tif: o["tif"].as_str().unwrap_or_default().into(), kind: o["orderType"].as_str().unwrap_or("Limit").into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false),
-        ts: o["timestamp"].as_i64().unwrap_or(0), pos: None,
+        ts: o["timestamp"].as_i64().unwrap_or(0), pos: None, client_id: None, trigger: None,
     }
 }
 
@@ -354,7 +354,7 @@ pub async fn stream(k: Keys, tx: AccTx) {
                     }
                     for p in ps { send(AccEvent::Position { p, one_way: true }); }
                     held = now;
-                    send(match totals(cs) { Some(b) => AccEvent::Wallet { equity: b.equity, available: b.available }, None => AccEvent::BalanceDirty });
+                    send(match totals(cs) { Some(b) => AccEvent::Wallet(Balance { equity: b.equity, available: b.available, ..Default::default() }), None => AccEvent::BalanceDirty });
                 }
                 "orderUpdates" => for w in d.as_array().into_iter().flatten().filter(|w| is_perp(w["order"]["coin"].as_str().unwrap_or("@"))) {
                     send(if w["status"] == "open" { AccEvent::Order(open_order(&w["order"])) } else { AccEvent::OrderDone { id: w["order"]["oid"].to_string() } });

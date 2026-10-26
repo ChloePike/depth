@@ -162,7 +162,7 @@ fn order(o: &Value) -> OpenOrder {
         tif: o["force"].as_str().unwrap_or_default().into(),
         kind: o["orderType"].as_str().unwrap_or_default().into(),
         reduce_only: o["reduceOnly"].as_str().is_some_and(|r| r.eq_ignore_ascii_case("yes")) || (hedge_pos.is_some() && closing),
-        ts: crate::opt_num(&o["cTime"]).unwrap_or(0.0) as i64, pos: hedge_pos,
+        ts: crate::opt_num(&o["cTime"]).unwrap_or(0.0) as i64, pos: hedge_pos, client_id: None, trigger: None,
     }
 }
 
@@ -261,7 +261,7 @@ pub async fn stream(k: Keys, tx: AccTx) {
                 },
                 Some("account") => for a in v["data"].as_array().into_iter().flatten().filter(|a| a["marginCoin"] == "USDT") {
                     let (equity, available) = wallet(a);
-                    send(AccEvent::Wallet { equity, available });
+                    send(AccEvent::Wallet(Balance { equity, available, ..Default::default() }));
                 },
                 _ => {}
             }

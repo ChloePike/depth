@@ -180,7 +180,7 @@ pub async fn option_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
     Ok(v["list"].as_array().into_iter().flatten().map(|o| OpenOrder {
         ex, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].as_str().unwrap_or_default().into(),
         side: if o["side"] == "Sell" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["qty"]), filled: n(&o["cumExecQty"]),
-        tif: o["timeInForce"].as_str().unwrap_or_default().into(), kind: o["orderType"].as_str().unwrap_or("Limit").to_lowercase(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: n(&o["createdTime"]) as i64, pos: None,
+        tif: o["timeInForce"].as_str().unwrap_or_default().into(), kind: o["orderType"].as_str().unwrap_or("Limit").to_lowercase(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: n(&o["createdTime"]) as i64, pos: None, client_id: None, trigger: None,
     }).collect())
 }
 
@@ -238,6 +238,7 @@ fn bybit_order(o: &Value) -> OpenOrder {
         side: if o["side"] == "Sell" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["qty"]), filled: n(&o["cumExecQty"]),
         tif: o["timeInForce"].as_str().unwrap_or_default().into(), kind: o["orderType"].as_str().unwrap_or_default().into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: n(&o["createdTime"]) as i64,
         pos: match o["positionIdx"].as_i64() { Some(1) => Some(Side::Buy), Some(2) => Some(Side::Sell), _ => None },
+        client_id: opt_id(&o["orderLinkId"]), trigger: crate::opt_num(&o["triggerPrice"]).filter(|x| *x > 0.0),
     }
 }
 
@@ -279,7 +280,7 @@ pub async fn stream(k: Keys, tx: AccTx) {
                 },
                 (_, Some("execution.linear")) => for f in v["data"].as_array().into_iter().flatten().filter_map(bybit_fill) { send(AccEvent::Fill(f)); },
                 (_, Some("wallet")) => for w in v["data"].as_array().into_iter().flatten().filter(|w| w["accountType"] == "UNIFIED") {
-                    send(AccEvent::Wallet { equity: n(&w["totalEquity"]), available: n(&w["totalAvailableBalance"]) });
+                    send(AccEvent::Wallet(Balance { equity: n(&w["totalEquity"]), available: n(&w["totalAvailableBalance"]), ..Default::default() }));
                 },
                 _ => {}
             }
@@ -470,7 +471,7 @@ mod tests {
     #[test]
     fn bybit_signature_layout() {
         // reference computed independently with Python's hmac module
-        let k = Keys { key: "XXXXKEY".into(), secret: "YYYYSECRET".into(), extra: None };
+        let k = Keys { key: "XXXXKEY".into(), secret: "YYYYSECRET".into(), extra: None, demo: false };
         assert_eq!(sign(&k, 1_700_000_000_000, 5000, r#"{"category":"linear","symbol":"BTCUSDT"}"#),
                    "136ba24b5260b0829ea5217d7be22cff536e12d72edc8f9e72238c026fbaee4f");
     }

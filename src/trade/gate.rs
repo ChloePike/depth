@@ -214,6 +214,7 @@ fn order(o: &Value, mult: f64, dual: bool) -> OpenOrder {
         tif: o["tif"].as_str().unwrap_or("gtc").into(), kind: if price == 0.0 { "market" } else { "limit" }.into(), reduce_only, ts,
         // dual mode: a buy adds to the long unless it reduces the short
         pos: dual.then(|| match (reduce_only, side) { (false, s) => s, (true, Side::Buy) => Side::Sell, (true, Side::Sell) => Side::Buy }),
+        client_id: None, trigger: None,
     }
 }
 
@@ -353,7 +354,7 @@ mod tests {
             "88cd6a1be0585ef71ce1907168bb7e1181f3137391c7d14989590632b591312be66162a26019dba0f26a4532af9bde9b1df6e0a7c5b059d6c845bc5d72e9f895");
         assert_eq!(sign("YYYYSECRET", "GET", "/api/v4/futures/usdt/orders", "status=open", "", 1_700_000_000),
             "1a1d4afc689908ab8151e21ba90c2ec5dbc03ae88ced6c1f65f34be733ff8b2af645ce178da1427eeca06771c1b454d760585f6c34915c784bbbd7da9c98e68d");
-        let k = Keys { key: "K".into(), secret: "YYYYSECRET".into(), extra: None };
+        let k = Keys { key: "K".into(), secret: "YYYYSECRET".into(), extra: None, demo: false };
         let s: Value = serde_json::from_str(&private_sub(&k, "futures.orders", json!(["1", "!all"]), 1_700_000_000)).unwrap();
         assert_eq!(s["auth"]["SIGN"], "25f832cd0c59bfc447dccc878de185082841e02b50c334b6179e9d018d5ae512d6792f86feb3ff9115a38857857de69953961ab1c218ef90a45cd806a1934cd3");
         assert_eq!((s["auth"]["method"].as_str(), s["time"].as_i64()), (Some("api_key"), Some(1_700_000_000)));

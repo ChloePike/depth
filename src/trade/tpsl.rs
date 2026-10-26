@@ -21,14 +21,14 @@
 //! - Bybit `order.linear` rows have the REST shape: `bybit_row(o)`; open while `Untriggered`.
 //! - Binance user data `{"e":"ALGO_UPDATE"}` (USD-M payload in `o`, PM in `ao` with `fs`):
 //!   `binance_algo_update(v)`; open while `X == "NEW"`.
-use super::{bybit, binance_at, binance_pm, binance_url, fmt_step, papi_url, rules, Keys, Mode, Rules};
+use super::{bybit, binance_at, binance_pm, binance_url, fmt_step, papi_url, rules, CancelReport, Keys, Mode, Rules};
 use crate::{Exchange, Side};
 use anyhow::{anyhow, bail, Result};
 use reqwest::Method;
 use serde_json::{json, Value};
 
 /// Price the trigger compares against. Mark is the default (wicks on the last price don't fire it).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Trigger { #[default] Mark, Last }
 
 /// One active TP/SL. `pos` is the position side it protects (Buy = long); `qty` None = whole position.
@@ -276,6 +276,13 @@ pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()
         Exchange::Binance => binance_cancel(k, id).await,
         _ => Err(anyhow!("{ex:?} TP/SL not implemented")),
     }
+}
+
+/// Cancels every given TP/SL, one request after another.
+pub async fn cancel_all(ex: Exchange, k: &Keys, list: &[TpSl]) -> Result<CancelReport> {
+    let mut rep = CancelReport::default();
+    for t in list { rep.add(format!("{} {}", t.symbol, t.id), cancel(ex, k, &t.symbol, &t.id).await); }
+    Ok(rep)
 }
 
 #[cfg(test)]

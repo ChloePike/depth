@@ -298,7 +298,7 @@ fn order(mkts: &[Mkt], o: &Value) -> OpenOrder {
         ex: Exchange::Lighter, symbol: sym_of(mkts, o["market_index"].as_i64().unwrap_or(-1)), id: o["order_index"].to_string(),
         side: if o["is_ask"] == true { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["initial_base_amount"]), filled: n(&o["filled_base_amount"]),
         tif: o["time_in_force"].as_str().unwrap_or_default().into(), kind: o["type"].as_str().unwrap_or_default().into(), reduce_only: o["reduce_only"].as_bool().unwrap_or(false),
-        ts: if ts > 0 && ts < 100_000_000_000 { ts * 1000 } else { ts }, pos: None,
+        ts: if ts > 0 && ts < 100_000_000_000 { ts * 1000 } else { ts }, pos: None, client_id: None, trigger: None,
     }
 }
 
@@ -351,7 +351,7 @@ pub async fn stream(k: Keys, tx: AccTx) {
                     }
                 } else if ty.ends_with("/user_stats") {
                     let st = &v["stats"];
-                    send(AccEvent::Wallet { equity: n(&st["portfolio_value"]), available: n(&st["available_balance"]) });
+                    send(AccEvent::Wallet(Balance { equity: n(&st["portfolio_value"]), available: n(&st["available_balance"]), ..Default::default() }));
                 } else if ty.ends_with("/market_stats") {
                     // market_stats/all: a map of market id -> stats; a single market: the stats object
                     let ms = &v["market_stats"];
@@ -660,7 +660,7 @@ mod tests {
         assert_eq!(order_params(Kind::Limit { price: 1.0, tif: Tif::Ioc }, now), (0, 0, 0));
         assert_eq!(order_params(Kind::Limit { price: 1.0, tif: Tif::Gtc }, now).1, 1);
         assert!(order_params(Kind::Limit { price: 1.0, tif: Tif::PostOnly }, now).2 > now);
-        assert!(account(&Keys { key: "123:4".into(), secret: String::new(), extra: None }).unwrap() == (123, 4));
+        assert!(account(&Keys { key: "123:4".into(), secret: String::new(), extra: None, demo: false }).unwrap() == (123, 4));
         let a = client_index();
         assert!(a > 0 && client_index() == a + 1);
     }

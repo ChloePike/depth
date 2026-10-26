@@ -588,7 +588,7 @@ impl Engine {
                                     }
                                     ev => {
                                         if let trade::AccEvent::Position { p, .. } = &ev { if p.qty > 0.0 && p.liq.is_none() { pos_dirty.insert(ex); } }
-                                        let wallet = matches!(ev, trade::AccEvent::Wallet { .. });
+                                        let wallet = matches!(ev, trade::AccEvent::Wallet(_));
                                         changed |= apply(&mut a, ex, ev);
                                         // run after the lock is released: spawn_top_up locks the account itself
                                         if wallet { if let Some(need) = auto_due(&mut a, ex) { top_ups.push((ex, need)); } }
@@ -1078,7 +1078,7 @@ impl Engine {
         let (Some(rt), account, ctx, o) = (self.rt.as_ref(), self.account.clone(), ctx.clone(), o.clone()) else { return };
         rt.spawn(async move {
             let Some(k) = account.lock().unwrap().keys.get(&o.ex).cloned() else { return };
-            let res = trade::cancel(o.ex, &k, &o.symbol, &o.id).await;
+            let res = trade::cancel_order(o.ex, &k, &o).await;
             let ok = res.is_ok();
             account.lock().unwrap().note(match res { Ok(()) => format!("OK cancel {:?} {} {}", o.ex, o.symbol, o.id), Err(e) => format!("FAIL cancel {:?} {}: {e:#}", o.ex, o.id) }, ok);
             ctx.request_repaint();
@@ -1514,11 +1514,21 @@ fn apply(a: &mut Account, ex: Exchange, ev: trade::AccEvent) -> bool {
         }
         E::Order(o) => { a.orders.retain(|x| !(x.ex == ex && x.id == o.id)); a.orders.push(o); true }
         E::OrderDone { id } => { a.orders.retain(|x| !(x.ex == ex && x.id == id)); true }
-        E::Wallet { equity, available } => {
+        E::Wallet(w) => {
+            // equity / available always replace; a risk field the push does not carry keeps its last value
             let b = a.balances.entry(ex).or_default();
-            b.equity = equity;
-            b.available = available;
+            b.equity = w.equity;
+            b.available = w.available;
+            b.uni_mmr = w.uni_mmr.or(b.uni_mmr);
+            b.mm_rate = w.mm_rate.or(b.mm_rate);
+            b.maint_margin = w.maint_margin.or(b.maint_margin);
+            b.adj_equity = w.adj_equity.or(b.adj_equity);
             true
+        }
+        E::Down => { depth::sys::append_log("trade.log", &format!("{ex:?} account stream down\n")); false }
+        E::Liquidated { symbol, side, qty, price } => {
+            depth::sys::append_log("trade.log", &format!("{ex:?} liquidated {symbol} {side:?} {qty} @ {price}\n"));
+            false
         }
         E::TpSl(t) => { a.tpsl.retain(|x| !(x.ex == ex && x.id == t.id)); a.tpsl.push(t); true }
         E::TpSlDone { id } => { a.tpsl.retain(|x| !(x.ex == ex && x.id == id)); true }
@@ -1551,7 +1561,7 @@ mod tests {
     #[test]
     fn funding_fetch_only_when_due() {
         let mut a = Account::default();
-        a.keys.insert(Exchange::Binance, Keys { key: "k".into(), secret: "s".into(), extra: None });
+        a.keys.insert(Exchange::Binance, Keys { key: "k".into(), secret: "s".into(), extra: None, demo: false });
         a.positions.push(pos(Side::Buy, 1.0));
         let fund = HashMap::from([((Exchange::Binance, "BTCUSDT".to_string()), VenueFunding { rate: 0.0, interval_h: 8.0, next_ms: 1_000_000 })]);
         assert_eq!(funding_due(&mut a, &fund, 0).len(), 1);
@@ -1611,13 +1621,32 @@ mod tests {
         apply(&mut a, ex, E::Position { p: pos(Side::Sell, 0.0), one_way: true });
         assert!(a.positions.is_empty());
         // orders upsert by id and leave on done
-        let o = OpenOrder { ex, symbol: "BTCUSDT".into(), id: "7".into(), side: Side::Buy, price: 99.0, qty: 1.0, filled: 0.0, kind: "LIMIT".into(), tif: String::new(), reduce_only: false, ts: 0, pos: None };
+        let o = OpenOrder { ex, symbol: "BTCUSDT".into(), id: "7".into(), side: Side::Buy, price: 99.0, qty: 1.0, filled: 0.0, kind: "LIMIT".into(), tif: String::new(), reduce_only: false, ts: 0, pos: None, client_id: None, trigger: None };
         apply(&mut a, ex, E::Order(o.clone()));
         apply(&mut a, ex, E::Order(OpenOrder { filled: 0.5, ..o }));
         assert_eq!(a.orders.len(), 1);
         assert_eq!(a.orders[0].filled, 0.5);
         apply(&mut a, ex, E::OrderDone { id: "7".into() });
         assert!(a.orders.is_empty());
+    }
+
+    #[test]
+    fn wallet_push_keeps_risk_fields_it_omits() {
+        let mut a = Account::default();
+        let ex = Exchange::Bybit;
+        let full = trade::Balance { equity: 1000.0, available: 800.0, uni_mmr: Some(3.0), mm_rate: Some(0.05), maint_margin: Some(50.0), adj_equity: Some(990.0) };
+        apply(&mut a, ex, E::Wallet(full));
+        // a push with totals only: equity / available replace, the risk fields stay
+        apply(&mut a, ex, E::Wallet(trade::Balance { equity: 900.0, available: 700.0, ..Default::default() }));
+        let b = &a.balances[&ex];
+        assert_eq!((b.equity, b.available, b.uni_mmr, b.mm_rate, b.maint_margin, b.adj_equity), (900.0, 700.0, Some(3.0), Some(0.05), Some(50.0), Some(990.0)));
+        // a push that carries them replaces
+        apply(&mut a, ex, E::Wallet(trade::Balance { equity: 900.0, available: 700.0, mm_rate: Some(0.07), adj_equity: Some(880.0), ..Default::default() }));
+        let b = &a.balances[&ex];
+        assert_eq!((b.mm_rate, b.adj_equity, b.maint_margin), (Some(0.07), Some(880.0), Some(50.0)));
+        // stream down / liquidation notices are logged, not state
+        assert!(!apply(&mut a, ex, E::Down));
+        assert!(!apply(&mut a, ex, E::Liquidated { symbol: "BTCUSDT".into(), side: Side::Buy, qty: 1.0, price: 90.0 }));
     }
 }
 

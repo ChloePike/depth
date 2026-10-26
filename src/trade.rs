@@ -38,7 +38,9 @@ pub const VERIFIED: [Exchange; 2] = [Exchange::Bybit, Exchange::Binance];
 /// OKX / Bitget passphrase; Hyperliquid: key = account (main wallet) address, secret = API
 /// (agent) wallet private key; Lighter: key = "<account_index>:<api_key_index>", secret = API key.
 #[derive(Clone)]
-pub struct Keys { pub key: String, pub secret: String, pub extra: Option<String> }
+pub struct Keys { pub key: String, pub secret: String, pub extra: Option<String>,
+    /// simulated venue account: never reaches a real exchange (default false; Debug still redacts everything)
+    pub demo: bool }
 
 impl std::fmt::Debug for Keys {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "Keys({}…)", &self.key[..self.key.len().min(4)]) }
@@ -66,7 +68,7 @@ pub fn keychain(ex: Exchange) -> Option<Keys> {
     let get = |what: &str| crate::sys::secret_get(&kc_account(ex, what));
     let extra = get("passphrase");
     if needs_extra(ex) && extra.is_none() { return None; }
-    Some(Keys { key: get("key")?, secret: get("secret")?, extra })
+    Some(Keys { key: get("key")?, secret: get("secret")?, extra, demo: false })
 }
 
 /// Store keys for `ex` in the Keychain (replacing existing items). `extra` is the passphrase /
@@ -128,10 +130,10 @@ pub fn fmt_step(v: f64, step: f64, floor: bool) -> String {
     format!("{:.*}", step_dp(step), n * step)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Tif { Gtc, Ioc, PostOnly, Fok }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Limit { price: f64, tif: Tif },
     Market,
@@ -164,13 +166,15 @@ impl Kind {
 /// Order types a venue accepts natively (the UI offers only these; TWAP and scaled orders are
 /// built from plain limits and work everywhere).
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize)]
-pub struct Caps { pub fok: bool, pub stop: bool, pub trailing: bool, pub post_only: bool }
+pub struct Caps { pub fok: bool, pub stop: bool, pub trailing: bool, pub post_only: bool,
+    /// position TP/SL (`tpsl` module)
+    pub tpsl: bool }
 
 pub fn caps(ex: Exchange) -> Caps {
     match ex {
-        Exchange::Bybit | Exchange::Binance => Caps { fok: true, stop: true, trailing: true, post_only: true },
-        Exchange::Okx | Exchange::Bitget | Exchange::Gate => Caps { fok: true, stop: false, trailing: false, post_only: true },
-        Exchange::Kraken | Exchange::Hyperliquid | Exchange::Lighter => Caps { fok: false, stop: false, trailing: false, post_only: true },
+        Exchange::Bybit | Exchange::Binance => Caps { fok: true, stop: true, trailing: true, post_only: true, tpsl: true },
+        Exchange::Okx | Exchange::Bitget | Exchange::Gate => Caps { fok: true, stop: false, trailing: false, post_only: true, tpsl: false },
+        Exchange::Kraken | Exchange::Hyperliquid | Exchange::Lighter => Caps { fok: false, stop: false, trailing: false, post_only: true, tpsl: false },
         _ => Caps::default(),
     }
 }
@@ -182,7 +186,7 @@ pub fn bbo_levels(ex: Exchange) -> &'static [u8] {
 
 /// An order expressed as intent: which position (`pos`: Buy = long, Sell = short) and whether it
 /// opens / adds to it or closes / reduces it. Venue params are derived per position mode.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OrderReq {
     pub symbol: String, pub pos: Side, pub close: bool, pub kind: Kind, pub qty: f64,
     /// our id for the order (Bybit orderLinkId, Binance newClientOrderId): lets a leg whose
@@ -214,7 +218,11 @@ pub struct OpenOrder { pub ex: Exchange, pub symbol: String, pub id: String, pub
     /// time in force as the venue spells it (GTC, IOC, PostOnly, alo, poc, ...); empty when the venue puts it in `kind`
     pub tif: String, pub reduce_only: bool, pub ts: i64,
     /// hedge mode: which position the order belongs to
-    pub pos: Option<Side> }
+    pub pos: Option<Side>,
+    /// our id for the order, where the venue row carries it (Bybit orderLinkId, Binance clientOrderId); None elsewhere
+    pub client_id: Option<String>,
+    /// trigger price when the row is a conditional order waiting on the venue; None for plain resting orders
+    pub trigger: Option<f64> }
 
 /// The trading (margin) account, USD. Every other account is listed by `wallets`.
 #[derive(Clone, Debug, Default)]
@@ -246,6 +254,9 @@ const RECV_WRITE: u32 = 5_000;
 // ---------------------------------------------------------------- venue-neutral API
 
 fn n(v: &Value) -> f64 { crate::num(v) }
+
+/// A venue's client order id field: None when absent or empty.
+fn opt_id(v: &Value) -> Option<String> { v.as_str().filter(|s| !s.is_empty()).map(String::from) }
 
 pub async fn rules(ex: Exchange, symbol: &str) -> Result<Rules> {
     // every order starts here: a market this venue lists under another name (crate::alias, e.g.
@@ -519,6 +530,28 @@ pub async fn amend(ex: Exchange, k: &Keys, o: &OpenOrder, price: f64, r: &Rules)
     Ok(())
 }
 
+/// Cancels one resting order row. ponytail: plain cancel by id on every venue; trigger rows
+/// (`o.trigger`) get their venue's algo cancel here once those rows are listed.
+pub async fn cancel_order(ex: Exchange, k: &Keys, o: &OpenOrder) -> Result<()> { cancel(ex, k, &o.symbol, &o.id).await }
+
+/// Outcome of a bulk cancel: how many cancels the venue accepted, and one line per refusal.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CancelReport { pub sent: usize, pub failed: Vec<String> }
+
+impl CancelReport {
+    pub(crate) fn add(&mut self, what: String, r: Result<()>) {
+        match r { Ok(()) => self.sent += 1, Err(e) => self.failed.push(format!("{what}: {e:#}")) }
+    }
+}
+
+/// Cancels every given order, one request after another (the rate-limit pause applies to each).
+/// ponytail: a loop of single cancels; native cancel-all endpoints come with the kill switch.
+pub async fn cancel_all(ex: Exchange, k: &Keys, orders: &[OpenOrder]) -> Result<CancelReport> {
+    let mut rep = CancelReport::default();
+    for o in orders { rep.add(format!("{} {}", o.symbol, o.id), cancel_order(ex, k, o).await); }
+    Ok(rep)
+}
+
 pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {
     match ex {
         Exchange::Bybit => { bybit::cancel(k, symbol, id).await?; }
@@ -546,6 +579,24 @@ pub async fn positions(ex: Exchange, k: &Keys) -> Result<Vec<Position>> {
         Exchange::Lighter => lighter::positions(k).await,
         _ => bail!("{ex:?} trading not implemented"),
     }
+}
+
+/// A REST position snapshot merged into the rows pushed so far (`old`, one venue): fields a
+/// snapshot leaves out keep their pushed value (Kraken REST rows carry no mark / liq / margin;
+/// a venue may omit liq for a moment). Liq and margin belonged to the old size, so they are only
+/// kept while qty and entry are unchanged. Positions missing from the snapshot are dropped.
+pub fn merge_snapshot(old: &[Position], new: Vec<Position>) -> Vec<Position> {
+    new.into_iter().map(|mut p| {
+        if let Some(o) = old.iter().find(|o| o.ex == p.ex && o.symbol == p.symbol && o.side == p.side) {
+            let same = o.qty == p.qty && o.entry == p.entry;
+            if p.mark == 0.0 { p.mark = o.mark; }
+            if p.liq.is_none() && same { p.liq = o.liq; }
+            if p.lev == 0.0 { p.lev = o.lev; }
+            if p.margin == 0.0 && same { p.margin = o.margin; }
+            if p.cross.is_none() { p.cross = o.cross; }
+        }
+        p
+    }).collect()
 }
 
 pub async fn open_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
@@ -591,8 +642,13 @@ pub enum AccEvent {
     Mark { symbol: String, mark: f64 },
     Order(OpenOrder),
     OrderDone { id: String },
-    /// margin account totals pushed by the venue (Bybit wallet)
-    Wallet { equity: f64, available: f64 },
+    /// margin account totals pushed by the venue; `equity` / `available` always replace, the Option
+    /// fields keep the last value when None (a push that does not carry them)
+    Wallet(Balance),
+    /// the private stream is down (emitted by streams later; the engine only logs it for now)
+    Down,
+    /// one of our positions was liquidated by the venue (emitted later; the engine only logs it for now)
+    Liquidated { symbol: String, side: Side, qty: f64, price: f64 },
     /// balances changed but the push has no account totals (Binance): refetch the balance
     BalanceDirty,
     /// a TP/SL (whole-position or partial) appeared or changed; removed with TpSlDone
@@ -1029,5 +1085,67 @@ mod tests {
             assert_eq!(get(&bw, "positionSide"), None);
             assert_eq!(get(&bw, "reduceOnly").is_some(), close);
         }
+    }
+
+    fn pos(side: Side, qty: f64) -> Position {
+        Position { ex: Exchange::Kraken, symbol: "BTCUSDT".into(), side, qty, entry: 100.0, mark: 101.0, liq: Some(80.0), upnl: 1.0, lev: 10.0, margin: 50.0, cross: Some(true) }
+    }
+
+    #[test]
+    fn merge_snapshot_keeps_pushed_fields() {
+        // Kraken REST row: mark 0, liq None, margin 0, lev 0, cross unknown; same size and entry as the pushed row
+        let rest = Position { mark: 0.0, liq: None, margin: 0.0, lev: 0.0, cross: None, upnl: 2.0, ..pos(Side::Buy, 1.0) };
+        let m = merge_snapshot(&[pos(Side::Buy, 1.0)], vec![rest]);
+        let p = &m[0];
+        assert_eq!((p.mark, p.liq, p.margin, p.lev, p.cross, p.upnl), (101.0, Some(80.0), 50.0, 10.0, Some(true), 2.0));
+        // the venue's own figures win when it sends them
+        let rest = Position { mark: 105.0, liq: Some(70.0), margin: 40.0, lev: 5.0, cross: Some(false), ..pos(Side::Buy, 1.0) };
+        let p = &merge_snapshot(&[pos(Side::Buy, 1.0)], vec![rest])[0];
+        assert_eq!((p.mark, p.liq, p.margin, p.lev, p.cross), (105.0, Some(70.0), 40.0, 5.0, Some(false)));
+        // resized: liq and margin belonged to the old size and are dropped; mark / lev still carry over
+        let rest = Position { mark: 0.0, liq: None, margin: 0.0, lev: 0.0, ..pos(Side::Buy, 2.0) };
+        let p = &merge_snapshot(&[pos(Side::Buy, 1.0)], vec![rest])[0];
+        assert_eq!((p.mark, p.liq, p.margin, p.lev), (101.0, None, 0.0, 10.0));
+        // new entry price counts as a different position too
+        let rest = Position { liq: None, entry: 99.0, ..pos(Side::Buy, 1.0) };
+        assert_eq!(merge_snapshot(&[pos(Side::Buy, 1.0)], vec![rest])[0].liq, None);
+    }
+
+    #[test]
+    fn merge_snapshot_drops_adds_and_matches_by_side() {
+        let blank = |side, qty| Position { mark: 0.0, liq: None, margin: 0.0, lev: 0.0, cross: None, ..pos(side, qty) };
+        // old long only; the snapshot has a short (new: nothing to carry) and no long (dropped)
+        let m = merge_snapshot(&[pos(Side::Buy, 1.0)], vec![blank(Side::Sell, 1.0)]);
+        assert_eq!(m.len(), 1);
+        assert_eq!((m[0].side, m[0].mark, m[0].liq, m[0].cross), (Side::Sell, 0.0, None, None));
+        // hedge: both sides present, each merges with its own old row
+        let old = [Position { mark: 111.0, ..pos(Side::Buy, 1.0) }, Position { mark: 222.0, ..pos(Side::Sell, 1.0) }];
+        let m = merge_snapshot(&old, vec![blank(Side::Sell, 1.0), blank(Side::Buy, 1.0)]);
+        assert_eq!(m.iter().map(|p| (p.side, p.mark)).collect::<Vec<_>>(), vec![(Side::Sell, 222.0), (Side::Buy, 111.0)]);
+        // another venue's row with the same symbol does not leak in
+        let other = Position { ex: Exchange::Bybit, ..pos(Side::Buy, 1.0) };
+        assert_eq!(merge_snapshot(&[other], vec![blank(Side::Buy, 1.0)])[0].mark, 0.0);
+        assert!(merge_snapshot(&[pos(Side::Buy, 1.0)], vec![]).is_empty());
+    }
+
+    #[test]
+    fn contract_types() {
+        // TP/SL exists on the two verified venues only
+        assert!(caps(Exchange::Bybit).tpsl && caps(Exchange::Binance).tpsl);
+        assert!(![Exchange::Okx, Exchange::Bitget, Exchange::Gate, Exchange::Kraken, Exchange::Hyperliquid, Exchange::Lighter].iter().any(|e| caps(*e).tpsl));
+        // an order request survives JSON (jobs persist them)
+        let r = OrderReq { symbol: "BTCUSDT".into(), pos: Side::Sell, close: true, kind: Kind::Stop { trigger: 95_000.0, limit: Some(94_900.0), by_mark: true }, qty: 0.5, client_id: Some("t1x".into()) };
+        let back: OrderReq = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(back, r);
+        let t: tpsl::Trigger = serde_json::from_str(&serde_json::to_string(&tpsl::Trigger::Last).unwrap()).unwrap();
+        assert_eq!(t, tpsl::Trigger::Last);
+        // a bulk cancel counts accepted cancels and names each refusal
+        let mut rep = CancelReport::default();
+        rep.add("BTCUSDT 1".into(), Ok(()));
+        rep.add("BTCUSDT 2".into(), Err(anyhow!("too late")));
+        assert_eq!((rep.sent, rep.failed), (1, vec!["BTCUSDT 2: too late".to_string()]));
+        // the demo flag never shows in Debug
+        let k = Keys { key: "ABCDEFGH".into(), secret: "s".into(), extra: None, demo: true };
+        assert_eq!(format!("{k:?}"), "Keys(ABCD…)");
     }
 }

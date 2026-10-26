@@ -232,6 +232,7 @@ pub async fn open_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
         side: if o["side"] == "SELL" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["origQty"]), filled: n(&o["executedQty"]),
         tif: o["timeInForce"].as_str().unwrap_or_default().into(), kind: o["type"].as_str().unwrap_or_default().into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: o["time"].as_i64().unwrap_or(0),
         pos: match o["positionSide"].as_str() { Some("LONG") => Some(Side::Buy), Some("SHORT") => Some(Side::Sell), _ => None },
+        client_id: opt_id(&o["clientOrderId"]), trigger: None,
     }).collect())
 }
 
@@ -322,6 +323,7 @@ pub async fn stream(k: Keys, tx: AccTx) {
                                 price: n(&o["p"]), qty: n(&o["q"]), filled: n(&o["z"]), tif: o["f"].as_str().unwrap_or_default().into(), kind: o["o"].as_str().unwrap_or_default().into(),
                                 reduce_only: o["R"].as_bool().unwrap_or(false), ts: o["T"].as_i64().unwrap_or(0),
                                 pos: match o["ps"].as_str() { Some("LONG") => Some(Side::Buy), Some("SHORT") => Some(Side::Sell), _ => None },
+                                client_id: opt_id(&o["c"]), trigger: None,
                             }));
                         } else {
                             send(AccEvent::OrderDone { id });

@@ -197,6 +197,7 @@ fn order(o: &Value, ct: impl Fn(&str) -> Option<Inst>) -> Option<OpenOrder> {
         price: z(&o["px"]), qty: z(&o["sz"]) * i.ct, filled: z(&o["accFillSz"]) * i.ct, tif: String::new(), kind: o["ordType"].as_str().unwrap_or_default().into(),
         reduce_only: o["reduceOnly"] == "true" || o["reduceOnly"] == true, ts: z(&o["cTime"]) as i64,
         pos: match o["posSide"].as_str() { Some("long") => Some(Side::Buy), Some("short") => Some(Side::Sell), _ => None },
+        client_id: None, trigger: None,
     })
 }
 
@@ -305,7 +306,7 @@ pub async fn stream(k: Keys, tx: AccTx) {
                     }
                 },
                 Some("account") => for a in &data {
-                    send(match balance_of(a) { Some(b) => AccEvent::Wallet { equity: b.equity, available: b.available }, None => AccEvent::BalanceDirty });
+                    send(match balance_of(a) { Some(b) => AccEvent::Wallet(Balance { equity: b.equity, available: b.available, ..Default::default() }), None => AccEvent::BalanceDirty });
                 },
                 _ => {}
             }
