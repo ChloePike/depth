@@ -11,6 +11,8 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 pub const HISTORY_MINUTES: usize = 1000;
 const HISTORY_MARKETS: [Market; 2] = [Market::Spot, Market::Perp];
+/// A keyed margin borrow rate is read again only when it is at least this old.
+const BORROW_TTL_MS: i64 = 3_600_000;
 
 /// Private account state for venues with Keychain keys, refreshed every 2s.
 #[derive(Default)]
@@ -274,6 +276,8 @@ pub struct Engine {
     watching: HashMap<String, Vec<tokio::task::JoinHandle<()>>>,
     /// last trade price per watched base (USDT)
     pub watched: Arc<Mutex<HashMap<String, f64>>>,
+    /// Binance margin borrow APR from the user's key: asset -> (APR, read at ms); kept across base switches
+    borrow: Arc<Mutex<HashMap<String, (f64, i64)>>>,
 }
 
 impl Engine {
@@ -282,7 +286,7 @@ impl Engine {
             let mut a = Account::default();
             for ex in trade::TRADABLE { if let Some(k) = trade::keychain(ex) { a.keys.insert(ex, k); } }
             Arc::new(Mutex::new(a))
-        }, wants_options: Default::default(), wants_l3: Default::default(), l3_started: false, hl_l3: None, l3_flowscan: false, off: Default::default(), acct_rt: None, acct_tx: None, streams: HashMap::new(), key_tests: Default::default(), watch_rt: None, watching: HashMap::new(), watched: Default::default() }
+        }, wants_options: Default::default(), wants_l3: Default::default(), l3_started: false, hl_l3: None, l3_flowscan: false, off: Default::default(), acct_rt: None, acct_tx: None, streams: HashMap::new(), key_tests: Default::default(), watch_rt: None, watching: HashMap::new(), watched: Default::default(), borrow: Default::default() }
     }
 
     /// (Re)subscribe everything for `base`: spot + perp live and history, USDT/USD, heatmap sampling.
@@ -668,6 +672,33 @@ impl Engine {
             let hs = ex::spawn(e, &self.sub(market), tx.clone());
             self.venue_tasks.entry(e).or_default().extend(hs);
         }
+        if market == Market::Margin { self.spawn_borrow(tx); }
+    }
+
+    /// Binance cross-margin borrow APR of the base and USDT at the user's own VIP tier (the public
+    /// margin data has none). Runs when Margin starts (first use, base change, Binance switched on):
+    /// the cache outlives base switches, so the sapi call (weight 1 per coin) only goes out for a
+    /// rate older than an hour, and the cached one is replayed into the fresh Agg. No timer.
+    fn spawn_borrow(&self, tx: &UnboundedSender<Msg>) {
+        let Some(k) = self.account.lock().unwrap().keys.get(&Exchange::Binance).cloned() else { return };
+        if self.off.contains(&Exchange::Binance) { return; }
+        let (cache, tx, base) = (self.borrow.clone(), tx.clone(), self.base.clone());
+        tokio::spawn(async move {
+            let assets = [base.as_str(), "USDT"];
+            let stale = stale_borrow(&cache.lock().unwrap(), &assets, now_ms());
+            if !stale.is_empty() {
+                let list: Vec<&str> = stale.iter().map(String::as_str).collect();
+                match trade::spot::borrow_rates(Exchange::Binance, &k, &list).await {
+                    Ok(r) => { let now = now_ms(); let mut c = cache.lock().unwrap(); for (a, apr) in r { c.insert(a, (apr, now)); } }
+                    Err(e) => depth::sys::append_log("trade.log", &format!("Binance margin borrow rates: {e:#}\n")),
+                }
+            }
+            let rows: Vec<(String, f64)> = { let c = cache.lock().unwrap(); assets.iter().filter_map(|a| c.get(*a).map(|(apr, _)| (a.to_string(), *apr))).collect() };
+            let now = now_ms();
+            for (asset, apr) in rows {
+                let _ = tx.send(Msg { ex: Exchange::Binance, market: Market::Margin, symbol: format!("{base}USDT").into(), ts: now, recv: now, ev: Event::BorrowRate { asset, apr } });
+            }
+        });
     }
 
     /// Exact L3 feeds for the current base (Lighter perp), once.
@@ -737,6 +768,7 @@ impl Engine {
             let hs = ex::spawn(e, &self.sub(market), tx.clone());
             self.venue_tasks.entry(e).or_default().extend(hs);
         }
+        if e == Exchange::Binance && self.started.contains(&Market::Margin) { self.spawn_borrow(&tx); }
     }
 
     /// Fetch native `tf`-minute history for every venue the first time a timeframe is shown.
@@ -1406,6 +1438,11 @@ async fn refresh_venue(account: &Arc<Mutex<Account>>, ex: Exchange) {
     }
 }
 
+/// Assets whose cached keyed borrow rate is missing or at least `BORROW_TTL_MS` old.
+fn stale_borrow(cache: &HashMap<String, (f64, i64)>, assets: &[&str], now: i64) -> Vec<String> {
+    assets.iter().filter(|a| cache.get(**a).is_none_or(|(_, at)| now - at >= BORROW_TTL_MS)).map(|a| a.to_string()).collect()
+}
+
 /// Binance is the one venue whose position pushes lack the liquidation price while its REST rows
 /// have it, so a push without one is followed by a refetch. Kraken's REST rows carry no mark / liq /
 /// margin either, and the other pushes bring their own liq: a refetch there gains nothing.
@@ -1639,6 +1676,15 @@ mod tests {
         assert_eq!(a.orders[0].filled, 0.5);
         apply(&mut a, ex, E::OrderDone { id: "7".into() });
         assert!(a.orders.is_empty());
+    }
+
+    #[test]
+    fn borrow_rate_reads_only_when_an_hour_old() {
+        let cache = HashMap::from([("BTC".to_string(), (0.1, 1_000_000)), ("USDT".to_string(), (0.2, 1_000_000 - BORROW_TTL_MS))]);
+        // BTC is fresh, USDT is over an hour old, ETH was never read
+        assert_eq!(stale_borrow(&cache, &["BTC", "USDT", "ETH"], 1_000_000 + 1_000), vec!["USDT".to_string(), "ETH".to_string()]);
+        assert_eq!(stale_borrow(&cache, &["BTC"], 1_000_000 + BORROW_TTL_MS - 1), Vec::<String>::new());
+        assert_eq!(stale_borrow(&cache, &["BTC"], 1_000_000 + BORROW_TTL_MS), vec!["BTC".to_string()]);
     }
 
     #[test]

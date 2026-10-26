@@ -24,6 +24,28 @@ pub struct Bal { pub coin: String, pub free: f64, pub locked: f64, pub borrowed:
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect { Plain, Borrow, Repay }
 
+/// Margin borrow APR (fraction per year) of each asset at the user's own VIP tier, which the public
+/// margin data cannot give. Binance: `GET /sapi/v1/margin/crossMarginData?coin=` (weight 1 per coin,
+/// through the rate-limit pause like every signed call); an asset the venue has no rate for is left out.
+pub async fn borrow_rates(ex: Exchange, k: &Keys, assets: &[&str]) -> Result<Vec<(String, f64)>> {
+    match ex {
+        Exchange::Binance => {
+            let mut out = vec![];
+            for a in assets {
+                let v = binance_at(k, binance_spot(), reqwest::Method::GET, "/sapi/v1/margin/crossMarginData", &[("coin", a.to_string())]).await?;
+                out.extend(cross_margin_rates(&v));
+            }
+            Ok(out)
+        }
+        _ => bail!("{ex:?}: no keyed borrow rates"),
+    }
+}
+
+/// `crossMarginData` rows as (coin, yearlyInterest); a row without a rate is skipped.
+fn cross_margin_rates(v: &Value) -> Vec<(String, f64)> {
+    v.as_array().into_iter().flatten().filter_map(|r| Some((r["coin"].as_str()?.to_string(), crate::opt_num(&r["yearlyInterest"])?))).collect()
+}
+
 /// Binance cross-margin API: (host, path prefix); Portfolio Margin accounts trade margin through papi.
 async fn binance_margin(k: &Keys) -> Result<(&'static str, &'static str)> {
     Ok(if super::binance_pm(k).await? { (super::papi_url(), "/papi/v1/margin") } else { (binance_spot(), "/sapi/v1/margin") })
@@ -231,5 +253,15 @@ mod tests {
         assert!(b.get("isLeverage").is_none() && bybit_body("BTCUSDT", Side::Buy, Kind::Market, "0.001", None, true)["isLeverage"] == 1);
         let p = binance_params("BTCUSDT", Side::Sell, Kind::Limit { price: 1.0, tif: Tif::PostOnly }, "1", Some("1.00"));
         assert!(p.contains(&("type", "LIMIT_MAKER".into())) && !p.iter().any(|x| x.0 == "timeInForce"));
+    }
+
+    #[test]
+    fn cross_margin_data_rows() {
+        // documented crossMarginData rows (yearlyInterest is the APR as a fraction)
+        let v: Value = serde_json::from_str(r#"[{"vipLevel":0,"coin":"BTC","transferIn":true,"borrowable":true,"dailyInterest":"0.0005","yearlyInterest":"0.1825","borrowLimit":"180","marginablePairs":["BNBBTC"]}]"#).unwrap();
+        assert_eq!(cross_margin_rates(&v), vec![("BTC".to_string(), 0.1825)]);
+        // no rate (coin not borrowable) or no coin: skipped; an error body is no rows
+        assert!(cross_margin_rates(&json!([{"coin": "XYZ", "borrowable": false}, {"yearlyInterest": "0.1"}])).is_empty());
+        assert!(cross_margin_rates(&json!({"code": -1})).is_empty());
     }
 }
