@@ -233,7 +233,9 @@ pub(crate) fn lenient_map<'de, D: serde::Deserializer<'de>, K: serde::de::Deseri
 /// Lists per key (drawings per base asset), each list read with `lenient_vec`.
 pub(crate) fn lenient_map_vec<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(d: D) -> Result<HashMap<String, Vec<T>>, D::Error> {
     let all: HashMap<String, serde_json::Value> = serde::Deserialize::deserialize(d)?;
-    Ok(all.into_iter().map(|(k, v)| (k, lenient_vec(v).unwrap_or_default())).collect())
+    // a value that is not a list is lost too: count it as dropped
+    let lost = || { DROPPED.with(|c| c.set(c.get() + 1)); vec![] };
+    Ok(all.into_iter().map(|(k, v)| (k, lenient_vec(v).unwrap_or_else(|_| lost()))).collect())
 }
 
 /// settings.json read key by key: what this build cannot parse (a newer build's enum variant or
@@ -285,6 +287,15 @@ fn keep_copy(p: &std::path::Path, ext: &str) -> bool {
     std::fs::copy(p, p.with_extension(format!("json.{ext}"))).map_err(|e| eprintln!("[settings] cannot keep a copy of {} as .{ext}: {e}", p.display())).is_ok()
 }
 
+/// Write settings.json (temp file + rename, so a crash cannot truncate it). The first write of a launch
+/// keeps the file it replaces as settings.json.prev: nested fields this build does not know (a newer
+/// build's) and lists it cannot read are dropped on load without any other trace.
+fn write_settings(p: &std::path::Path, json: &str, prev_kept: &mut bool) -> bool {
+    if !std::mem::replace(prev_kept, true) && p.exists() { keep_copy(p, "prev"); }
+    let tmp = p.with_extension("json.tmp");
+    p.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, p).is_ok()
+}
+
 fn load_settings(text: &str) -> (Settings, bool) {
     DROPPED.with(|c| c.set(0));
     let v: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
@@ -319,6 +330,8 @@ pub struct App {
     saved: (String, Instant),
     /// settings.json exists but could not be read at start: nothing is saved until it reads
     unreadable: bool,
+    /// settings.json.prev written this launch (`write_settings`)
+    prev_kept: bool,
     /// own window's position and size [x, y, w, h] (not hosted; kept while maximized / full screen)
     window: Option<[f32; 4]>,
     mode: Market,
@@ -438,7 +451,7 @@ impl App {
         if let Some(tf) = env("T1_TF").and_then(|s| s.parse().ok()) { chart.tf = tf; }
         let layout = env("T1_LAYOUT").or(st.layout).unwrap_or_else(|| "1".into());
         App {
-            eng, prefs, settings: Default::default(), command: Default::default(), back: None, help: false, kbd: kbd::Kbd::start(), tray: None, pop: None, saved: (saved, Instant::now()), unreadable, window: st.window, mode, chart, book, opt: Default::default(), picker, trade, spot: Default::default(),
+            eng, prefs, settings: Default::default(), command: Default::default(), back: None, help: false, kbd: kbd::Kbd::start(), tray: None, pop: None, saved: (saved, Instant::now()), unreadable, prev_kept: false, window: st.window, mode, chart, book, opt: Default::default(), picker, trade, spot: Default::default(),
             rate: (Instant::now(), 0, 0.0),
             shot: env("T1_SHOT").map(|p| (p, env("T1_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(30.0))),
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
@@ -888,8 +901,7 @@ impl App {
             if !(std::fs::read(&p).is_ok() && keep_copy(&p, "bad")) { return; }
             self.unreadable = false;
         }
-        let tmp = p.with_extension("json.tmp");
-        let ok = p.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::write(&tmp, &json).is_ok() && std::fs::rename(&tmp, &p).is_ok();
+        let ok = write_settings(&p, &json, &mut self.prev_kept);
         if ok { self.saved.0 = json; } else { eprintln!("settings: cannot write {}", p.display()); }
     }
 
@@ -1402,6 +1414,24 @@ mod tests {
         // a key only a newer build writes, broken JSON: flagged; no file yet: not
         assert!(load_settings(r#"{"base": "BTC", "from_the_future": 1}"#).1 && load_settings("{oops").1);
         assert!(!load_settings("").1);
+        // drawings that are not a list lose them: flagged
+        assert!(load_settings(r#"{"chart": {"drawings": {"BTC": "oops"}}}"#).1);
+    }
+
+    #[test]
+    fn first_write_keeps_the_replaced_file_as_prev() {
+        let dir = std::env::temp_dir().join(format!("depth-settings-prev-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (p, prev) = (dir.join("settings.json"), dir.join("settings.json.prev"));
+        let mut kept = false;
+        // no file yet: nothing to keep
+        assert!(write_settings(&p, "first", &mut kept) && !prev.exists());
+        kept = false;
+        std::fs::write(&p, "from a newer build").unwrap();
+        assert!(write_settings(&p, "one", &mut kept) && write_settings(&p, "two", &mut kept));
+        // later writes of the launch leave .prev alone
+        assert_eq!((std::fs::read_to_string(&p).unwrap(), std::fs::read_to_string(&prev).unwrap()), ("two".into(), "from a newer build".into()));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
