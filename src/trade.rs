@@ -569,7 +569,12 @@ pub async fn buy_option(k: &Keys, p: &OptBuy) -> Result<String> {
     option_order(k, p.ex, &p.symbol, Side::Buy, p.qty, p.limit, Tif::Ioc, false, &r).await
 }
 
-/// One option limit order; size floored and price rounded to the venue grid.
+/// An option limit price on the tick grid, never worse than asked: buys floor, sells ceil.
+fn opt_px(price: f64, tick: f64, side: Side) -> String {
+    if side == Side::Buy { fmt_step(price, tick, true) } else { fmt_step(ceil_step(price, tick, 0.0), tick, false) }
+}
+
+/// One option limit order; size floored and price moved onto the venue grid (`opt_px`).
 #[allow(clippy::too_many_arguments)]
 pub async fn option_order(k: &Keys, ex: Exchange, symbol: &str, side: Side, qty: f64, price: f64, tif: Tif, reduce_only: bool, r: &Rules) -> Result<String> {
     if k.demo { bail!("{NO_DEMO_OPTIONS}"); }
@@ -577,7 +582,7 @@ pub async fn option_order(k: &Keys, ex: Exchange, symbol: &str, side: Side, qty:
     if q.parse::<f64>().unwrap_or(0.0) < r.min_qty.max(1e-12) { bail!("size {qty} below minimum {}", r.min_qty); }
     // Deribit's tick grows above a price (0.0005 from 0.005 BTC)
     let tick = if ex == Exchange::Deribit { deribit::tick_for(symbol, r.tick, price) } else { r.tick };
-    let px = fmt_step(price, tick, false);
+    let px = opt_px(price, tick, side);
     if px.parse::<f64>().unwrap_or(0.0) <= 0.0 { bail!("invalid price {price}"); }
     match ex {
         Exchange::Bybit => bybit::option_order(k, symbol, side, &q, &px, tif, reduce_only).await,
@@ -1084,6 +1089,10 @@ mod tests {
         assert_eq!((b["category"].as_str(), b["side"].as_str(), b["orderType"].as_str(), b["timeInForce"].as_str()), (Some("option"), Some("Sell"), Some("Limit"), Some("PostOnly")));
         assert!(b["reduceOnly"] == true && b["orderLinkId"].as_str().is_some_and(|s| s.starts_with("t1opt")));
         assert_eq!(spot::effect_str(spot::Effect::Borrow), "MARGIN_BUY");
+        // the price never goes out worse than asked: buys floor, sells ceil (Deribit 0.0005, Bybit 5)
+        assert_eq!((opt_px(0.0123, 0.0005, Side::Buy), opt_px(0.0123, 0.0005, Side::Sell)), ("0.0120".into(), "0.0125".into()));
+        assert_eq!((opt_px(1503.0, 5.0, Side::Buy), opt_px(1503.0, 5.0, Side::Sell)), ("1500".into(), "1505".into()));
+        assert_eq!((opt_px(0.012, 0.0005, Side::Buy), opt_px(0.012, 0.0005, Side::Sell)), ("0.0120".into(), "0.0120".into()));
     }
 
     #[test]
