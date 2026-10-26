@@ -803,6 +803,22 @@ impl Engine {
         });
     }
 
+    /// Place `reqs` on `ex` one after another in one task: each only once the one before was
+    /// accepted, so a refused close never leaves the open after it on its own.
+    pub fn submit_seq(&self, ex: Exchange, reqs: Vec<OrderReq>, ref_px: f64, ctx: &eframe::egui::Context) {
+        let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        rt.spawn(async move {
+            let n = reqs.len();
+            for (i, req) in reqs.iter().enumerate() {
+                if place_logged(&account, ex, req, ref_px).await.is_none() {
+                    if i + 1 < n { account.lock().unwrap().note(format!("NOTE {ex:?} {}: stopped after {i} of {n} orders, the rest was not sent", req.symbol), false); }
+                    break;
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
     /// Price a protection buy on the venue's ask side (REST book + rules), into `Account::opt_plan`.
     pub fn plan_option(&self, ex: Exchange, symbol: String, qty: f64, ctx: &eframe::egui::Context) {
         let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
@@ -1500,6 +1516,18 @@ fn spawn_top_up(account: &Arc<Mutex<Account>>, ex: Exchange, need: f64, ctx: &ef
     });
 }
 
+/// The orders that reverse `p` on its venue: one-way, one market order of twice the size on the
+/// other side (the venue closes and opens in one fill); hedge (or mode unknown), a market close of
+/// the position, then a market open of the same size on the other side (`Engine::submit_seq`).
+pub fn reverse_reqs(mode: Option<Mode>, p: &Position) -> Vec<OrderReq> {
+    let other = if p.side == depth::Side::Buy { depth::Side::Sell } else { depth::Side::Buy };
+    let o = |pos, close, qty| OrderReq { symbol: p.symbol.clone(), pos, close, kind: trade::Kind::Market, qty, client_id: None, attach: None };
+    match mode {
+        Some(Mode::OneWay) => vec![o(other, false, 2.0 * p.qty)],
+        _ => vec![o(p.side, true, p.qty), o(other, false, p.qty)],
+    }
+}
+
 /// Apply one pushed account change; true when something visible changed.
 fn apply(a: &mut Account, ex: Exchange, ev: trade::AccEvent) -> bool {
     use trade::AccEvent as E;
@@ -1678,6 +1706,24 @@ mod tests {
         assert_eq!(a.orders[0].filled, 0.5);
         apply(&mut a, ex, E::OrderDone { id: "7".into() });
         assert!(a.orders.is_empty());
+    }
+
+    #[test]
+    fn reverse_one_way_is_one_order_of_2x() {
+        let r = reverse_reqs(Some(Mode::OneWay), &pos(Side::Buy, 0.3));
+        assert_eq!(r.len(), 1);
+        assert_eq!((r[0].pos, r[0].close, r[0].qty, r[0].side(), r[0].kind), (Side::Sell, false, 0.6, Side::Sell, trade::Kind::Market));
+    }
+
+    #[test]
+    fn reverse_hedge_is_close_then_open() {
+        for mode in [Some(Mode::Hedge), None] {
+            let r = reverse_reqs(mode, &pos(Side::Sell, 2.0));
+            assert_eq!(r.len(), 2);
+            // close the short (a buy), then open a long of the same size (a buy)
+            assert_eq!((r[0].pos, r[0].close, r[0].qty, r[0].side()), (Side::Sell, true, 2.0, Side::Buy));
+            assert_eq!((r[1].pos, r[1].close, r[1].qty, r[1].side()), (Side::Buy, false, 2.0, Side::Buy));
+        }
     }
 
     #[test]

@@ -273,3 +273,6 @@ The key is deleted from the system keyring and the venue disconnects from your a
 System keyring (depth) = 系统密钥环（depth）
 Show in file manager = 在文件管理器中显示
 Local multi-exchange trading terminal. Runs entirely on this computer: no relay, no server. = 本地多交易所交易终端，完全运行在这台电脑上：没有中转，没有服务器。
+Sent at market, or as an IOC limit at the slippage cap (Settings > Trading) when the book is thin; what does not fill stays open. = 以市价发出；盘口太薄时改为滑点上限处的 IOC 限价单（设置 > 交易），未成交部分仍保留持仓。
+One market order of twice the size: the venue closes the position and opens the other side in the same fill. = 一笔两倍数量的市价单：交易所在同一笔成交中平掉此仓位并开出反向仓位。
+Two market orders, the open only after the close was accepted; if the second fails you are left flat. = 两笔市价单，平仓被接受后才发开仓单；如果第二笔失败，你会处于空仓状态。

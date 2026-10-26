@@ -801,17 +801,25 @@ impl AccountPanel {
                 (l("Side").into(), ls(p).into(), side_col(p)), (l("Size").into(), unit(p, *q), fg_strong()),
                 (l("Mark").into(), fmt_px(f(&p["mark"])), fg()), (l("Value").into(), format!("≈ {} USDT", fmt_dp(q * f(&p["mark"]), 0)), fg()),
                 (l("Unrealized PnL").into(), format!("{:+.2} USDT", f(&p["upnl"]) * q / f(&p["qty"]).max(1e-12)), if f(&p["upnl"]) >= 0.0 { up() } else { dn() }),
-            ], l("A market order fills against the book; slippage applies.")),
+            ], l("Sent at market, or as an IOC limit at the slippage cap (Settings > Trading) when the book is thin; what does not fill stays open.")),
             PosAct::Limit(p, x, q) => (l("Place limit close?"), l("Place Limit Close"), Some(p), vec![
                 (l("Side").into(), ls(p).into(), side_col(p)), (l("Size").into(), unit(p, *q), fg_strong()),
                 (l("Price").into(), fmt_px(*x), fg_strong()), (l("Value").into(), format!("≈ {} USDT", fmt_dp(q * x, 0)), fg()),
             ], ""),
             PosAct::Reverse(p) => {
                 let other = if s(&p["side"]) == "long" { l("Short") } else { l("Long") };
-                (l("Reverse position?"), l("Reverse"), Some(p), vec![
-                    (l("close").into(), format!("{} {}", ls(p), unit(p, f(&p["qty"]))), side_col(p)),
-                    (l("then open").into(), format!("{other} {}", unit(p, f(&p["qty"]))), if s(&p["side"]) == "long" { dn() } else { up() }),
-                ], l("Two market orders; if the second fails you are left flat."))
+                let other_col = if s(&p["side"]) == "long" { dn() } else { up() };
+                if s(&p["mode"]) == "oneway" {
+                    (l("Reverse position?"), l("Reverse"), Some(p), vec![
+                        (l("close").into(), format!("{} {}", ls(p), unit(p, f(&p["qty"]))), side_col(p)),
+                        (l("then open").into(), format!("{other} {}", unit(p, f(&p["qty"]))), other_col),
+                    ], l("One market order of twice the size: the venue closes the position and opens the other side in the same fill."))
+                } else {
+                    (l("Reverse position?"), l("Reverse"), Some(p), vec![
+                        (l("close").into(), format!("{} {}", ls(p), unit(p, f(&p["qty"]))), side_col(p)),
+                        (l("then open").into(), format!("{other} {}", unit(p, f(&p["qty"]))), other_col),
+                    ], l("Two market orders, the open only after the close was accepted; if the second fails you are left flat."))
+                }
             }
             PosAct::Move(o, x) => (l("Move order?"), l("Move"), Some(o), vec![
                 (l("Side").into(), side_name(s(&o["side"])).into(), if s(&o["side"]) == "buy" { up() } else { dn() }), (l("Size").into(), unit(o, f(&o["qty"]) - f(&o["filled"])), fg_strong()),
@@ -819,7 +827,7 @@ impl AccountPanel {
             ], ""),
             PosAct::CloseAll(ps) => (l("Close all positions at market?"), l("Close All"), None,
                 ps.iter().map(|p| (format!("{} {} {}", s(&p["ex"]), s(&p["symbol"]), ls(p)), unit(p, f(&p["qty"])), side_col(p))).collect(),
-                l("A market order fills against the book; slippage applies.")),
+                l("Sent at market, or as an IOC limit at the slippage cap (Settings > Trading) when the book is thin; what does not fill stays open.")),
         };
         let move_ = matches!(a, PosAct::Move(..));
         let mut done = None;

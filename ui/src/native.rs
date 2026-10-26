@@ -94,12 +94,13 @@ impl App {
         })).collect();
         let positions: Vec<Value> = acc.positions.iter().map(|p| {
             let f = funds.get(&(p.ex, p.symbol.clone()));
+            let mode = acc.modes.get(&(p.ex, p.symbol.clone())).copied().flatten().map(|m| if m == trade::Mode::Hedge { "hedge" } else { "oneway" });
             // a positive rate: longs pay shorts
             let pay = f.map(|f| -(if p.side == Side::Buy { 1.0 } else { -1.0 }) * p.qty * p.mark * f.rate);
             // funding since open (received positive); since 0 = open time unknown, lower = the position is older than since
             let paid = acc.funding_paid.get(&(p.ex, p.symbol.clone(), p.side)).and_then(|s| s.val);
             json!({
-                "ex": ex_name(p.ex), "symbol": p.symbol, "side": side_name(p.side), "qty": p.qty, "entry": p.entry, "mark": p.mark,
+                "ex": ex_name(p.ex), "symbol": p.symbol, "side": side_name(p.side), "qty": p.qty, "entry": p.entry, "mark": p.mark, "mode": mode,
                 "liq": p.liq, "upnl": p.upnl, "lev": p.lev, "margin": p.margin, "cross": p.cross,
                 "funding_rate": f.map(|f| f.rate), "funding_interval_h": f.map(|f| f.interval_h), "next_funding_ms": f.map(|f| f.next_ms), "funding_est": pay,
                 "funding_paid": paid.map(|x| x.amount), "funding_since": paid.map(|x| x.since).filter(|t| *t > 0), "funding_since_lower": paid.map(|x| x.lower),
@@ -285,18 +286,19 @@ impl App {
                 let p = self.eng.account.lock().unwrap().positions.iter().find(|p| p.ex == e && p.symbol == symbol && p.side == pos).cloned().ok_or("position not found")?;
                 let qty = f("qty").unwrap_or(p.qty).min(p.qty);
                 let kind = match f("price") { Some(px) => Kind::Limit { price: px, tif: Tif::Gtc }, None => Kind::Market };
-                self.eng.submit(e, OrderReq { symbol, pos, close: true, kind, qty, client_id: None, attach: None }, p.mark, ctx);
+                self.close(e, OrderReq { symbol, pos, close: true, kind, qty, client_id: None, attach: None }, p.mark, ctx);
             }
             "reverse_position" => {
-                // close at market, then open the same size on the other side, both on the position's venue
-                // ponytail: two independent market orders; a venue-native reverse (one-way: one order of 2x)
-                // would remove the window where only the close has filled
+                // the same size on the other side, on the position's venue: one-way, one market order of
+                // twice the size (the venue nets it, no flat window); hedge or mode unknown, close then open
                 let (e, symbol) = (exv()?, s("symbol"));
                 let pos = if s("side") == "short" { Side::Sell } else { Side::Buy };
-                let p = self.eng.account.lock().unwrap().positions.iter().find(|p| p.ex == e && p.symbol == symbol && p.side == pos).cloned().ok_or("position not found")?;
-                let other = if pos == Side::Buy { Side::Sell } else { Side::Buy };
-                self.eng.submit(e, OrderReq { symbol: symbol.clone(), pos, close: true, kind: Kind::Market, qty: p.qty, client_id: None, attach: None }, p.mark, ctx);
-                self.eng.submit(e, OrderReq { symbol, pos: other, close: false, kind: Kind::Market, qty: p.qty, client_id: None, attach: None }, p.mark, ctx);
+                let (p, mode) = {
+                    let a = self.eng.account.lock().unwrap();
+                    let p = a.positions.iter().find(|p| p.ex == e && p.symbol == symbol && p.side == pos).cloned().ok_or("position not found")?;
+                    (p, a.modes.get(&(e, symbol.clone())).copied().flatten())
+                };
+                self.eng.submit_seq(e, super::engine::reverse_reqs(mode, &p), p.mark, ctx);
             }
             "set_tpsl" => {
                 let pos = if s("pos") == "short" { Side::Sell } else { Side::Buy };
@@ -431,6 +433,24 @@ impl App {
         };
         if matches!(kind, Kind::Limit { .. }) && !(price > 0.0) { return Err("price must be positive".into()); }
         Ok(OrderReq { symbol: trade::symbol(&self.eng.base), pos, close: v["close"].as_bool().unwrap_or(false), kind, qty, client_id: None, attach: None })
+    }
+
+    /// A close on the position's venue. At market it goes through the planner's slippage cap (a
+    /// walk costing more than the cap, or running out of book, becomes an IOC limit at the touch ± the
+    /// cap); without a usable local book for it (another symbol, stale book, rules not loaded) it goes
+    /// out as a plain market close and the order log says so. Limit closes go out as they are.
+    fn close(&self, e: Exchange, req: OrderReq, mark: f64, ctx: &egui::Context) {
+        if req.kind == Kind::Market {
+            let why = if req.symbol != trade::symbol(&self.eng.base) { "no live book for this symbol".to_string() } else {
+                match self.plan_at(&req, Some(e), false) {
+                    Ok(p) if !p.legs.is_empty() => { for leg in p.legs { self.eng.submit(leg.ex, leg.req, leg.ref_px, ctx); } return; }
+                    Ok(_) => "nothing to close".into(),
+                    Err(err) => err,
+                }
+            };
+            self.eng.account.lock().unwrap().note(format!("NOTE {e:?} {}: {why}; market close sent without a slippage cap", req.symbol), true);
+        }
+        self.eng.submit(e, req, mark, ctx);
     }
 
     /// Route through the planner (fixed venue = one leg) from local books and account state;
