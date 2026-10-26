@@ -4,7 +4,7 @@
 //! Public API always uses unified symbols ("BTCUSDT") and base-unit
 //! sizes; each venue module maps to its native symbol / contracts.
 //! Keys live in the macOS Keychain (service "depth", accounts "<venue>-key" /
-//! "<venue>-secret"). `T1_TESTNET=1` switches both venues to their testnets.
+//! "<venue>-secret"). `T1_TESTNET=1` switches the venues that have one to their testnet / demo hosts.
 //!
 //! Prices and sizes are always sent as strings rounded to the instrument's tick / step, never as
 //! raw f64 formatting.

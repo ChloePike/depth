@@ -86,7 +86,7 @@ pub fn bybit_body(req: &OrderReq, mode: Mode, qty: &str, px: Option<&str>, ref_p
             b["triggerDirection"] = if trigger > ref_px { 1 } else { 2 }.into();
             b["triggerBy"] = if by_mark { "MarkPrice" } else { "LastPrice" }.into();
         }
-        // a trailing stop is a position setting on Bybit (see place); never sent as an order
+        // a trailing stop is a position setting on Bybit (see place_trailing); never sent as an order
         Kind::Trailing { .. } => { b["orderType"] = "Market".into(); }
         // no price: Bybit takes it from its book (bboSideType / bboLevel)
         Kind::Bbo { queue, level } => {
