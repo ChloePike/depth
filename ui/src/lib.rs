@@ -437,7 +437,8 @@ impl App {
         // the scanner first, so the picker's Binance stream rides on its connection from the start
         eng.set_hunter(prefs.hunter, &cc.egui_ctx);
         let mut hunter = st.hunter.unwrap_or_default();
-        hunter.open |= env("T1_MODE").as_deref() == Some("hunter");
+        hunter.preset_once();
+        hunter.open |=env("T1_MODE").as_deref() == Some("hunter");
         hunter.sync(&eng.hunt);
         eng.start(&env("T1_BASE").or(st.base).unwrap_or("BTC".into()), &cc.egui_ctx);
         if matches!(mode, Market::Margin | Market::Option) { eng.ensure(mode); }
@@ -483,7 +484,9 @@ impl App {
                 theme::preload_coins(ui.ctx(), by_vol.into_iter().map(|(_, b)| b));
                 self.coins_preloaded = true;
             }
-            if let Some(b) = self.picker.show(ui, &self.eng.base, &tickers) { if b != self.eng.base { *new_base = Some(b); } }
+            // the Hunter page is about every coin: no coin picker and no headline price there
+            let hunting = self.hunter.open;
+            if !hunting { if let Some(b) = self.picker.show(ui, &self.eng.base, &tickers) { if b != self.eng.base { *new_base = Some(b); } } }
             // the markets, then the Hunter page (not a market: the chart keeps its market under it)
             let names: Vec<&str> = MODES.iter().map(|(_, k)| t(k)).chain([t("mode.hunter")]).collect();
             let sel = if self.hunter.open { MODES.len() } else { MODES.iter().position(|(m, _)| *m == self.mode).unwrap_or(0) };
@@ -494,7 +497,7 @@ impl App {
             }
             if depth::demo::on() { kit::chip(ui, "DEMO", kit::Tone::Warn).on_hover_text(l("Simulated account: no real order is sent")); }
             let book_market = match self.mode { Market::Margin | Market::Option => Market::Spot, m => m };
-            self.top.price(ui, a.mid(book_market));
+            if !hunting { self.top.price(ui, a.mid(book_market)); }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 if !cfg!(target_os = "macos") { window_controls_right(ui, maximized); }
@@ -522,7 +525,10 @@ impl App {
         ui.add_space(5.0);
         egui::ScrollArea::horizontal().id_salt("hdr_stats").auto_shrink([false, true])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| ui.horizontal(|ui| { ui.add_space(4.0); top::TopBar::stats(ui, st, self.mode); }));
+            .show(ui, |ui| ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                if self.hunter.open { self.hunter.stats(ui, &self.eng.hunt, &self.eng.off); } else { top::TopBar::stats(ui, st, self.mode); }
+            }));
         ui.add_space(6.0);
         let w = ui.ctx().content_rect().x_range();
         ui.painter().hline(w, ui.min_rect().bottom() + 0.5, egui::Stroke::new(1.0, line().gamma_multiply(0.7)));
@@ -1053,6 +1059,8 @@ impl App {
         ctx.request_repaint_after(Duration::from_millis(if hunting { 1000 } else if focused { 33 } else { 100 }));
         let scan = self.prefs.hunter;
         if self.eng.hunter_on() != scan { self.eng.set_hunter(scan, &ctx); }
+        // alerts reach the OS only when Settings says so (the page's log always gets them)
+        { let mut h = self.eng.hunt.lock().unwrap(); if h.notify != self.prefs.hunter_notify { h.notify = self.prefs.hunter_notify; } }
         // T1_SPIN: repaint every frame (diagnostics: worst case of constant mouse movement)
         if std::env::var("T1_SPIN").is_ok() { ctx.request_repaint(); }
         self.screenshot(&ctx);
@@ -1234,10 +1242,11 @@ impl App {
             self.tray_tick(&ctx, &a);
             egui::CentralPanel::default().frame(card(10)).show(ui, |ui| {
                 if hunting {
-                    // a coin picked there opens in Perpetual
+                    // a coin picked there (row or alert line) opens in Perpetual, on 5 minute bars with the OI and funding panes
                     if let Some(b) = self.hunter.show(ui, &self.eng.hunt, self.eng.hunter_on(), &self.eng.off) {
                         if b != self.eng.base { self.pending_base = Some(b); }
                         self.pending_mode = Some(Market::Perp);
+                        self.chart.hunter_view();
                     }
                 } else if self.mode == Market::Option { self.opt.show(ui, &a) } else { self.charts(ui, &a) }
             });

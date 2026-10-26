@@ -318,7 +318,7 @@ fn gauge(p: &egui::Painter, c: egui::Pos2, rad: f32, v: Option<f64>, w: f32) {
 }
 
 /// One header stat: overline caption (10.5 semibold caps, dim) over 13 medium tabular values.
-fn stat(ui: &mut Ui, caption: &str, values: &[(String, Color32)]) -> egui::Response {
+pub(crate) fn stat(ui: &mut Ui, caption: &str, values: &[(String, Color32)]) -> egui::Response {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = vec2(5.0, 3.0);
         ui.label(egui::RichText::new(caption.to_uppercase()).font(prop_s(10.5)).color(dim()).extra_letter_spacing(0.6));

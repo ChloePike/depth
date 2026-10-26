@@ -56,11 +56,13 @@ pub struct Prefs {
     pub demo_balance: f64,
     /// the Hunter scanner polls every venue's all-symbol tickers in the background (page and alerts)
     pub hunter: bool,
+    /// Hunter alerts also as system notifications (the alert log on the page always gets them)
+    pub hunter_notify: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into(), risk: Default::default(), demo: false, demo_balance: depth::demo::START_BALANCE, hunter: true }
+        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into(), risk: Default::default(), demo: false, demo_balance: depth::demo::START_BALANCE, hunter: true, hunter_notify: false }
     }
 }
 
@@ -252,6 +254,7 @@ impl SettingsView {
         });
         section(ui, "", t("set.hunter_desc"), |ui| {
             row(ui, t("set.hunter"), |ui| { kit::switch(ui, &mut p.hunter); });
+            row(ui, t("set.hunter_notify"), |ui| { kit::switch(ui, &mut p.hunter_notify); });
         });
         let draft = self.proxy_url.get_or_insert_with(|| p.proxy_url.clone());
         let err = (p.proxy == ProxyMode::Custom).then(|| depth::ws::check_proxy(draft).err()).flatten();

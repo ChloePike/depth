@@ -125,7 +125,9 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
 
 /// Largest cross-venue price gap: `hi` above `lo` by `bp`; (venue, spot).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Gap { pub bp: f64, pub hi: (Exchange, bool), pub lo: (Exchange, bool) }
+pub struct Gap { pub bp: f64, pub hi: (Exchange, bool), pub lo: (Exchange, bool),
+    /// 24 h volume of the two legs, USD
+    pub vol: (f64, f64) }
 
 /// The venue (and market) whose price first covered half of the 15 min move, `secs` before the next one.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -282,13 +284,13 @@ fn row(base: &str, vs: &[Venue], liq: Option<&VecDeque<(i64, f64)>>, now: i64) -
 fn gap(vs: &[(&Venue, Sample)]) -> Option<Gap> {
     let vs: Vec<&(&Venue, Sample)> = vs.iter().filter(|x| x.0.qvol >= GAP_MIN_VOL).collect();
     let t0 = vs.iter().map(|x| x.1.ts).min()?;
-    let px: Vec<(Exchange, bool, f64)> = vs.iter().filter_map(|(v, _)| Some((v.ex, v.spot, at(&v.s, t0)?.px))).collect();
+    let px: Vec<(Exchange, bool, f64, f64)> = vs.iter().filter_map(|(v, _)| Some((v.ex, v.spot, at(&v.s, t0)?.px, v.qvol))).collect();
     let mut best: Option<Gap> = None;
     for (i, a) in px.iter().enumerate() {
         for (j, b) in px.iter().enumerate() {
             if i == j || (a.1 && b.1) || a.2 < b.2 { continue; }
             let bp = (a.2 / b.2 - 1.0) * 1e4;
-            if best.is_none_or(|g| bp > g.bp) { best = Some(Gap { bp, hi: (a.0, a.1), lo: (b.0, b.1) }); }
+            if best.is_none_or(|g| bp > g.bp) { best = Some(Gap { bp, hi: (a.0, a.1), lo: (b.0, b.1), vol: (a.3, b.3) }); }
         }
     }
     best
@@ -354,6 +356,16 @@ pub fn kline_bars(v: &Value, now: i64) -> Vec<HourBar> {
     arr(v).iter().filter_map(|k| {
         let ts = k[0].as_i64().filter(|t| t + HOUR <= now)?;
         let b = HourBar { ts, o: num(&k[1]), h: num(&k[2]), l: num(&k[3]), c: num(&k[4]), qv: num(&k[7]) };
+        (b.c > 0.0 && b.qv >= 0.0).then_some(b)
+    }).collect()
+}
+
+/// Bybit v5 1h klines ([start ms, o, h, l, c, base vol, turnover (quote)] as strings, newest first)
+/// as hour bars, without the one still open at `now`.
+pub fn bybit_kline_bars(v: &Value, now: i64) -> Vec<HourBar> {
+    arr(&v["result"]["list"]).iter().filter_map(|k| {
+        let ts = k[0].as_str()?.parse::<i64>().ok().filter(|t| t + HOUR <= now)?;
+        let b = HourBar { ts, o: num(&k[1]), h: num(&k[2]), l: num(&k[3]), c: num(&k[4]), qv: num(&k[6]) };
         (b.c > 0.0 && b.qv >= 0.0).then_some(b)
     }).collect()
 }
@@ -436,14 +448,24 @@ pub fn op_scores(bars: &HashMap<String, Vec<(Exchange, HourBar)>>, vols: &HashMa
 
 /// Alert rules of the Hunter page, checked on every rebuild for coins above `min_vol` (the
 /// page's volume filter). `rules[i]` = (on, threshold): 5 m move (abs %), volume multiple, funding
-/// below minus the threshold (%/h), cross-venue gap (bp).
+/// below minus the threshold (%/h), cross-venue gap (bp). The defaults are quiet: all four on,
+/// the big coins (`majors`) left out of the table and of the alerts.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-pub struct Alerts { pub min_vol: f64, pub rules: [(bool, f64); 4] }
+pub struct Alerts { pub min_vol: f64, pub rules: [(bool, f64); 4], pub majors: bool }
 
 impl Default for Alerts {
-    fn default() -> Self { Alerts { min_vol: 5e6, rules: [(false, 5.0), (false, 5.0), (false, 0.05), (false, 100.0)] } }
+    fn default() -> Self { Alerts { min_vol: 5e6, rules: [(true, 5.0), (true, 8.0), (true, 0.05), (true, 150.0)], majors: false } }
 }
+
+/// The biggest coins, which the Hunter hides by default: their moves are news, not an operator.
+/// ponytail: a fixed list of the top caps; rank by market cap or 24 h volume when it goes stale
+pub const MAJORS: [&str; 24] = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA", "TRX", "LTC", "BCH", "LINK", "AVAX", "DOT", "TON", "SUI", "XLM", "HYPE", "SHIB", "XMR", "UNI", "ATOM", "ETC", "NEAR", "AAVE"];
+
+pub fn is_major(base: &str) -> bool { MAJORS.contains(&base) }
+
+/// A gap alert needs both legs to trade at least this much a day (USD): a thin or dead market's last price is no gap.
+pub const GAP_ALERT_VOL: f64 = 1e6;
 
 /// The rules `r` crosses (indices into `Alerts::rules`).
 pub fn crossed(a: &Alerts, r: &Row) -> Vec<usize> {
@@ -452,17 +474,23 @@ pub fn crossed(a: &Alerts, r: &Row) -> Vec<usize> {
         m.0 && r.chg[0].is_some_and(|x| x.abs() >= m.1),
         v.0 && r.vmult.is_some_and(|x| x >= v.1),
         f.0 && r.fund.is_some_and(|x| x.1 * 100.0 <= -f.1),
-        g.0 && r.gap.is_some_and(|x| x.bp >= g.1),
+        g.0 && r.gap.is_some_and(|x| x.bp >= g.1 && x.vol.0.min(x.vol.1) >= GAP_ALERT_VOL),
     ];
     (0..4).filter(|&i| hits[i]).collect()
 }
 
 /// Coins above the minimum volume crossing a rule, each at most once per COOL_MS (`last`: coin -> ms of its last alert).
-pub fn check<'a>(a: &Alerts, rows: &'a [Row], now: i64, last: &mut HashMap<String, i64>) -> Vec<(&'a Row, Vec<usize>)> {
+/// A gap counts once it has been there on two rebuilds in a row (`gaps`: the coins that had one at the previous rebuild).
+pub fn check<'a>(a: &Alerts, rows: &'a [Row], now: i64, last: &mut HashMap<String, i64>, gaps: &mut HashSet<String>) -> Vec<(&'a Row, Vec<usize>)> {
     last.retain(|_, t| now - *t < COOL_MS);
+    let prev = std::mem::take(gaps);
     let mut out = vec![];
-    for r in rows.iter().filter(|r| r.vol24 >= a.min_vol) {
-        let k = crossed(a, r);
+    for r in rows.iter().filter(|r| r.vol24 >= a.min_vol && (a.majors || !is_major(&r.base))) {
+        let mut k = crossed(a, r);
+        if k.contains(&3) {
+            gaps.insert(r.base.clone());
+            if !prev.contains(&r.base) { k.retain(|&i| i != 3); }
+        }
         if !k.is_empty() && !last.contains_key(&r.base) { last.insert(r.base.clone(), now); out.push((r, k)); }
     }
     out
@@ -807,21 +835,51 @@ mod tests {
     fn alerts_fire_once_per_coin_per_cooldown() {
         let (mut s, now) = scan();
         let rows = s.rows(now);
-        let mut a = Alerts { min_vol: 0.0, ..Default::default() };
-        assert!(check(&a, &rows, now, &mut HashMap::new()).is_empty());
+        let mut a = Alerts { min_vol: 0.0, rules: [(false, 5.0), (false, 2.5), (false, 0.05), (false, 50.0)], ..Default::default() };
+        let mut gaps = HashSet::new();
+        assert!(check(&a, &rows, now, &mut HashMap::new(), &mut gaps).is_empty());
         a.rules = [(true, 5.0), (true, 2.5), (true, 0.05), (true, 50.0)];
         // +10% in 5 min, x3 volume; funding unknown, gap 20 bp
         assert_eq!(crossed(&a, &rows[0]), vec![0, 1]);
         let mut last = HashMap::new();
-        assert_eq!(check(&a, &rows, now, &mut last).len(), 1);
-        assert!(check(&a, &rows, now + COOL_MS - 1, &mut last).is_empty());
-        assert_eq!(check(&a, &rows, now + COOL_MS, &mut last).len(), 1);
+        assert_eq!(check(&a, &rows, now, &mut last, &mut gaps).len(), 1);
+        assert!(check(&a, &rows, now + COOL_MS - 1, &mut last, &mut gaps).is_empty());
+        assert_eq!(check(&a, &rows, now + COOL_MS, &mut last, &mut gaps).len(), 1);
         // below the volume floor: nothing
         a.min_vol = 1e12;
-        assert!(check(&a, &rows, now + 3 * COOL_MS, &mut HashMap::new()).is_empty());
+        assert!(check(&a, &rows, now + 3 * COOL_MS, &mut HashMap::new(), &mut gaps).is_empty());
         let r = Row { fund: Some((E::Bybit, -0.0006)), ..rows[0].clone() };
         a.rules = [(false, 0.0), (false, 0.0), (true, 0.05), (false, 0.0)];
         assert_eq!(crossed(&a, &r), vec![2]);
+    }
+
+    /// The preset: quiet thresholds, majors left out, a gap only between two liquid legs and only
+    /// once it has been there on two rebuilds in a row.
+    #[test]
+    fn default_alerts_are_quiet() {
+        let a = Alerts::default();
+        assert_eq!((a.rules, a.majors, a.min_vol), ([(true, 5.0), (true, 8.0), (true, 0.05), (true, 150.0)], false, 5e6));
+        let (mut s, now) = scan();
+        let base = s.rows(now).pop().unwrap();
+        let gap = |bp: f64, vol: (f64, f64)| Some(Gap { bp, hi: (E::Gate, false), lo: (E::Okx, true), vol });
+        let quiet = Row { chg: [None; 3], vmult: None, vol24: 1e7, ..base };
+        let alone = |r: &Row, gaps: &mut HashSet<String>, last: &mut HashMap<String, i64>| check(&a, std::slice::from_ref(r), now, last, gaps).iter().map(|x| x.1.clone()).collect::<Vec<_>>();
+        // a gap over the line between two liquid legs: not the first time, then yes
+        let (r, mut gaps, mut last) = (Row { gap: gap(200.0, (2e6, 5e6)), ..quiet.clone() }, HashSet::new(), HashMap::new());
+        assert!(alone(&r, &mut gaps, &mut last).is_empty());
+        assert_eq!(alone(&r, &mut gaps, &mut last), vec![vec![3]]);
+        // a leg under 1M USD a day (a dead spot market): never; a gap that vanished starts over
+        let thin = Row { gap: gap(900.0, (2e6, 9e5)), ..quiet.clone() };
+        let (mut gaps, mut last) = (HashSet::new(), HashMap::new());
+        assert!(alone(&thin, &mut gaps, &mut last).is_empty() && alone(&thin, &mut gaps, &mut last).is_empty());
+        assert!(alone(&r, &mut gaps, &mut last).is_empty());
+        assert!(alone(&quiet, &mut gaps, &mut last).is_empty() && alone(&r, &mut gaps, &mut last).is_empty());
+        // majors only when asked
+        let btc = Row { base: "BTC".into(), chg: [Some(9.0), None, None], ..quiet };
+        assert!(alone(&btc, &mut HashSet::new(), &mut HashMap::new()).is_empty());
+        let shown = Alerts { majors: true, ..a };
+        assert_eq!(check(&shown, std::slice::from_ref(&btc), now, &mut HashMap::new(), &mut HashSet::new()).len(), 1);
+        assert!(is_major("SOL") && !is_major("PEPE"));
     }
 
     fn hours(n: usize, now: i64, f: impl Fn(usize) -> (f64, f64, f64, f64)) -> Vec<HourBar> {
@@ -883,6 +941,9 @@ mod tests {
         assert!(s.hour_bars(h0 + HOUR).is_empty());
         let k = json!([[h0, "1", "2", "0.5", "1.5", "10", h0 + HOUR - 1, "15", 3], [h0 + HOUR, "1.5", "1.6", "1.4", "1.6", "1", h0 + 2 * HOUR - 1, "1.6", 1]]);
         assert_eq!(kline_bars(&k, h0 + HOUR + 1), vec![HourBar { ts: h0, o: 1.0, h: 2.0, l: 0.5, c: 1.5, qv: 15.0 }]);
+        // Bybit: newest first, strings, turnover is the quote volume
+        let by = json!({"result": {"list": [[(h0 + HOUR).to_string(), "1.5", "1.6", "1.4", "1.6", "1", "1.6"], [h0.to_string(), "1", "2", "0.5", "1.5", "10", "15"]]}});
+        assert_eq!(bybit_kline_bars(&by, h0 + HOUR + 1), vec![HourBar { ts: h0, o: 1.0, h: 2.0, l: 0.5, c: 1.5, qv: 15.0 }]);
     }
 
     /// Each venue's own flag (canned payloads cut from the live lists) marks its stocks, ETFs and

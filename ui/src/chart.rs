@@ -672,6 +672,13 @@ impl Chart {
     /// Back to auto-fit at the live edge: a manual price range from one symbol is meaningless for
     /// another (BTC at 80k vs a coin at 0.3 would leave the chart empty).
     pub fn reset_view(&mut self) { self.y_range = None; self.right = 0.0; self.pending.clear(); self.liq = LiqCache::default(); self.cache = HeatCache::default(); }
+
+    /// How a coin opens from the Hunter page: 5 minute bars with the open interest and funding panes
+    /// (liquidations are always drawn on the candles). Other panes stay as the user set them.
+    pub fn hunter_view(&mut self) {
+        self.tf = 5;
+        for (p, on) in self.panes.iter_mut() { if matches!(p, Pane::Oi | Pane::Funding) { *on = true; } }
+    }
 }
 
 /// Alert sounds: "none", macOS system sounds ("sys:Glass") and the bundled ones ("depth:chime").
