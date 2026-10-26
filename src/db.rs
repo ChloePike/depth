@@ -82,6 +82,8 @@ pub fn fills_last(ex: Exchange, symbol: &str) -> Option<i64> {
 
 /// Every venue's fills of a symbol since `since` (ms), oldest first.
 pub fn fills(symbol: &str, since: i64) -> Vec<Fill> {
+    // demo mode reads the demo account's fills, never the real ones
+    if crate::demo::on() { return crate::demo::fills(symbol, since); }
     let Some(c) = db() else { return vec![] };
     let Ok(mut st) = c.prepare_cached("SELECT ex, id, buy, price, qty, fee, realized, ts FROM fills WHERE symbol = ?1 AND ts >= ?2 ORDER BY ts") else { return vec![] };
     st.query_map(params![symbol, since], |r| {
@@ -175,6 +177,8 @@ mod tests {
         // demo mode keeps its fills out of the real table
         crate::demo::set_on(true);
         fills_put(&[f("demo", 30)]);
+        // and reads only the demo account's (a fresh one here: none)
+        assert!(fills("XUSDT", 0).is_empty());
         crate::demo::set_on(false);
         assert_eq!(fills("XUSDT", 0).len(), 2);
         let _ = std::fs::remove_dir_all(dir);
