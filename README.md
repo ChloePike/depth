@@ -14,7 +14,8 @@ Everything runs on your machine: no relay, no server, no account.
 ## What it does
 
 **Market data, ten venues at once**: Binance, Bybit, Bitget, OKX, MEXC, Coinbase, Kraken, Gate,
-Hyperliquid, Lighter. Spot, margin, perpetuals and options (where the venue lists them).
+Hyperliquid, Lighter, plus the Deribit BTC / ETH option chains. Spot, margin, perpetuals and options
+(where the venue lists them).
 
 - Composite index price (venue mids weighted by recent volume), aggregated candles, CVD
 - Aggregated order book (mid-aligned per venue), individual orders per level where known (L3),
