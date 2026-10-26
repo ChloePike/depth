@@ -209,9 +209,10 @@ fn balance_of(a: &Value) -> Option<Balance> {
     let usdt = a["details"].as_array().into_iter().flatten().find(|c| c["ccy"] == "USDT");
     let available = crate::opt_num(&a["availEq"])
         .or_else(|| usdt.and_then(|c| crate::opt_num(&c["availEq"]).or(crate::opt_num(&c["availBal"]))))?;
-    // liquidation when adjEq <= mmr: mmr / adjEq is 0..1 like Bybit's accountMMRate
+    // liquidation when adjEq <= mmr: mmr / adjEq is 0..1 like Bybit's accountMMRate; 0 once nothing is held
+    // (None would keep the last position's rate on screen)
     let (mmr, adj) = (z(&a["mmr"]), z(&a["adjEq"]));
-    Some(Balance { equity: z(&a["totalEq"]), available, uni_mmr: None, mm_rate: (mmr > 0.0 && adj > 0.0).then(|| mmr / adj), maint_margin: Some(mmr), adj_equity: (adj > 0.0).then_some(adj) })
+    Some(Balance { equity: z(&a["totalEq"]), available, uni_mmr: None, mm_rate: (adj > 0.0).then(|| mmr / adj), maint_margin: Some(mmr), adj_equity: (adj > 0.0).then_some(adj) })
 }
 
 /// Contract sizes for positions / orders on symbols never passed to `rules`.
@@ -423,6 +424,9 @@ mod tests {
         let pm: Value = serde_json::from_str(r#"{"totalEq":"5000","availEq":"4000","adjEq":"4800","mmr":"48","details":[]}"#).unwrap();
         let b = balance_of(&pm).unwrap();
         assert_eq!((b.available, b.mm_rate), (4000.0, Some(0.01)));
+        // the last position closed: mmr 0 is a rate of 0, not an unknown one
+        let flat: Value = serde_json::from_str(r#"{"totalEq":"5000","availEq":"5000","adjEq":"4800","mmr":"0","details":[]}"#).unwrap();
+        assert_eq!(balance_of(&flat).unwrap().mm_rate, Some(0.0));
         // a push without USDT and without account-level availEq: refetch instead of guessing
         assert!(balance_of(&serde_json::json!({"totalEq":"1","availEq":"","details":[{"ccy":"BTC","availEq":"1"}]})).is_none());
     }
