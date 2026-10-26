@@ -157,7 +157,8 @@ impl App {
         let plans: Vec<Value> = acc.plans.iter().filter(|p| nowms - p.ts < 60_000).map(|p| json!({"ts": p.ts, "remainder": super::engine::remainder(p),
             "legs": p.legs.iter().map(|l| { let (st, detail) = l.state.label(); json!({"ex": ex_name(l.ex), "qty": l.qty, "client_id": l.client_id, "state": st, "detail": detail}) }).collect::<Vec<_>>()})).collect();
         let kill = json!({
-            "plan": super::engine::kill_plan(&acc).iter().map(|(e, o, t, j, p)| json!({"ex": ex_name(*e), "orders": o, "tpsl": t, "algos": j, "positions": p})).collect::<Vec<_>>(),
+            "plan": super::engine::kill_plan(&acc).iter().map(|(e, o, t, j, p, (oo, op))| json!({"ex": ex_name(*e), "orders": o, "tpsl": t, "algos": j, "positions": p,
+                "perps": trade::TRADABLE.contains(e), "opt_orders": oo, "opts": op})).collect::<Vec<_>>(),
             "report": acc.kill.as_ref().map(|r| json!({"started_ms": r.started_ms, "venues": r.venues.iter().map(|(e, lines, done)| json!({"ex": ex_name(*e), "done": done,
                 "lines": lines.iter().map(|(m, ok)| json!({"msg": m, "ok": ok})).collect::<Vec<_>>()})).collect::<Vec<_>>()})),
         });
@@ -279,14 +280,15 @@ impl App {
                         if !same { return Err("the route changed since the preview; review it again".into()); }
                     }
                     // TP/SL: attached to the order where the venue takes it (protected at fill), else set by the
-                    // engine once this very order has filled (`TpSlWait`)
+                    // engine once this very order has filled (`TpSlWait`); always the latter in demo mode, whose
+                    // simulator ignores an attached TP/SL
                     let trigger = if s("tpsl_trigger") == "last" { trade::tpsl::Trigger::Last } else { trade::tpsl::Trigger::Mark };
                     let attach = (f("tp").is_some() || f("sl").is_some()).then_some(trade::tpsl::Attach { tp: f("tp"), sl: f("sl"), trigger }).filter(|_| !req.close);
                     self.eng.account.lock().unwrap().record_plan(&plan.legs);
                     for leg in &plan.legs {
                         let mut r = leg.req.clone();
                         match attach {
-                            Some(at) if trade::caps(leg.ex).attach_tpsl => r.attach = Some(at),
+                            Some(at) if trade::caps(leg.ex).attach_tpsl && !depth::demo::on() => r.attach = Some(at),
                             Some(at) => { if let Some(w) = super::engine::TpSlWait::new(leg.ex, &r, at, now_ms()) { self.eng.account.lock().unwrap().tpsl_wait.push(w); } }
                             None => {}
                         }

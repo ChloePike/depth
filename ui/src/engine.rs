@@ -193,15 +193,27 @@ async fn look_up(account: &Arc<Mutex<Account>>, ex: Exchange, symbol: String, ci
 pub struct KillReport { pub started_ms: i64, pub venues: Vec<(Exchange, Vec<(String, bool)>, bool)> }
 
 /// What the kill switch will act on, per keyed venue: (venue, orders, TP/SL, algorithms with the
-/// waiting TP/SL, positions).
-pub(crate) fn kill_plan(a: &Account) -> Vec<(Exchange, usize, usize, usize, usize)> {
+/// waiting TP/SL, positions), then what it leaves alone there (`kill_opts`).
+pub(crate) fn kill_plan(a: &Account) -> Vec<(Exchange, usize, usize, usize, usize, (usize, usize))> {
     let mut v: Vec<_> = a.keys.keys().map(|&e| (e,
         a.orders.iter().filter(|o| o.ex == e).count(),
         a.tpsl.iter().filter(|t| t.ex == e).count(),
         a.algos.iter().filter(|j| j.ex == e && !j.cancelled && j.status != "done").count() + a.tpsl_wait.iter().filter(|w| w.ex == e).count(),
-        a.positions.iter().filter(|p| p.ex == e && p.qty > 0.0).count())).collect();
+        a.positions.iter().filter(|p| p.ex == e && p.qty > 0.0).count(),
+        kill_opts(a, e))).collect();
     v.sort_by_key(|x| x.0 as u8);
     v
+}
+
+/// The kill switch never touches options: what it leaves on `ex`, (resting option orders, held options).
+fn kill_opts(a: &Account, ex: Exchange) -> (usize, usize) {
+    (a.opt_orders.iter().filter(|o| o.ex == ex).count(), a.opts.iter().filter(|p| p.ex == ex && p.qty > 0.0).count())
+}
+
+/// The kill switch's last line on an option venue: the options it left alone, not ok while there are any.
+fn kill_opts_line(a: &Account, ex: Exchange) -> Option<(String, bool)> {
+    let (o, p) = kill_opts(a, ex);
+    trade::OPTION_VENUES.contains(&ex).then(|| (format!("options not touched by the kill switch: {o} resting option orders, {p} held options left as they are"), o + p == 0))
 }
 
 fn market_close(p: &Position) -> (OrderReq, f64) {
@@ -276,7 +288,6 @@ async fn kill_venue(account: &Arc<Mutex<Account>>, ex: Exchange, k: &Keys, twaps
             Err(e) => line(format!("positions after the capped closes: {e:#}; check the venue"), false),
         }
     }
-    if let Some(v) = account.lock().unwrap().kill.as_mut().and_then(|k| k.venues.iter_mut().find(|v| v.0 == ex)) { v.2 = true; }
 }
 
 /// A TP/SL sent with an opening order on a venue that cannot attach it to the order
@@ -482,15 +493,16 @@ fn check_perms(rt: &tokio::runtime::Runtime, account: &Arc<Mutex<Account>>, ex: 
     });
 }
 
-/// The day's PnL over the keyed venues: equity now minus each venue's equity at the start of the
+/// The day's PnL over the keyed tradable venues: equity now minus each venue's equity at the start of the
 /// local day (`off`: UTC offset of the display time zone, ms). A venue seen first today, or first
-/// after midnight, takes its equity now as the baseline. None before any balance.
+/// after midnight, takes its equity now as the baseline. None before any balance. Deribit (options
+/// only, coin collateral valued in USD) does not count: a coin move is not trading PnL.
 /// ponytail: equity-based, so funding, fees and transfers made outside Depth count as PnL
 pub(crate) fn day_pnl(a: &mut Account, now: i64, off: i64) -> Option<f64> {
     let day = (now + off).div_euclid(86_400_000);
     if a.day_start.0 != day { a.day_start = (day, HashMap::new()); }
     let (keys, base) = (&a.keys, &mut a.day_start.1);
-    a.balances.iter().filter(|(e, _)| keys.contains_key(e)).fold(None, |s, (e, b)| Some(s.unwrap_or(0.0) + b.equity - *base.entry(*e).or_insert(b.equity)))
+    a.balances.iter().filter(|(e, _)| keys.contains_key(e) && trade::TRADABLE.contains(e)).fold(None, |s, (e, b)| Some(s.unwrap_or(0.0) + b.equity - *base.entry(*e).or_insert(b.equity)))
 }
 
 /// A transfer Depth made into or out of a venue's margin account moves that venue's day baseline
@@ -1121,7 +1133,8 @@ impl Engine {
                             tokio::spawn(async move {
                                 let Some(k) = acc.lock().unwrap().keys.get(&ex).cloned() else { return };
                                 if let Ok(p) = trade::positions(ex, &k).await {
-                                    replace_positions(&mut acc.lock().unwrap(), ex, p);
+                                    let mut a = acc.lock().unwrap();
+                                    if same_keys(&a, ex, &k) { replace_positions(&mut a, ex, p); }
                                     ctx.request_repaint();
                                 }
                             });
@@ -1141,7 +1154,7 @@ impl Engine {
                             tokio::spawn(async move {
                                 let Some(k) = acc.lock().unwrap().keys.get(&ex).cloned() else { return };
                                 if let Ok(b) = trade::balance(ex, &k).await {
-                                    let need = { let mut a = acc.lock().unwrap(); a.balances.insert(ex, b); auto_due(&mut a, ex) };
+                                    let need = { let mut a = acc.lock().unwrap(); if !same_keys(&a, ex, &k) { return; } a.balances.insert(ex, b); auto_due(&mut a, ex) };
                                     if let Some(need) = need { spawn_top_up(&acc, ex, need, &ctx); }
                                     ctx.request_repaint();
                                 }
@@ -1355,7 +1368,8 @@ impl Engine {
     /// The kill switch: stop every client TWAP, scaled ladder, sequential order and waiting TP/SL, then
     /// on every keyed venue at once (`kill_venue`) cancel its orders, TP/SL and venue-run TWAPs and close
     /// every position it reports: `capped` (the planner's slippage-capped closes of the symbol on
-    /// screen) first and their rest at market, every other position at market. Every step is in the
+    /// screen) first and their rest at market, every other position at market. Options are never
+    /// touched: each option venue's report ends with what it left (`kill_opts_line`). Every step is in the
     /// report and the order log, a notification says when it is over; running it again repeats it.
     pub fn kill(&self, capped: Vec<(Exchange, OrderReq, f64)>, ctx: &eframe::egui::Context) {
         let Some(rt) = self.acct_rt.as_ref() else { return };
@@ -1382,7 +1396,14 @@ impl Engine {
                 let tw = twaps.iter().filter(|t| t.0 == ex).map(|t| (t.1, t.2.clone(), t.3.clone())).collect();
                 let cap = capped.iter().filter(|c| c.0 == ex).map(|c| (c.1.clone(), c.2)).collect();
                 let (account, ctx) = (account.clone(), ctx.clone());
-                hs.push(tokio::spawn(async move { kill_venue(&account, ex, &k, tw, cap).await; ctx.request_repaint(); }));
+                hs.push(tokio::spawn(async move {
+                    // Deribit trades options only: no perp step there
+                    if trade::TRADABLE.contains(&ex) { kill_venue(&account, ex, &k, tw, cap).await; }
+                    let opts = kill_opts_line(&account.lock().unwrap(), ex);
+                    if let Some((msg, ok)) = opts { kill_line(&account, ex, msg, ok); }
+                    if let Some(v) = account.lock().unwrap().kill.as_mut().and_then(|k| k.venues.iter_mut().find(|v| v.0 == ex)) { v.2 = true; }
+                    ctx.request_repaint();
+                }));
             }
             for h in hs { let _ = h.await; }
             let (ok, bad) = account.lock().unwrap().kill.as_ref().map_or((0, 0), |r| r.venues.iter().flat_map(|v| &v.1).fold((0, 0), |(o, b), l| if l.1 { (o + 1, b) } else { (o, b + 1) }));
@@ -1412,7 +1433,7 @@ impl Engine {
 
     /// Price a protection buy on the venue's ask side (REST book + rules), into `Account::opt_plan`.
     pub fn plan_option(&self, ex: Exchange, symbol: String, qty: f64, ctx: &eframe::egui::Context) {
-        let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
         account.lock().unwrap().opt_plan = None;
         rt.spawn(async move {
             let r = trade::option_plan(ex, &symbol, qty).await.map_err(|e| format!("{e:#}"));
@@ -1423,14 +1444,19 @@ impl Engine {
 
     /// Send a priced protection buy (limit IOC); the result lands in the account log.
     pub fn buy_option(&self, p: trade::OptBuy, ctx: &eframe::egui::Context) {
-        let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
         rt.spawn(async move {
             let Some(k) = account.lock().unwrap().keys.get(&p.ex).cloned() else { return };
             let res = trade::buy_option(&k, &p).await;
             let what = format!("{:?} {} buy {} limit {} {} IOC", p.ex, p.symbol, p.qty, p.limit, trade::option_quote(p.ex, &p.symbol));
-            let mut a = account.lock().unwrap();
-            match res { Ok(id) => a.note(format!("OK {what} id {id}"), true), Err(e) => a.note(format!("FAIL {what}: {e:#}"), false) }
+            let unknown = note_opt(&mut account.lock().unwrap(), &what, res);
             ctx.request_repaint();
+            // the IOC may have filled: the held options once more, so the buy is not repeated blind
+            if unknown {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                refresh_opts(&account, p.ex).await;
+                ctx.request_repaint();
+            }
         });
     }
 
@@ -1493,7 +1519,7 @@ impl Engine {
                 Err(e) => Err(e),
             };
             let what = format!("{ex:?} option {} {symbol} {qty} @ {price} {} {tif:?}{}", if side == depth::Side::Buy { "buy" } else { "sell" }, trade::option_quote(ex, &symbol), if reduce_only { " reduce-only" } else { "" });
-            { let mut a = account.lock().unwrap(); match res { Ok(id) => a.note(format!("OK {what} id {id}"), true), Err(e) => a.note(format!("FAIL {what}: {e:#}"), false) } }
+            note_opt(&mut account.lock().unwrap(), &what, res);
             ctx.request_repaint();
             for wait in [500, 2_500] {
                 tokio::time::sleep(Duration::from_millis(wait)).await;
@@ -1525,7 +1551,7 @@ impl Engine {
         let rules = self.account.lock().unwrap().rules.get(&(ex, base.symbol.clone())).copied().ok_or("venue rules not loaded yet: try again in a second")?;
         let legs = depth::algo::scaled(base.qty, from, to, n, skew, rules.tick, rules.step);
         if legs.is_empty() { return Err("nothing to place: check size, prices and count".into()); }
-        let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return Err("not connected".into()) };
+        let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return Err("not connected".into()) };
         let count = legs.len();
         let tif = if post_only { trade::Tif::PostOnly } else { trade::Tif::Gtc };
         // the ladder as one order against the limits, and every price against the band, before any is sent
@@ -1742,7 +1768,7 @@ impl Engine {
     }
 
     pub fn cancel(&self, o: &OpenOrder, ctx: &eframe::egui::Context) {
-        let (Some(rt), account, ctx, o) = (self.rt.as_ref(), self.account.clone(), ctx.clone(), o.clone()) else { return };
+        let (Some(rt), account, ctx, o) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone(), o.clone()) else { return };
         rt.spawn(async move {
             let Some(k) = account.lock().unwrap().keys.get(&o.ex).cloned() else { return };
             let res = trade::cancel_order(o.ex, &k, &o).await;
@@ -1758,7 +1784,7 @@ impl Engine {
     /// ponytail: OKX / Bitget / Gate / Kraken / Hyperliquid have amend endpoints too; wire them once
     /// those venues are verified on a real account.
     pub fn replace_order(&self, o: &OpenOrder, price: f64, ctx: &eframe::egui::Context) {
-        let (Some(rt), account, ctx, o, agg, base) = (self.rt.as_ref(), self.account.clone(), ctx.clone(), o.clone(), self.agg.clone(), self.base.clone()) else { return };
+        let (Some(rt), account, ctx, o, agg, base) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone(), o.clone(), self.agg.clone(), self.base.clone()) else { return };
         let opp = |s: depth::Side| if s == depth::Side::Buy { depth::Side::Sell } else { depth::Side::Buy };
         let req = OrderReq {
             symbol: o.symbol.clone(), close: o.reduce_only, kind: trade::Kind::Limit { price, tif: trade::Tif::Gtc }, qty: o.qty - o.filled, client_id: None, attach: None,
@@ -1934,7 +1960,7 @@ impl Engine {
         rt.spawn(async move {
             let (w, notes) = trade::wallets(ex, &k).await;
             let mut a = account.lock().unwrap();
-            a.wallets.insert(ex, (w, notes, now_ms()));
+            if same_keys(&a, ex, &k) { a.wallets.insert(ex, (w, notes, now_ms())); }
             a.wallets_loading.remove(&ex);
             ctx.request_repaint();
         });
@@ -1959,6 +1985,7 @@ impl Engine {
                 let r = trade::history(ex, &k, &symbols).await;
                 let mut a = account.lock().unwrap();
                 match r {
+                    _ if !same_keys(&a, ex, &k) => {}
                     Ok(h) => { a.history.insert(ex, (h, now_ms())); a.fills_ver += 1; }
                     Err(e) => a.note(format!("{ex:?} history: {e:#}"), false),
                 }
@@ -1982,7 +2009,7 @@ impl Engine {
             rt.spawn(async move {
                 let since = depth::db::fills_last(ex, &symbol).map_or(0, |t| t + 1);
                 match trade::fills_since(ex, &k, &symbol, since).await {
-                    Ok(f) => { depth::db::fills_put(&f); account.lock().unwrap().fills_ver += 1; ctx.request_repaint(); }
+                    Ok(f) => { depth::db::fills_put(&f, k.demo); account.lock().unwrap().fills_ver += 1; ctx.request_repaint(); }
                     Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} {symbol} fills: {e:#}\n")),
                 }
             });
@@ -2081,6 +2108,7 @@ async fn refresh_spot(account: &Arc<Mutex<Account>>, ex: Exchange) {
     let (o, b) = tokio::join!(trade::spot::open_orders(ex, &k), trade::spot::balances(ex, &k));
     {
         let mut a = account.lock().unwrap();
+        if !same_keys(&a, ex, &k) { return; }
         match o { Ok(o) => { a.spot_orders.retain(|x| x.ex != ex); a.spot_orders.extend(o); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} spot orders: {e:#}\n")) }
         match b { Ok(b) => { a.spot_bal.insert(ex, b); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} spot balances: {e:#}\n")) }
     }
@@ -2088,9 +2116,24 @@ async fn refresh_spot(account: &Arc<Mutex<Account>>, ex: Exchange) {
     let Some(sym) = account.lock().unwrap().margin_sym.clone() else { return };
     let (o, b) = tokio::join!(trade::spot::margin_orders(ex, &k, &sym), trade::spot::margin_balances(ex, &k));
     let mut a = account.lock().unwrap();
+    if !same_keys(&a, ex, &k) { return; }
     match o { Ok(o) => { a.margin_orders.retain(|x| x.ex != ex); a.margin_orders.extend(o); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} margin orders: {e:#}\n")) }
     match b { Ok(b) => { a.margin_bal.insert(ex, b); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} margin balances: {e:#}\n")) }
 }
+
+/// An option order's outcome in the order log; true when its answer was lost (`is_unknown_outcome`):
+/// it may have filled, so it reads UNKNOWN, never FAIL, and the held options are read again.
+fn note_opt(a: &mut Account, what: &str, res: anyhow::Result<String>) -> bool {
+    match res {
+        Ok(id) => { a.note(format!("OK {what} id {id}"), true); false }
+        Err(e) if trade::is_unknown_outcome(&e) => { a.note(format!("UNKNOWN {what}: no answer read ({e:#}): check held options before retrying"), false); true }
+        Err(e) => { a.note(format!("FAIL {what}: {e:#}"), false); false }
+    }
+}
+
+/// Whether `k` still is the account `ex` trades with (same key, same demo flag). A REST answer read
+/// with keys switched meanwhile (demo on / off, other keys) is dropped, never written into the other account.
+fn same_keys(a: &Account, ex: Exchange, k: &Keys) -> bool { a.keys.get(&ex).is_some_and(|x| x.key == k.key && x.demo == k.demo) }
 
 /// REST snapshot of one venue's option orders and positions (option venues only).
 async fn refresh_opts(account: &Arc<Mutex<Account>>, ex: Exchange) {
@@ -2098,6 +2141,7 @@ async fn refresh_opts(account: &Arc<Mutex<Account>>, ex: Exchange) {
     let Some(k) = account.lock().unwrap().keys.get(&ex).cloned() else { return };
     let (o, p) = tokio::join!(trade::option_orders(ex, &k), trade::option_positions(ex, &k));
     let mut a = account.lock().unwrap();
+    if !same_keys(&a, ex, &k) { return; }
     match o { Ok(o) => { a.opt_orders.retain(|x| x.ex != ex); a.opt_orders.extend(o); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} option orders: {e:#}\n")) }
     if let Ok(p) = p { a.opts.retain(|x| x.ex != ex); a.opts.extend(p); }
 }
@@ -2111,11 +2155,13 @@ async fn refresh_venue(account: &Arc<Mutex<Account>>, ex: Exchange) {
     if matches!(ex, Exchange::Bybit | Exchange::Binance) {
         if let Ok(t) = trade::tpsl::list(ex, &k).await {
             let mut a = account.lock().unwrap();
+            if !same_keys(&a, ex, &k) { return; }
             a.tpsl.retain(|x| x.ex != ex);
             a.tpsl.extend(t);
         }
     }
     let mut a = account.lock().unwrap();
+    if !same_keys(&a, ex, &k) { return; }
     // each part applies on its own: a failing orders or balance call must not freeze positions
     let mut err = None;
     match p { Ok(p) => replace_positions(&mut a, ex, p), Err(e) => err = err.or(Some(e)) }
@@ -2293,7 +2339,9 @@ fn apply(a: &mut Account, ex: Exchange, ev: trade::AccEvent) -> bool {
         E::TpSl(t) => { a.tpsl.retain(|x| !(x.ex == ex && x.id == t.id)); a.tpsl.push(t); true }
         E::TpSlDone { id } => { a.tpsl.retain(|x| !(x.ex == ex && x.id == id)); true }
         E::Fill(f) => {
-            depth::db::fills_put(std::slice::from_ref(&f));
+            // ponytail: a push carries no account, so a fill already queued from the stream of the account
+            // just switched away from is judged by the current one; tag AccEvent with its keys if that matters
+            depth::db::fills_put(std::slice::from_ref(&f), a.keys.get(&ex).is_some_and(|k| k.demo));
             a.fills_ver += 1;
             a.fill_seq += 1;
             a.last_fill = Some(FillNote { ex, symbol: f.symbol, buy: f.side == depth::Side::Buy, qty: f.qty, price: Some(f.price) });
@@ -2556,6 +2604,31 @@ mod tests {
     }
 
     #[test]
+    fn answers_for_switched_keys_are_dropped() {
+        let mut a = Account::default();
+        let ex = Exchange::Bybit;
+        let real = Keys { key: "k".into(), secret: "s".into(), extra: None, demo: false };
+        assert!(!same_keys(&a, ex, &real), "no keys now");
+        a.keys.insert(ex, real.clone());
+        assert!(same_keys(&a, ex, &real) && !same_keys(&a, Exchange::Okx, &real));
+        // demo switched on, or other keys saved, while the request was out
+        a.keys.insert(ex, Keys { demo: true, ..real.clone() });
+        assert!(!same_keys(&a, ex, &real));
+        a.keys.insert(ex, Keys { key: "k2".into(), ..real.clone() });
+        assert!(!same_keys(&a, ex, &real));
+    }
+
+    #[test]
+    fn lost_option_answers_read_unknown() {
+        let mut a = Account::default();
+        assert!(!note_opt(&mut a, "x", Ok("1".into())) && a.log.back().unwrap().1 == "OK x id 1");
+        assert!(!note_opt(&mut a, "x", Err(anyhow::anyhow!("deribit private/buy: not_enough_funds (10009)"))) && a.log.back().unwrap().1.starts_with("FAIL x"));
+        // a reply that could not be read: it may have filled
+        assert!(note_opt(&mut a, "x", Err(anyhow::anyhow!("deribit private/buy: HTTP 502: <html>"))));
+        assert!(a.log.back().is_some_and(|l| l.1.starts_with("UNKNOWN x") && l.1.ends_with("check held options before retrying") && !l.2));
+    }
+
+    #[test]
     fn day_pnl_rolls_at_local_midnight_and_shifts_on_transfer() {
         let mut a = Account::default();
         let ex = Exchange::Bybit;
@@ -2577,6 +2650,12 @@ mod tests {
         // a venue without keys does not count
         a.balances.insert(Exchange::Okx, trade::Balance { equity: 5.0, ..Default::default() });
         assert_eq!(day_pnl(&mut a, 11 * day, 8 * 3_600_000), Some(0.0));
+        // nor does keyed Deribit, whose coin collateral moves with the coin
+        a.keys.insert(Exchange::Deribit, Keys { key: "k".into(), secret: "s".into(), extra: None, demo: false });
+        a.balances.insert(Exchange::Deribit, trade::Balance { equity: 5000.0, ..Default::default() });
+        day_pnl(&mut a, 11 * day + 1, 8 * 3_600_000);
+        a.balances.insert(Exchange::Deribit, trade::Balance { equity: 4000.0, ..Default::default() });
+        assert_eq!(day_pnl(&mut a, 11 * day + 2, 8 * 3_600_000), Some(0.0));
     }
 
     #[test]
@@ -2662,7 +2741,18 @@ mod tests {
         a.algos.push(AlgoJob { id: 1, ex: Exchange::Bybit, symbol: "BTCUSDT".into(), buy: true, close: false, total: 1.0, sent: 0.0, slices: 2, done: 0, started_ms: 0, end_ms: 1, status: "running".into(), cancelled: false, venue_id: None });
         // a venue without keys is not touched
         a.orders.push(OpenOrder { ex: Exchange::Okx, ..order("3", None, 0.0) });
-        assert_eq!(kill_plan(&a), vec![(Exchange::Binance, 2, 0, 1, 1), (Exchange::Bybit, 0, 0, 1, 1)]);
+        assert_eq!(kill_plan(&a), vec![(Exchange::Binance, 2, 0, 1, 1, (0, 0)), (Exchange::Bybit, 0, 0, 1, 1, (0, 0))]);
+        // options are never touched, and the report says so on every option venue (not ok while any are there)
+        let d = Exchange::Deribit;
+        a.keys.insert(d, Keys { key: "k".into(), secret: "s".into(), extra: None, demo: false });
+        a.opt_orders.push(OpenOrder { ex: d, ..order("4", None, 0.0) });
+        a.opts.push(trade::OptPos { ex: Exchange::Bybit, symbol: "BTC-6NOV26-60000-P-USDT".into(), base: "BTC".into(), expiry: "6NOV26".into(), strike: 60000.0, call: false,
+            side: Side::Buy, qty: 1.0, avg: 0.0, mark: 0.0, upnl: 0.0, delta: 0.0, gamma: 0.0, vega: 0.0, theta: 0.0 });
+        assert_eq!(kill_plan(&a).iter().map(|v| (v.0, v.5)).collect::<Vec<_>>(), vec![(Exchange::Binance, (0, 0)), (Exchange::Bybit, (0, 1)), (d, (1, 0))]);
+        assert_eq!(kill_opts_line(&a, d), Some(("options not touched by the kill switch: 1 resting option orders, 0 held options left as they are".into(), false)));
+        assert!(kill_opts_line(&a, Exchange::Binance).is_none());
+        a.opts.clear();
+        assert!(kill_opts_line(&a, Exchange::Bybit).is_some_and(|l| l.1));
     }
 
     #[test]

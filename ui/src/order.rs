@@ -1305,7 +1305,7 @@ impl OrderPanel {
                 let (mut on, mut after): (Vec<&str>, Vec<&str>) = (vec![], vec![]);
                 for lg in &legs {
                     let ex = s(&lg["ex"]);
-                    let attach = depth::Exchange::parse(ex).is_some_and(|e| depth::trade::caps(e).attach_tpsl);
+                    let attach = depth::Exchange::parse(ex).is_some_and(|e| depth::trade::caps(e).attach_tpsl && !depth::demo::on());
                     let v = if attach { &mut on } else { &mut after };
                     if !v.contains(&ex) { v.push(ex); }
                 }
