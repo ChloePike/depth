@@ -167,7 +167,11 @@ fn ws_proxy() -> Option<String> { NET.lock().unwrap().ws.clone() }
 /// CLI tools: ALL_PROXY when set (an explicit choice beats the OS settings), else the system proxy.
 pub fn cli_proxy() {
     match ["ALL_PROXY", "all_proxy"].iter().find_map(|k| std::env::var(k).ok()) {
-        Some(u) => { set_proxy(ProxyMode::Custom, &u); }
+        Some(u) => {
+            // set_proxy falls back to no proxy on a URL check_proxy rejects: say so instead of going direct silently
+            if check_proxy(&u).is_err() { eprintln!("[net] ALL_PROXY={u} ignored, connecting direct: use socks5://host:port"); }
+            set_proxy(ProxyMode::Custom, &u);
+        }
         None => { set_proxy(ProxyMode::System, ""); }
     }
 }
@@ -189,18 +193,28 @@ fn system_socks() -> Option<String> {
 pub fn http() -> reqwest::Client {
     let mut n = NET.lock().unwrap();
     if let Some(c) = &n.http { return c.clone(); }
+    let c = client(n.mode, n.ws.as_deref());
+    n.http = Some(c.clone());
+    c
+}
+
+/// The REST client for a proxy mode and the SOCKS URL `set_proxy` resolved (Custom always has one).
+/// A URL reqwest rejects connects direct with a warning: this runs under the NET lock, and a panic
+/// there would poison it for every later request.
+fn client(mode: ProxyMode, socks: Option<&str>) -> reqwest::Client {
     let b = reqwest::Client::builder().timeout(Duration::from_secs(10))
         // proxies drop idle connections silently; reusing one stalls a request until timeout
         .pool_idle_timeout(Duration::from_secs(30)).tcp_keepalive(Duration::from_secs(15)).user_agent("depth/0.1");
-    let b = match n.mode {
-        ProxyMode::None => b.no_proxy(),
-        // the SOCKS proxy the WebSockets use; without one reqwest reads the OS settings and *_PROXY
-        ProxyMode::System => match &n.ws { Some(u) => b.proxy(reqwest::Proxy::all(u.as_str()).unwrap()), None => b },
-        ProxyMode::Custom => b.proxy(reqwest::Proxy::all(remote_dns(&n.url)).unwrap()),
+    let b = match (mode, socks) {
+        (ProxyMode::None, _) => b.no_proxy(),
+        // System without a SOCKS proxy: reqwest reads the OS settings and *_PROXY
+        (_, None) => b,
+        (_, Some(u)) => match reqwest::Proxy::all(u) {
+            Ok(p) => b.proxy(p),
+            Err(e) => { eprintln!("[net] proxy {u} rejected, connecting direct: {e}"); b.no_proxy() }
+        },
     };
-    let c = b.build().unwrap();
-    n.http = Some(c.clone());
-    c
+    b.build().unwrap()
 }
 
 /// Rate-limit pauses per host (epoch ms). While a host is paused no request leaves for it:
@@ -300,5 +314,19 @@ pub async fn run_resync<H: FnMut(Frame) -> bool + Send>(spec: impl Fn() -> Spec,
             _ = run(s, move |f| if !h(f) { g.notify_one() }) => {}
             _ = gap.notified() => eprintln!("[{name}] sequence gap, resubscribing"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_proxy_url_reqwest_rejects_connects_direct() {
+        // client() runs under the NET lock: a panic there would poison it for every later request
+        assert!(reqwest::Proxy::all("not a url").is_err());
+        client(ProxyMode::System, Some("not a url"));
+        client(ProxyMode::Custom, Some("not a url"));
+        client(ProxyMode::System, None);
     }
 }
