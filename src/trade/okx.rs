@@ -318,7 +318,7 @@ pub async fn stream(k: Keys, tx: AccTx) {
                     }
                 },
                 Some("account") => for a in &data {
-                    send(match balance_of(a) { Some(b) => AccEvent::Wallet(Balance { equity: b.equity, available: b.available, ..Default::default() }), None => AccEvent::BalanceDirty });
+                    send(match balance_of(a) { Some(b) => AccEvent::Wallet(b), None => AccEvent::BalanceDirty });
                 },
                 _ => {}
             }
@@ -440,5 +440,14 @@ mod tests {
         assert_eq!(pending_page(&rows(0, 99)).1, None);
         assert_eq!(pending_page(&rows(0, 100)).1.as_deref(), Some("901"));
         assert_eq!(pending_page(&Value::Null), (vec![], None));
+    }
+
+    #[test]
+    fn account_push_carries_risk_fields() {
+        // `account` channel row (docs shape): totals + adjusted equity + maintenance margin
+        let a: Value = serde_json::from_str(r#"{"uTime":"1614846244194","totalEq":"91884","adjEq":"91884.8502","isoEq":"0","mmr":"1038.1","imr":"3.6","availEq":"91000","details":[{"ccy":"USDT","availEq":"2","eq":"2"}]}"#).unwrap();
+        let b = balance_of(&a).unwrap();
+        assert_eq!((b.equity, b.available, b.maint_margin, b.adj_equity), (91884.0, 91000.0, Some(1038.1), Some(91884.8502)));
+        assert!((b.mm_rate.unwrap() - 1038.1 / 91884.8502).abs() < 1e-12);
     }
 }

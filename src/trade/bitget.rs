@@ -194,13 +194,18 @@ fn wallet(a: &Value) -> (f64, f64) {
     }
 }
 
+/// Totals of the USDT account row (REST and the `account` push). crossedRiskRate: maintenance
+/// margin / equity, liquidation at 1 (same sense as Bybit accountMMRate).
+fn balance_of(a: &Value) -> Balance {
+    let (equity, available) = wallet(a);
+    Balance { equity, available, uni_mmr: None, mm_rate: crate::opt_num(&a["crossedRiskRate"]), ..Default::default() }
+}
+
 pub async fn balance(k: &Keys) -> Result<Balance> {
     let v = bitget(k, false, "/api/v2/mix/account/accounts", &[("productType", PT.into())], None).await?;
     let a = v.as_array().into_iter().flatten().find(|a| a["marginCoin"].as_str().is_some_and(|c| c.eq_ignore_ascii_case("USDT")))
         .ok_or_else(|| anyhow!("bitget: no USDT futures account"))?;
-    let (equity, available) = wallet(a);
-    // crossedRiskRate: maintenance margin / equity, liquidation at 1 (same sense as Bybit accountMMRate)
-    Ok(Balance { equity, available, uni_mmr: None, mm_rate: crate::opt_num(&a["crossedRiskRate"]), ..Default::default() })
+    Ok(balance_of(a))
 }
 
 /// The positions channel pushes the full position list every time: rows missing from this push
@@ -260,8 +265,7 @@ pub async fn stream(k: Keys, tx: AccTx) {
                     send(if open { AccEvent::Order(order(o)) } else { AccEvent::OrderDone { id: o["orderId"].as_str().unwrap_or_default().into() } });
                 },
                 Some("account") => for a in v["data"].as_array().into_iter().flatten().filter(|a| a["marginCoin"] == "USDT") {
-                    let (equity, available) = wallet(a);
-                    send(AccEvent::Wallet(Balance { equity, available, ..Default::default() }));
+                    send(AccEvent::Wallet(balance_of(a)));
                 },
                 _ => {}
             }
@@ -341,6 +345,10 @@ mod tests {
         // account: single mode REST row and union-mode WS push (docs)
         assert_eq!(wallet(&json!({"accountEquity": "100", "usdtEquity": "100.5", "crossedMaxAvailable": "80", "available": "90", "assetMode": "single"})), (100.5, 80.0));
         assert_eq!(wallet(&json!({"equity": "11.98", "maxOpenPosAvailable": "11.9", "unionTotalMargin": "100", "unionAvailable": "20", "assetsMode": "union"})), (100.0, 20.0));
+        // the account push carries the cross risk rate; a row without it leaves mm_rate None
+        let b = balance_of(&json!({"marginCoin": "USDT", "equity": "11.98", "maxOpenPosAvailable": "11.9", "crossedRiskRate": "0.12", "unrealizedPL": "0"}));
+        assert_eq!((b.equity, b.available, b.mm_rate), (11.98, 11.9, Some(0.12)));
+        assert_eq!(balance_of(&json!({"marginCoin": "USDT", "equity": "11.98", "maxOpenPosAvailable": "11.9"})).mm_rate, None);
     }
 
     #[test]

@@ -156,12 +156,13 @@ pub async fn open_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
 }
 
 /// Multi-collateral (flex) wallet, USD: equity = portfolioValue (balance + upnl),
-/// available = availableMargin; mm_rate = maintenance margin / margin equity.
+/// available = availableMargin; mm_rate = maintenance margin / margin equity. REST spells the
+/// fields camelCase, the `balances` push snake_case; a figure the row lacks stays None.
 fn flex_balance(f: &Value) -> Balance {
-    let eq = n(&f["marginEquity"]);
-    Balance { equity: n(&f["portfolioValue"]), available: n(&f["availableMargin"]), uni_mmr: None,
-        mm_rate: (eq > 0.0).then(|| n(&f["maintenanceMargin"]) / eq),
-        maint_margin: Some(n(&f["maintenanceMargin"])), adj_equity: None }
+    let g = |camel: &str, snake: &str| crate::opt_num(&f[camel]).or(crate::opt_num(&f[snake]));
+    let (maint, eq) = (g("maintenanceMargin", "maintenance_margin"), g("marginEquity", "margin_equity"));
+    Balance { equity: g("portfolioValue", "portfolio_value").unwrap_or(0.0), available: g("availableMargin", "available_margin").unwrap_or(0.0), uni_mmr: None,
+        mm_rate: maint.zip(eq).filter(|(_, e)| *e > 0.0).map(|(m, e)| m / e), maint_margin: maint, adj_equity: None }
 }
 
 pub async fn balance(k: &Keys) -> Result<Balance> {
@@ -215,7 +216,7 @@ fn on_msg(v: &Value, held: &mut Vec<String>, send: &mut impl FnMut(AccEvent)) {
         }
         Some("balances" | "balances_snapshot") => {
             let f = &v["flex_futures"];
-            if f.is_object() { send(AccEvent::Wallet(Balance { equity: n(&f["portfolio_value"]), available: n(&f["available_margin"]), ..Default::default() })); }
+            if f.is_object() { send(AccEvent::Wallet(flex_balance(f))); }
         }
         _ => {}
     }
@@ -331,6 +332,9 @@ mod tests {
         assert!(o.ts > 1_500_000_000_000);
         let b = flex_balance(&json!({"balanceValue": 34995.52, "portfolioValue": 34995.52, "marginEquity": 34122.66, "availableMargin": 34122.66, "maintenanceMargin": 0}));
         assert_eq!((b.equity, b.available, b.mm_rate), (34995.52, 34122.66, Some(0.0)));
+        // a push row without the margin figures keeps them None (the engine keeps the last value)
+        let b = flex_balance(&json!({"portfolio_value": 5000.0, "available_margin": 4800.0}));
+        assert_eq!((b.equity, b.available, b.mm_rate, b.maint_margin), (5000.0, 4800.0, None, None));
     }
 
     #[test]
@@ -350,13 +354,13 @@ mod tests {
             "type": "limit", "order_id": "59302619-41d2-4f0b-941f-7e7914760ad3", "direction": 1, "reduce_only": true}, "is_cancel": false, "reason": "new_placed_order_by_user"}), &mut held, &mut send);
         on_msg(&json!({"feed": "open_orders", "order_id": "660c6b23-8007-48c1-a7c9-4893f4572e8c", "is_cancel": true, "reason": "cancelled_by_user"}), &mut held, &mut send);
         on_msg(&json!({"feed": "open_orders", "order": {"instrument": "PF_XBTUSD", "qty": 0, "filled": 0.0001, "order_id": "f1", "direction": 0}, "is_cancel": true, "reason": "full_fill"}), &mut held, &mut send);
-        on_msg(&json!({"feed": "balances", "flex_futures": {"portfolio_value": 5000.0, "available_margin": 4800.0}}), &mut held, &mut send);
+        on_msg(&json!({"feed": "balances", "flex_futures": {"portfolio_value": 5000.0, "available_margin": 4800.0, "maintenance_margin": 10.0, "margin_equity": 1000.0}}), &mut held, &mut send);
         on_msg(&json!({"feed": "balances", "futures": {"F-XBT:USD": {}}}), &mut held, &mut send);
         let s: Vec<String> = ev.iter().map(|e| match e {
             AccEvent::Position { p, one_way } => format!("pos {} {:?} {} {} {:?} {:.2} {one_way}", p.symbol, p.side, p.qty, p.mark, p.liq, p.lev),
             AccEvent::Order(o) => format!("order {} {} {:?} {} {} {}", o.symbol, o.id, o.side, o.price, o.qty, o.reduce_only),
             AccEvent::OrderDone { id } => format!("done {id}"),
-            AccEvent::Wallet(b) => format!("wallet {} {}", b.equity, b.available),
+            AccEvent::Wallet(b) => format!("wallet {} {} {:?} {:?}", b.equity, b.available, b.mm_rate, b.maint_margin),
             e => format!("{e:?}"),
         }).collect();
         assert_eq!(s, vec![
@@ -367,7 +371,7 @@ mod tests {
             "order BTCUSDT 59302619-41d2-4f0b-941f-7e7914760ad3 Sell 10640 304 true",
             "done 660c6b23-8007-48c1-a7c9-4893f4572e8c",
             "done f1",
-            "wallet 5000 4800",
+            "wallet 5000 4800 Some(0.01) Some(10.0)",
         ]);
     }
 

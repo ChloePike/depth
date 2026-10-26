@@ -354,7 +354,7 @@ pub async fn stream(k: Keys, tx: AccTx) {
                     }
                     for p in ps { send(AccEvent::Position { p, one_way: true }); }
                     held = now;
-                    send(match totals(cs) { Some(b) => AccEvent::Wallet(Balance { equity: b.equity, available: b.available, ..Default::default() }), None => AccEvent::BalanceDirty });
+                    send(match totals(cs) { Some(b) => AccEvent::Wallet(b), None => AccEvent::BalanceDirty });
                 }
                 "orderUpdates" => for w in d.as_array().into_iter().flatten().filter(|w| is_perp(w["order"]["coin"].as_str().unwrap_or("@"))) {
                     send(if w["status"] == "open" { AccEvent::Order(open_order(&w["order"])) } else { AccEvent::OrderDone { id: w["order"]["oid"].to_string() } });
@@ -432,6 +432,11 @@ mod tests {
         assert_eq!((w.b, w.p.as_str(), w.t.limit.tif), (false, "101235", "Alo"));
         assert!(order_wire(&req(Side::Buy, false, Kind::Bbo { queue: true, level: 1 }), &a, 1.0).is_err());
         assert!(order_wire(&req(Side::Buy, false, Kind::Market), &a, 0.0).is_err());
+        // clearinghouseState push: totals carry the cross maintenance margin and its rate
+        let cs = json!({"marginSummary": {"accountValue": "1000.5"}, "crossMarginSummary": {"accountValue": "800"}, "crossMaintenanceMarginUsed": "40", "withdrawable": "600.25"});
+        let b = totals(&cs).unwrap();
+        assert_eq!((b.equity, b.available, b.mm_rate, b.maint_margin), (1000.5, 600.25, Some(0.05), Some(40.0)));
+        assert!(totals(&json!({"marginSummary": {"accountValue": "0"}})).is_none());
         assert_eq!(base_of("BTCUSDT"), "BTC");
         assert_eq!(unified("kPEPE"), "KPEPEUSDT");
         let n1 = next_nonce();

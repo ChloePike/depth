@@ -235,11 +235,15 @@ pub async fn open_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
     Ok(rows.iter().filter(|o| tpsl::bybit_row(o).is_none()).map(bybit_order).collect())
 }
 
+/// Unified account totals from a wallet row (REST `wallet-balance` list[0] and the `wallet` push share the fields).
+fn balance_of(a: &Value) -> Balance {
+    Balance { equity: n(&a["totalEquity"]), available: n(&a["totalAvailableBalance"]), uni_mmr: None, mm_rate: crate::opt_num(&a["accountMMRate"]),
+        maint_margin: crate::opt_num(&a["totalMaintenanceMargin"]), adj_equity: crate::opt_num(&a["totalMarginBalance"]) }
+}
+
 pub async fn balance(k: &Keys) -> Result<Balance> {
     let v = bybit(k, true, "/v5/account/wallet-balance", json!({"accountType": "UNIFIED"})).await?;
-    let a = &v["list"][0];
-    Ok(Balance { equity: n(&a["totalEquity"]), available: n(&a["totalAvailableBalance"]), uni_mmr: None, mm_rate: crate::opt_num(&a["accountMMRate"]),
-        maint_margin: crate::opt_num(&a["totalMaintenanceMargin"]), adj_equity: crate::opt_num(&a["totalMarginBalance"]) })
+    Ok(balance_of(&v["list"][0]))
 }
 
 /// One Bybit v5 position row (REST list and the private `position` push share the shape).
@@ -302,7 +306,7 @@ pub async fn stream(k: Keys, tx: AccTx) {
                 },
                 (_, Some("execution.linear")) => for f in v["data"].as_array().into_iter().flatten().filter_map(bybit_fill) { send(AccEvent::Fill(f)); },
                 (_, Some("wallet")) => for w in v["data"].as_array().into_iter().flatten().filter(|w| w["accountType"] == "UNIFIED") {
-                    send(AccEvent::Wallet(Balance { equity: n(&w["totalEquity"]), available: n(&w["totalAvailableBalance"]), ..Default::default() }));
+                    send(AccEvent::Wallet(balance_of(w)));
                 },
                 _ => {}
             }
@@ -515,5 +519,17 @@ mod tests {
         // a full page with an empty cursor is the last one; a missing list is an empty page
         assert_eq!(realtime_page(&json!({"list": rows(0, 50), "nextPageCursor": ""})).1, None);
         assert_eq!(realtime_page(&json!({})), (vec![], None));
+    }
+
+    #[test]
+    fn wallet_push_carries_risk_fields() {
+        // `wallet` topic row (docs shape), account with a position: the risk gauge fields ride along
+        let push: Value = serde_json::from_str(r#"{"accountType":"UNIFIED","accountIMRate":"0.1","accountMMRate":"0.05","totalEquity":"10262.91","totalWalletBalance":"10300.5",
+            "totalMarginBalance":"10262.5","totalAvailableBalance":"9000.25","totalPerpUPL":"-37.9","totalInitialMargin":"1000","totalMaintenanceMargin":"513.1","coin":[]}"#).unwrap();
+        let b = balance_of(&push);
+        assert_eq!((b.equity, b.available, b.mm_rate, b.maint_margin, b.adj_equity, b.uni_mmr), (10262.91, 9000.25, Some(0.05), Some(513.1), Some(10262.5), None));
+        // fields the push leaves out stay None (the engine keeps the last value)
+        let b = balance_of(&json!({"accountType": "UNIFIED", "totalEquity": "1", "totalAvailableBalance": "1", "accountMMRate": ""}));
+        assert_eq!((b.mm_rate, b.maint_margin, b.adj_equity), (None, None, None));
     }
 }
