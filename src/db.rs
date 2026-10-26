@@ -1,6 +1,7 @@
 //! Local SQLite store (`depth.db` in `sys::data_dir()`): the market history cache (`hist`,
-//! clearable from Settings) and the account's own fills (`fills`, kept: venues only serve recent
-//! ones). One connection behind a mutex; every call is a few rows, fine from async tasks.
+//! clearable from Settings), the account's own fills (`fills`, kept: venues only serve recent
+//! ones) and the demo account's event log (`demo_events`, kept). One connection behind a mutex;
+//! every call is a few rows, fine from async tasks.
 
 use crate::trade::Fill;
 use crate::{Exchange, Side};
@@ -19,7 +20,11 @@ fn db() -> Option<MutexGuard<'static, Connection>> {
              CREATE TABLE IF NOT EXISTS hist (key TEXT PRIMARY KEY, body BLOB NOT NULL, updated INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS fills (ex TEXT NOT NULL, id TEXT NOT NULL, symbol TEXT NOT NULL, buy INTEGER NOT NULL,
                  price REAL NOT NULL, qty REAL NOT NULL, fee REAL NOT NULL, realized REAL, ts INTEGER NOT NULL, PRIMARY KEY (ex, id));
-             CREATE INDEX IF NOT EXISTS fills_sym ON fills (symbol, ts);",
+             CREATE INDEX IF NOT EXISTS fills_sym ON fills (symbol, ts);
+             CREATE TABLE IF NOT EXISTS demo_events (id TEXT PRIMARY KEY, device TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
+                 kind TEXT NOT NULL, body TEXT NOT NULL, UNIQUE (device, seq));
+             CREATE INDEX IF NOT EXISTS demo_order ON demo_events (ts, device, seq);
+             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         ).map_err(|e| eprintln!("[db] {e}")).ok()?;
         // the JSON files the history cache used before
         if let Some(d) = crate::sys::cache_dir() { let _ = std::fs::remove_dir_all(d.join("history")); }
@@ -57,6 +62,8 @@ pub fn hist_clear(days: Option<u64>) -> u64 {
 
 /// Insert fills; ones already stored (same venue and fill id) are left as they are.
 pub fn fills_put(fills: &[Fill]) {
+    // demo fills live in the demo log only, never among the real ones
+    if crate::demo::on() { return; }
     let Some(mut c) = db() else { return };
     let Ok(tx) = c.transaction() else { return };
     {
@@ -87,6 +94,58 @@ pub fn fills(symbol: &str, since: i64) -> Vec<Fill> {
     }).map(|rows| rows.flatten().flatten().collect()).unwrap_or_default()
 }
 
+// ---------------------------------------------------------------- demo account event log
+
+/// One stored event of the demo account (`demo::Ev`): `body` is its JSON, `kind` the tag. The log
+/// is append-only (a reset is an event too) and Clear Cache leaves it, like `fills`. Sync-ready: a
+/// server would keep the same rows keyed (device, seq); a client inserts the rows past its
+/// per-device cursor here and folds again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DemoRow { pub id: String, pub device: String, pub seq: u64, pub ts: i64, pub kind: String, pub body: String }
+
+/// Store events; rows already there (same id, or same device and seq) are skipped. Returns how
+/// many were written: fewer than given for fresh events means the store failed.
+pub fn demo_append(rows: &[DemoRow]) -> usize {
+    let Some(mut c) = db() else { return 0 };
+    let Ok(tx) = c.transaction() else { return 0 };
+    let mut n = 0;
+    {
+        let Ok(mut st) = tx.prepare_cached("INSERT OR IGNORE INTO demo_events (id, device, seq, ts, kind, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6)") else { return 0 };
+        for r in rows { n += st.execute(params![r.id, r.device, r.seq as i64, r.ts, r.kind, r.body]).unwrap_or(0); }
+    }
+    if tx.commit().is_err() { return 0; }
+    n
+}
+
+/// Every stored event in replay order (ts, device, seq).
+pub fn demo_rows() -> Vec<DemoRow> {
+    let Some(c) = db() else { return vec![] };
+    let Ok(mut st) = c.prepare_cached("SELECT id, device, seq, ts, kind, body FROM demo_events ORDER BY ts, device, seq") else { return vec![] };
+    st.query_map([], |r| Ok(DemoRow { id: r.get(0)?, device: r.get(1)?, seq: r.get::<_, i64>(2)? as u64, ts: r.get(3)?, kind: r.get(4)?, body: r.get(5)? }))
+        .map(|rows| rows.flatten().collect()).unwrap_or_default()
+}
+
+/// Highest seq stored for `device`, 0 when none.
+pub fn demo_last_seq(device: &str) -> u64 {
+    db().and_then(|c| c.query_row("SELECT MAX(seq) FROM demo_events WHERE device = ?1", [device], |r| r.get::<_, Option<i64>>(0)).ok().flatten()).unwrap_or(0) as u64
+}
+
+/// This installation's id in the demo log, made once. It is kept in this database next to the
+/// sequence numbers it scopes, so the two can never part (a restored log keeps its numbering);
+/// "local" without a database.
+pub fn device_id() -> String {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        let Some(c) = db() else { return "local".into() };
+        let get = || c.query_row("SELECT value FROM meta WHERE key = 'device'", [], |r| r.get::<_, String>(0)).ok();
+        get().unwrap_or_else(|| {
+            let id = crate::trade::uuid_v4();
+            let _ = c.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('device', ?1)", [&id]);
+            get().unwrap_or(id)
+        })
+    }).clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +163,20 @@ mod tests {
         assert_eq!(hist_get("k").as_deref(), Some(&b"abc"[..]));
         assert_eq!(hist_clear(None), 3);
         assert!(hist_get("k").is_none());
+        // demo log: idempotent appends, replay order, per-device cursor, stable device id
+        let row = |id: &str, device: &str, seq, ts| DemoRow { id: id.into(), device: device.into(), seq, ts, kind: "Reset".into(), body: "{}".into() };
+        assert_eq!(demo_append(&[row("e2", "d", 2, 20), row("e1", "d", 1, 10)]), 2);
+        assert_eq!(demo_append(&[row("e1", "d", 1, 10), row("other", "d", 2, 30)]), 0);
+        assert_eq!(demo_append(&[row("x1", "b", 1, 10)]), 1);
+        assert_eq!(demo_rows().iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["x1", "e1", "e2"]);
+        assert_eq!((demo_last_seq("d"), demo_last_seq("b"), demo_last_seq("none")), (2, 1, 0));
+        let id = device_id();
+        assert_eq!((id.len(), device_id()), (36, id));
+        // demo mode keeps its fills out of the real table
+        crate::demo::set_on(true);
+        fills_put(&[f("demo", 30)]);
+        crate::demo::set_on(false);
+        assert_eq!(fills("XUSDT", 0).len(), 2);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -34,9 +34,28 @@ pub const DEFAULT_LEV: f64 = 10.0;
 pub const MAX_LEV: f64 = 100.0;
 pub const START_BALANCE: f64 = 10_000.0;
 
+static ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Demo mode: keyed trade calls go to the simulated account and its fills stay out of `db::fills_put`.
+pub fn on() -> bool { ON.load(std::sync::atomic::Ordering::Relaxed) }
+pub fn set_on(v: bool) { ON.store(v, std::sync::atomic::Ordering::Relaxed) }
+
 /// One entry of the log: `id` a uuid, `seq` counts this device's events from 1, `ts` in ms.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ev { pub id: String, pub device: String, pub seq: u64, pub ts: i64, pub kind: EvKind }
+
+impl Ev {
+    /// The stored form: the kind's JSON as `body`, its tag as `kind`.
+    pub fn row(&self) -> crate::db::DemoRow {
+        let v = serde_json::to_value(&self.kind).unwrap_or_default();
+        crate::db::DemoRow { id: self.id.clone(), device: self.device.clone(), seq: self.seq, ts: self.ts, kind: v["kind"].as_str().unwrap_or_default().into(), body: v.to_string() }
+    }
+
+    /// None for a row this build cannot read (a kind from a newer version): replay skips it.
+    pub fn from_row(r: &crate::db::DemoRow) -> Option<Ev> {
+        Some(Ev { id: r.id.clone(), device: r.device.clone(), seq: r.seq, ts: r.ts, kind: serde_json::from_str(&r.body).ok()? })
+    }
+}
 
 /// What happened. Stored as JSON (`kind` is the tag); field names are the sync contract.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -176,6 +195,8 @@ impl Sim {
                 o.dir = 0;
             },
             EvKind::Fill { order, ex, market, symbol, side, pos, px, qty, fee } => {
+                // ponytail: spot fees are charged in USDT (the venues take a buy's fee from the coin
+                // bought); charge it in the base coin if exact spot balances matter
                 let realized = if *market == Market::Spot {
                     let key = (*ex, coin(symbol).to_string());
                     let c = self.coins.entry(key.clone()).or_insert((0.0, *px));
@@ -263,7 +284,8 @@ impl Sim {
     pub fn reset(&mut self, balance: f64, now: i64) { self.record(now, EvKind::Reset { balance }); }
 
     /// Position mode and margin mode of the whole demo account. Like the venues, refused while a
-    /// position or perp order is open.
+    /// position or perp order is open. ponytail: one margin mode for every symbol (venues set it per
+    /// symbol); key `cross` by (ex, symbol) like `levs` if mixed modes are wanted.
     pub fn configure(&mut self, hedge: bool, cross: bool, now: i64) -> Result<()> {
         if (hedge, cross) == (self.hedge, self.cross) { return Ok(()); }
         if !self.pos.is_empty() || self.orders.iter().any(|o| o.market == Market::Perp) {
@@ -580,6 +602,22 @@ mod tests {
         s.record(10, EvKind::Reset { balance: 1.0 });
         s.record(5, EvKind::Reset { balance: 2.0 });
         assert_eq!((s.pending[1].ts, Sim::replay("a", s.pending.clone()).cash), (10, 2.0));
+    }
+
+    #[test]
+    fn events_survive_their_stored_form() {
+        let mut s = sim(1000.0);
+        s.record(1, by(Buy, Buy, 100.123456789, 0.001, 0.1 + 0.2));
+        let o = DemoOrder { id: "o".into(), ex: Exchange::Okx, market: Market::Spot, req: OrderReq { symbol: BTC.into(), pos: Sell, close: false,
+            kind: Kind::Stop { trigger: 1e-7, limit: Some(3.0), by_mark: false }, qty: 1.0 / 3.0, client_id: Some("c".into()) }, filled: 0.0, avg: 0.0, ts: 2, dir: -1 };
+        s.record(2, EvKind::Place { o });
+        s.record(3, EvKind::TpSl { t: TpSl { id: "t".into(), ex: Exchange::Bybit, symbol: BTC.into(), pos: Buy, take_profit: false, trigger_px: 90.5, qty: Some(0.5), trigger: trade::tpsl::Trigger::Last } });
+        for e in &s.pending { assert_eq!(Ev::from_row(&e.row()).as_ref(), Some(e)); }
+        let r = s.pending[1].row();
+        assert_eq!((r.kind.as_str(), r.seq, r.device.as_str()), ("Fill", 2, "a"));
+        assert!(r.body.contains("\"kind\":\"Fill\"") && r.body.contains("\"fee\":0.30000000000000004"), "{}", r.body);
+        assert_eq!(Ev::from_row(&crate::db::DemoRow { body: "{\"kind\":\"FromTheFuture\"}".into(), ..r }), None);
+        assert_eq!(snap(&Sim::replay("a", s.pending.iter().map(|e| Ev::from_row(&e.row()).unwrap()))), snap(&s));
     }
 
     #[test]
