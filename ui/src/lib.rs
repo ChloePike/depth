@@ -390,6 +390,8 @@ impl App {
         let prefs = st.prefs.clone().unwrap_or_default();
         prefs.apply(&cc.egui_ctx);
         let mode = env("T1_MODE").and_then(|m| Market::parse(&m)).or(st.mode).unwrap_or(Market::Perp);
+        // before the engine picks its active keys (T1_DEMO=1: demo account for screenshots)
+        depth::demo::set_on(prefs.demo || env("T1_DEMO").is_some());
         let mut eng = engine::Engine::new();
         eng.account.lock().unwrap().auto = st.auto.clone().unwrap_or_default();
         eng.start_account(&cc.egui_ctx);
@@ -865,6 +867,8 @@ impl App {
     pub(crate) fn alerts_tick(&mut self, a: &depth::agg::Agg) {
         let base = self.eng.base.clone();
         let mut bases = self.chart.alert_bases();
+        // demo positions and orders off screen keep a price for marks, triggers and liquidation
+        if depth::demo::on() { bases.extend(depth::demo::bases()); bases.sort(); bases.dedup(); }
         bases.retain(|b| *b != base);
         self.eng.watch(&bases);
         let mut px = self.eng.watched.lock().unwrap().clone();

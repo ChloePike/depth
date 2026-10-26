@@ -150,7 +150,8 @@ impl App {
         let log: Vec<Value> = acc.log.iter().rev().take(200).map(|(ts, m, ok)| json!({"ts": ts, "msg": m, "ok": ok})).collect();
         let tests = self.eng.key_tests.lock().unwrap().clone();
         let keys: Vec<Value> = trade::KEY_VENUES.iter().map(|&e| {
-            let tail: Option<String> = acc.keys.get(&e).map(|k| k.key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect());
+            // the Keychain's keys, never the demo ones
+            let tail: Option<String> = self.eng.real_keys.get(&e).map(|k| k.key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect());
             let (lk, ls, lx) = trade::key_fields(e);
             json!({"ex": ex_name(e), "configured": tail.is_some(), "tail": tail, "verified": trade::VERIFIED.contains(&e),
                    "test": tests.get(&e).map(|(ok, m)| json!({"ok": ok, "msg": m})), "labels": [lk, ls, lx]})
@@ -232,13 +233,15 @@ impl App {
             "set_lang" => super::set_lang(v["lang"].as_str().unwrap_or("en")),
             "set_prefs" => {
                 let old = (self.prefs.proxy, self.prefs.proxy_url.clone());
+                let was_demo = self.prefs.demo;
                 self.prefs = super::settings::merge_prefs(&self.prefs, &v["prefs"])?;
                 self.prefs.apply(ctx);
+                // the account streams restart on the other account; market connections stay
+                if self.prefs.demo != was_demo { self.eng.set_demo(self.prefs.demo); }
                 // every stream reconnects through the new route now; private ones re-snapshot
                 if old != (self.prefs.proxy, self.prefs.proxy_url.clone()) {
                     self.pending_restart = true;
-                    let keys: Vec<_> = self.eng.account.lock().unwrap().keys.iter().map(|(e, k)| (*e, k.clone())).collect();
-                    for (e, k) in keys { self.eng.set_keys(e, Some(k)); }
+                    self.eng.restart_streams();
                 }
             }
             "set_route" => { self.route = serde_json::from_value(v["route"].clone()).map_err(|e| e.to_string())?; }
@@ -401,7 +404,7 @@ impl App {
                 self.eng.set_keys(e, k);
             }
             "delete_keys" => { let e = exv()?; trade::delete_keys(e); self.eng.set_keys(e, None); }
-            "test_keys" => { let e = exv()?; let k = self.eng.account.lock().unwrap().keys.get(&e).cloned().ok_or("no keys")?; self.eng.test_keys(e, k, ctx); }
+            "test_keys" => { let e = exv()?; let k = self.eng.real_keys.get(&e).cloned().ok_or("no keys")?; self.eng.test_keys(e, k, ctx); }
             other => return Err(format!("unknown op {other:?}")),
         }
         Ok(json!({}))

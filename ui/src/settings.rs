@@ -48,11 +48,13 @@ pub struct Prefs {
     pub terminal: bool,
     /// sound of a fill on any venue (chart::sounds id; "none" = silent)
     pub fill_sound: String,
+    /// demo trading: every venue trades the simulated account (`depth::demo`), no API keys needed
+    pub demo: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into() }
+        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into(), demo: false }
     }
 }
 
@@ -99,6 +101,7 @@ impl Prefs {
             s.visuals.widgets.active.bg_stroke.color = Color32::from_rgb(r, g, b);
         });
         *FEES.lock().unwrap() = self.fees.clone();
+        depth::demo::set_fees(&self.fees);
         depth::ws::set_proxy(self.proxy, &self.proxy_url);
     }
 
@@ -595,7 +598,7 @@ fn appearance(ui: &mut Ui, st: &Value, call: &mut Call) {
         ui.horizontal(|ui| {
             ui.set_min_height(36.0);
             if kit::button(ui, l("Restore Default Appearance"), kit::Look::Secondary, kit::H, None, !p.default_look()).clicked() {
-                p = Prefs { tz_min: p.tz_min, confirm: p.confirm, fees: p.fees.clone(), ..Prefs::default() };
+                p = Prefs { tz_min: p.tz_min, confirm: p.confirm, fees: p.fees.clone(), demo: p.demo, ..Prefs::default() };
             }
         });
     });

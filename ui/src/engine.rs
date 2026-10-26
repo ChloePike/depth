@@ -17,6 +17,7 @@ const BORROW_TTL_MS: i64 = 3_600_000;
 /// Private account state for venues with Keychain keys, refreshed every 2s.
 #[derive(Default)]
 pub struct Account {
+    /// the ACTIVE keys: demo keys on every tradable venue in demo mode, else the Keychain's (`Engine::real_keys`)
     pub keys: HashMap<Exchange, Keys>,
     /// protection buy priced for the insurance dialog: (venue, option symbol) -> plan or error
     pub opt_plan: Option<((Exchange, String), Result<trade::OptBuy, String>)>,
@@ -133,8 +134,10 @@ fn check_perms(rt: &tokio::runtime::Runtime, account: &Arc<Mutex<Account>>, ex: 
     });
 }
 
-async fn place_logged(account: &Arc<Mutex<Account>>, ex: Exchange, req: &OrderReq, ref_px: f64) -> Option<String> {
+async fn place_logged(account: &Arc<Mutex<Account>>, ex: Exchange, req: &OrderReq, ref_px: f64, demo: bool) -> Option<String> {
     let k = account.lock().unwrap().keys.get(&ex).cloned()?;
+    // `demo`: the mode the order was made in; one made in demo never goes out real, nor the reverse
+    if k.demo != demo { account.lock().unwrap().note(format!("FAIL {ex:?} {}: demo mode changed, order not sent", req.symbol), false); return None; }
     let key = (ex, req.symbol.clone());
     let cached = account.lock().unwrap().rules.get(&key).copied();
     let rules = match cached { Some(r) => Ok(r), None => trade::rules(ex, &req.symbol).await };
@@ -278,15 +281,23 @@ pub struct Engine {
     pub watched: Arc<Mutex<HashMap<String, f64>>>,
     /// Binance margin borrow APR from the user's key: asset -> (APR, read at ms); kept across base switches
     borrow: Arc<Mutex<HashMap<String, (f64, i64)>>>,
+    /// the Keychain's keys; `Account::keys` holds the active set (`active`)
+    pub real_keys: HashMap<Exchange, Keys>,
+}
+
+/// The keys `ex` trades with: demo keys on every tradable venue in demo mode, else the real ones.
+fn active_keys(demo: bool, real: &HashMap<Exchange, Keys>, ex: Exchange) -> Option<Keys> {
+    if demo { trade::TRADABLE.contains(&ex).then(Keys::demo) } else { real.get(&ex).cloned() }
 }
 
 impl Engine {
     pub fn new() -> Self {
+        let real_keys: HashMap<Exchange, Keys> = trade::TRADABLE.into_iter().filter_map(|ex| Some((ex, trade::keychain(ex)?))).collect();
         Engine { agg: Default::default(), stats: Default::default(), base: String::new(), rt: None, tx: None, started: vec![], tfs: vec![], venue_tasks: HashMap::new(), tickers: Default::default(), funding: Default::default(), fng: Default::default(), signals: Default::default(), account: {
             let mut a = Account::default();
-            for ex in trade::TRADABLE { if let Some(k) = trade::keychain(ex) { a.keys.insert(ex, k); } }
+            a.keys = trade::TRADABLE.into_iter().filter_map(|ex| Some((ex, active_keys(depth::demo::on(), &real_keys, ex)?))).collect();
             Arc::new(Mutex::new(a))
-        }, wants_options: Default::default(), wants_l3: Default::default(), l3_started: false, hl_l3: None, l3_flowscan: false, off: Default::default(), acct_rt: None, acct_tx: None, streams: HashMap::new(), key_tests: Default::default(), watch_rt: None, watching: HashMap::new(), watched: Default::default(), borrow: Default::default() }
+        }, wants_options: Default::default(), wants_l3: Default::default(), l3_started: false, hl_l3: None, l3_flowscan: false, off: Default::default(), acct_rt: None, acct_tx: None, streams: HashMap::new(), key_tests: Default::default(), watch_rt: None, watching: HashMap::new(), watched: Default::default(), borrow: Default::default(), real_keys }
     }
 
     /// (Re)subscribe everything for `base`: spot + perp live and history, USDT/USD, heatmap sampling.
@@ -296,6 +307,7 @@ impl Engine {
         self.base = base.to_uppercase();
         self.agg = Arc::new(Mutex::new(Agg::default()));
         self.agg.lock().unwrap().load_opt_hist(&self.base);
+        depth::demo::set_market(self.agg.clone(), &self.base, self.watched.clone());
         self.stats = Arc::new(Mutex::new(Stats { hist_pending: self.venues().len() * HISTORY_MARKETS.len(), hist_total: self.venues().len() * HISTORY_MARKETS.len(), ..Default::default() }));
         self.started = vec![];
         self.tfs = vec![];
@@ -321,6 +333,8 @@ impl Engine {
                         a.on(m);
                     }
                 }
+                // after the Agg lock: the demo account copies the venue books it needs itself
+                if depth::demo::on() { depth::demo::on_batch(&buf); }
                 let now = now_ms();
                 let mut s = stats.lock().unwrap();
                 s.total += buf.len() as u64;
@@ -467,6 +481,7 @@ impl Engine {
                     if let (Some(p), Ok(j)) = (&cache, serde_json::to_vec(&t)) { let _ = std::fs::write(p, j); }
                     *tickers.lock().unwrap() = t;
                 }
+                if depth::demo::on() { depth::demo::funding_update(&f.iter().map(|((e, s), v)| (*e, s.clone(), v.rate / v.interval_h.max(1.0), v.next_ms)).collect::<Vec<_>>()); }
                 if !f.is_empty() { funding.lock().unwrap().extend(f); }
             }
         });
@@ -796,9 +811,9 @@ impl Engine {
 
     /// Place an order (rules fetched once per symbol and cached); the result lands in the account log.
     pub fn submit(&self, ex: Exchange, req: OrderReq, ref_px: f64, ctx: &eframe::egui::Context) {
-        let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        let (Some(rt), account, ctx, demo) = (self.rt.as_ref(), self.account.clone(), ctx.clone(), depth::demo::on()) else { return };
         rt.spawn(async move {
-            place_logged(&account, ex, &req, ref_px).await;
+            place_logged(&account, ex, &req, ref_px, demo).await;
             ctx.request_repaint();
         });
     }
@@ -921,11 +936,12 @@ impl Engine {
         let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return Err("not connected".into()) };
         let count = legs.len();
         let tif = if post_only { trade::Tif::PostOnly } else { trade::Tif::Gtc };
+        let demo = depth::demo::on();
         rt.spawn(async move {
             // one after another: venues rate-limit bursts of new orders per second
             for (px, q) in legs {
                 let req = OrderReq { kind: trade::Kind::Limit { price: px, tif }, qty: q, client_id: None, ..base.clone() };
-                place_logged(&account, ex, &req, px).await;
+                place_logged(&account, ex, &req, px, demo).await;
                 tokio::time::sleep(Duration::from_millis(150)).await;
             }
             ctx.request_repaint();
@@ -949,6 +965,7 @@ impl Engine {
         let id = depth::now_ms() as u64;
         let gap = Duration::from_secs_f64(minutes * 60.0 / sizes.len() as f64);
         let buy = base.side() == depth::Side::Buy;
+        let demo = depth::demo::on();
         account.lock().unwrap().algos.push(AlgoJob {
             id, ex, symbol: base.symbol.clone(), buy, close: base.close, total: base.qty, sent: 0.0, slices: sizes.len(), done: 0,
             started_ms: depth::now_ms(), end_ms: depth::now_ms() + (minutes * 60_000.0) as i64, status: "running".into(), cancelled: false, venue_id: None,
@@ -971,7 +988,7 @@ impl Engine {
                 };
                 set_status(&account, id, "running");
                 let req = OrderReq { kind: trade::Kind::Limit { price: px, tif: trade::Tif::Ioc }, qty: sizes[i], client_id: None, ..base.clone() };
-                place_logged(&account, ex, &req, px).await;
+                place_logged(&account, ex, &req, px, demo).await;
                 {
                     let mut a = account.lock().unwrap();
                     if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) { j.done = i + 1; j.sent += sizes[i]; }
@@ -1143,7 +1160,7 @@ impl Engine {
                 return;
             }
             match trade::cancel(o.ex, &k, &o.symbol, &o.id).await {
-                Ok(()) => { place_logged(&account, o.ex, &req, price).await; }
+                Ok(()) => { place_logged(&account, o.ex, &req, price, k.demo).await; }
                 Err(e) => account.lock().unwrap().note(format!("FAIL move {:?} {} {}: cancel: {e:#}", o.ex, o.symbol, o.id), false),
             }
             ctx.request_repaint();
@@ -1216,16 +1233,54 @@ impl Engine {
         });
     }
 
-    /// Keys changed in Settings: restart that venue's private stream (or stop it and drop its
-    /// state when the keys were removed).
+    /// Keys changed in Settings: the Keychain set changes; outside demo mode that venue's private
+    /// stream restarts with them (or stops when they were removed).
+    pub fn set_keys(&mut self, ex: Exchange, keys: Option<Keys>) {
+        match keys { Some(k) => { self.real_keys.insert(ex, k); } None => { self.real_keys.remove(&ex); } }
+        if !depth::demo::on() { self.restart_stream(ex, self.active(ex)); }
+    }
+
+    /// The keys `ex` trades with now (`Account::keys`).
+    pub fn active(&self, ex: Exchange) -> Option<Keys> { active_keys(depth::demo::on(), &self.real_keys, ex) }
+
+    /// Demo mode on / off: every tradable venue's private stream restarts on the other account (the
+    /// market connections stay); client-side jobs of the old account stop.
+    pub fn set_demo(&mut self, on: bool) {
+        depth::demo::set_on(on);
+        {
+            let mut a = self.account.lock().unwrap();
+            for j in a.algos.iter_mut().filter(|j| j.venue_id.is_none() && !j.cancelled) { j.cancelled = true; }
+            a.history.clear();
+            a.fills_ver += 1;
+        }
+        self.restart_streams();
+    }
+
+    /// Every tradable venue's private stream again with its active keys (proxy change, demo switch).
+    pub fn restart_streams(&mut self) {
+        for ex in trade::TRADABLE { self.restart_stream(ex, self.active(ex)); }
+    }
+
+    /// One venue's private stream restarted with `keys` (stopped when None); the old account's
+    /// state on that venue goes.
     /// ponytail: aborting the stream task leaves tasks it spawned itself (Binance's mark feed)
     /// running until restart; harmless, add cancellation tokens if venues churn often.
-    pub fn set_keys(&mut self, ex: Exchange, keys: Option<Keys>) {
+    fn restart_stream(&mut self, ex: Exchange, keys: Option<Keys>) {
         if let Some(h) = self.streams.remove(&ex) { h.abort(); }
         {
             let mut a = self.account.lock().unwrap();
             a.positions.retain(|p| p.ex != ex);
             a.orders.retain(|o| o.ex != ex);
+            a.tpsl.retain(|t| t.ex != ex);
+            a.spot_orders.retain(|o| o.ex != ex);
+            a.margin_orders.retain(|o| o.ex != ex);
+            a.opt_orders.retain(|o| o.ex != ex);
+            a.opts.retain(|o| o.ex != ex);
+            a.spot_bal.remove(&ex);
+            a.margin_bal.remove(&ex);
+            a.funding_paid.retain(|k, _| k.0 != ex);
+            a.fills_done.retain(|k| k.0 != ex);
+            a.max_levs.retain(|k, _| k.0 != ex);
             a.balances.remove(&ex);
             a.errors.remove(&ex);
             a.wallets.remove(&ex);
@@ -1465,6 +1520,8 @@ async fn reload_wallets(account: &Arc<Mutex<Account>>, ex: Exchange, k: &Keys) {
 
 /// USD to top up now, if the venue's rule says so (marks the rule as fired).
 fn auto_due(a: &mut Account, ex: Exchange) -> Option<f64> {
+    // no top-ups against the simulated wallet
+    if depth::demo::on() { return None; }
     let rule = *a.auto.get(&ex)?;
     let avail = a.balances.get(&ex)?.available;
     let now = now_ms();
@@ -1606,6 +1663,15 @@ mod tests {
 
     fn pos(side: Side, qty: f64) -> Position {
         Position { ex: Exchange::Binance, symbol: "BTCUSDT".into(), side, qty, entry: 100.0, mark: 0.0, liq: None, upnl: 0.0, lev: 0.0, margin: 0.0, cross: None }
+    }
+
+    #[test]
+    fn active_keys_are_demo_on_tradable_venues_in_demo_mode() {
+        let real: HashMap<Exchange, Keys> = [(Exchange::Bybit, Keys { key: "real".into(), secret: "s".into(), extra: None, demo: false })].into();
+        assert!(active_keys(true, &real, Exchange::Bybit).is_some_and(|k| k.demo) && active_keys(true, &real, Exchange::Okx).is_some_and(|k| k.demo));
+        assert!(active_keys(true, &real, Exchange::Mexc).is_none());
+        assert!(active_keys(false, &real, Exchange::Bybit).is_some_and(|k| !k.demo && k.key == "real"));
+        assert!(active_keys(false, &real, Exchange::Okx).is_none());
     }
 
     #[test]
