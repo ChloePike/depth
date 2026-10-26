@@ -1,7 +1,8 @@
 //! Local SQLite store (`depth.db` in `sys::data_dir()`): the market history cache (`hist`,
 //! clearable from Settings), the account's own fills (`fills`, kept: venues only serve recent
-//! ones), the open interest the app saw live (`oi`, kept: venues serve little or none of it back)
-//! and the demo account's event log (`demo_events`, kept). One connection behind a mutex;
+//! ones), the open interest the app saw live (`oi`, kept: venues serve little or none of it back),
+//! the Hunter scanner's hourly bars (`hunt_hour`, kept, 35 days) and the demo account's event log
+//! (`demo_events`, kept). One connection behind a mutex;
 //! every call is a few rows, fine from async tasks.
 
 use crate::trade::Fill;
@@ -27,7 +28,9 @@ fn db() -> Option<MutexGuard<'static, Connection>> {
              CREATE TABLE IF NOT EXISTS demo_events (id TEXT PRIMARY KEY, device TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
                  kind TEXT NOT NULL, body TEXT NOT NULL, UNIQUE (device, seq));
              CREATE INDEX IF NOT EXISTS demo_order ON demo_events (ts, device, seq);
-             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS hunt_hour (ex TEXT NOT NULL, base TEXT NOT NULL, ts INTEGER NOT NULL, o REAL NOT NULL, h REAL NOT NULL,
+                 l REAL NOT NULL, c REAL NOT NULL, qv REAL NOT NULL, PRIMARY KEY (ex, base, ts)) WITHOUT ROWID;",
         ).map_err(|e| eprintln!("[db] {e}")).ok()?;
         // the JSON files the history cache used before
         if let Some(d) = crate::sys::cache_dir() { let _ = std::fs::remove_dir_all(d.join("history")); }
@@ -147,6 +150,37 @@ pub fn oi_get(ex: Exchange, symbol: &str, from: i64, to: i64) -> Vec<(i64, f64)>
     st.query_map(params![format!("{ex:?}"), symbol, from, to], |r| Ok((r.get(0)?, r.get(1)?))).map(|rows| rows.flatten().collect()).unwrap_or_default()
 }
 
+// ---------------------------------------------------------------- Hunter hourly bars
+
+/// Store hours of coins: (venue, unified base, bar); an hour already stored is replaced.
+pub fn hunt_put(rows: &[(Exchange, String, crate::hunter::HourBar)]) {
+    let Some(mut c) = db() else { return };
+    let Ok(tx) = c.transaction() else { return };
+    {
+        let Ok(mut st) = tx.prepare_cached("INSERT OR REPLACE INTO hunt_hour (ex, base, ts, o, h, l, c, qv) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)") else { return };
+        for (ex, base, b) in rows { let _ = st.execute(params![format!("{ex:?}"), base, b.ts, b.o, b.h, b.l, b.c, b.qv]); }
+    }
+    let _ = tx.commit();
+}
+
+/// Every stored hour from `since` (ms) by base, oldest first.
+pub fn hunt_get(since: i64) -> std::collections::HashMap<String, Vec<(Exchange, crate::hunter::HourBar)>> {
+    let mut out: std::collections::HashMap<String, Vec<(Exchange, crate::hunter::HourBar)>> = Default::default();
+    let Some(c) = db() else { return out };
+    let Ok(mut st) = c.prepare_cached("SELECT ex, base, ts, o, h, l, c, qv FROM hunt_hour WHERE ts >= ?1 ORDER BY ts") else { return out };
+    let rows = st.query_map(params![since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?,
+        crate::hunter::HourBar { ts: r.get(2)?, o: r.get(3)?, h: r.get(4)?, l: r.get(5)?, c: r.get(6)?, qv: r.get(7)? })));
+    for (ex, base, b) in rows.into_iter().flatten().flatten() {
+        if let Some(e) = Exchange::parse(&ex) { out.entry(base).or_default().push((e, b)); }
+    }
+    out
+}
+
+/// Drops the hours before `before` (ms); how many went.
+pub fn hunt_prune(before: i64) -> usize {
+    db().and_then(|c| c.execute("DELETE FROM hunt_hour WHERE ts < ?1", params![before]).ok()).unwrap_or(0)
+}
+
 // ---------------------------------------------------------------- demo account event log
 
 /// One stored event of the demo account (`demo::Ev`): `body` is its JSON, `kind` the tag. The log
@@ -247,6 +281,16 @@ mod tests {
         assert!(oi_get(Exchange::Bybit, "BTC/USDT", 0, 9 * b).is_empty());
         hist_clear(None);
         assert_eq!(oi_get(Exchange::Mexc, "ETH/USDT", 0, 9 * b), vec![(b, 99.0)]);
+        // Hunter hours: replaced per (venue, base, hour), read by base oldest first, pruned by age, kept by Clear Cache
+        let bar = |ts: i64, c: f64| crate::hunter::HourBar { ts, o: 1.0, h: 2.0, l: 0.5, c, qv: 10.0 };
+        hunt_put(&[(Exchange::Binance, "X".into(), bar(7_200_000, 1.0)), (Exchange::Binance, "X".into(), bar(3_600_000, 1.5)), (Exchange::Gate, "Y".into(), bar(3_600_000, 3.0))]);
+        hunt_put(&[(Exchange::Binance, "X".into(), bar(7_200_000, 1.2))]);
+        hist_clear(None);
+        let h = hunt_get(0);
+        assert_eq!(h["X"], vec![(Exchange::Binance, bar(3_600_000, 1.5)), (Exchange::Binance, bar(7_200_000, 1.2))]);
+        assert_eq!((h["Y"].len(), hunt_get(7_000_000)["X"].len()), (1, 1));
+        assert_eq!(hunt_prune(7_000_000), 2);
+        assert!(hunt_get(0).get("Y").is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 

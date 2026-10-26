@@ -52,9 +52,18 @@ pub struct Tick { pub ex: Exchange, pub spot: bool, pub base: String, pub px: f6
 
 fn tick(ex: Exchange, spot: bool, base: String) -> Tick { Tick { ex, spot, base, px: 0.0, qvol: None, bvol: None, oi: None, fund: None } }
 
-/// Per native symbol: funding interval (hours) and contract size (base units per contract).
+/// Per native symbol: funding interval (hours) and contract size (base units per contract); per
+/// coin: its oldest perp listing (ms) on the venues whose contract lists carry one (Gate, MEXC, Bitget).
 #[derive(Default)]
-pub struct Meta { pub hours: HashMap<(Exchange, String), f64>, pub size: HashMap<(Exchange, String), f64> }
+pub struct Meta { pub hours: HashMap<(Exchange, String), f64>, pub size: HashMap<(Exchange, String), f64>, pub listed: HashMap<String, i64> }
+
+impl Meta {
+    fn listed_at(&mut self, base: Option<String>, ms: Option<f64>) {
+        let (Some(b), Some(ms)) = (base, ms.filter(|x| *x > 0.0)) else { return };
+        let t = self.listed.entry(b).or_insert(ms as i64);
+        *t = (*t).min(ms as i64);
+    }
+}
 
 struct Venue { ex: Exchange, spot: bool, s: VecDeque<Sample>, qvol: f64, bvol: f64, oi: f64, fund: Option<f64> }
 
@@ -104,8 +113,9 @@ pub struct Row {
     pub chg: [Option<f64>; 3],
     /// last 15 min volume / the 24 h average rate (from the rolling 24 h volumes)
     pub vmult: Option<f64>,
-    /// 24 h perp volume summed over venues, USD
+    /// 24 h perp volume summed over venues, USD; and spot
     pub vol24: f64,
+    pub spot24: f64,
     /// most extreme hourly funding and its venue
     pub fund: Option<(Exchange, f64)>,
     /// OI change over 15 m and 1 h, summed over the venues that report OI
@@ -120,6 +130,8 @@ pub struct Row {
     pub odd: Vec<(Exchange, bool)>,
     /// detector labels; empty until a backtest decides which ship
     pub flags: Vec<&'static str>,
+    /// operator-type score (hourly, from the stored hours); None for coins not recorded
+    pub op: Option<Op>,
 }
 
 #[derive(Default)]
@@ -150,6 +162,19 @@ impl Scan {
         let q = self.liq.entry(base).or_default();
         q.push_back((ts, usd));
         while q.front().is_some_and(|x| x.0 < ts - 15 * MIN) { q.pop_front(); }
+    }
+
+    /// Each coin's hour starting at `start` on its main perp venue (Binance where it has the hour,
+    /// else the venue trading most), for coins trading at least REC_MIN_VOL a day.
+    pub fn hour_bars(&self, start: i64) -> Vec<(Exchange, String, HourBar)> {
+        let mut out = vec![];
+        for (b, vs) in &self.coins {
+            let mut perps: Vec<&Venue> = vs.iter().filter(|v| !v.spot).collect();
+            if perps.iter().map(|v| v.qvol).sum::<f64>() < REC_MIN_VOL { continue; }
+            perps.sort_by(|x, y| (y.ex == Exchange::Binance).cmp(&(x.ex == Exchange::Binance)).then(y.qvol.total_cmp(&x.qvol)));
+            if let Some((ex, bar)) = perps.iter().find_map(|v| Some((v.ex, hour_bar(&v.s, start)?))) { out.push((ex, b.clone(), bar)); }
+        }
+        out
     }
 
     /// One row per coin with a live perp.
@@ -194,12 +219,13 @@ fn row(base: &str, vs: &[Venue], liq: Option<&VecDeque<(i64, f64)>>, now: i64) -
     Some(Row {
         base: base.to_string(), px, chg, vmult,
         vol24: perps.iter().map(|x| x.0.qvol).sum(),
+        spot24: ok.iter().filter(|x| x.0.spot).map(|x| x.0.qvol).sum(),
         fund: perps.iter().filter_map(|x| Some((x.0.ex, x.0.fund?))).max_by(|a, b| a.1.abs().total_cmp(&b.1.abs())),
         oi_chg,
         liq15: perps.iter().any(|x| LIQ_VENUES.contains(&x.0.ex)).then(|| liq.map_or(0.0, |q| q.iter().map(|x| x.1).sum())),
         gap: if clean { gap(&ok) } else { None },
         lead: chg[1].filter(|m| m.abs() >= LEAD_MIN * 100.0).and_then(|m| lead(&ok, now, m / 100.0)),
-        venues, odd, flags: vec![],
+        venues, odd, flags: vec![], op: None,
     })
 }
 
@@ -248,6 +274,116 @@ fn lead(vs: &[(&Venue, Sample)], now: i64, mv: f64) -> Option<Lead> {
     let first = *t.first()?;
     let next = t.get(1).map_or(now, |x| x.0);
     Some(Lead { ex: first.1, spot: first.2, secs: (next - first.0) as f64 / 1000.0 })
+}
+
+// ---------------------------------------------------------------- operator-type score
+
+const HOUR: i64 = 3_600_000;
+const DAY: i64 = 24 * HOUR;
+/// coins recorded hourly: perp volume of at least this much a day (USD)
+pub const REC_MIN_VOL: f64 = 1e6;
+
+/// One hour of a coin on one venue: open, high, low, close, quote volume (USD).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HourBar { pub ts: i64, pub o: f64, pub h: f64, pub l: f64, pub c: f64, pub qv: f64 }
+
+/// The hour [start, start + 1 h) of a series: prices from the samples (the edges interpolated),
+/// quote volume from the rolling 24 h volume's change plus the hour that left the window (taken as
+/// the day's average, as `Row::vmult`), clamped at 0. None unless samples cover the whole hour at
+/// most 5 min apart.
+fn hour_bar(s: &VecDeque<Sample>, start: i64) -> Option<HourBar> {
+    let (a, b) = (at(s, start)?, at(s, start + HOUR)?);
+    let inside: Vec<&Sample> = s.iter().filter(|x| x.ts > start && x.ts < start + HOUR).collect();
+    let ts: Vec<i64> = std::iter::once(start).chain(inside.iter().map(|x| x.ts)).chain([start + HOUR]).collect();
+    if ts.windows(2).any(|w| w[1] - w[0] > 5 * MIN) || a.bvol <= 0.0 || b.bvol <= 0.0 { return None; }
+    let px: Vec<f64> = inside.iter().map(|x| x.px).chain([a.px, b.px]).collect();
+    let (h, l) = px.iter().fold((f64::MIN, f64::MAX), |(h, l), p| (h.max(*p), l.min(*p)));
+    let base = (b.bvol as f64 - a.bvol as f64 + b.bvol as f64 / 24.0).max(0.0);
+    Some(HourBar { ts: start, o: a.px, h, l, c: b.px, qv: base * px.iter().sum::<f64>() / px.len() as f64 })
+}
+
+/// Binance 1h klines ([open ms, o, h, l, c, base vol, close ms, quote vol, ...]) as hour bars,
+/// without the one still open at `now`.
+pub fn kline_bars(v: &Value, now: i64) -> Vec<HourBar> {
+    arr(v).iter().filter_map(|k| {
+        let ts = k[0].as_i64().filter(|t| t + HOUR <= now)?;
+        let b = HourBar { ts, o: num(&k[1]), h: num(&k[2]), l: num(&k[3]), c: num(&k[4]), qv: num(&k[7]) };
+        (b.c > 0.0 && b.qv >= 0.0).then_some(b)
+    }).collect()
+}
+
+/// A coin's operator-type score: which traits of the 37 documented operator coins
+/// (docs/althunt-backtest.md, "Classic cases only") it shows over the trailing 30 days. It
+/// classifies the coin; it does not time a move (on those coins the frequent "precursors" were
+/// their normal state).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Op {
+    /// fewer than 7 days of hourly bars: whole days collected
+    Collecting(usize),
+    /// 0-100, the share of the evaluable traits shown; each (trait, value, shown)
+    Score { score: f64, parts: Vec<(&'static str, f64, bool)> },
+}
+
+/// The traits, over the trailing 30 days of one venue's hours: an hour of 20x the median hourly
+/// volume in at least 40% of 72 h blocks (the cases 40-84%, ordinary alts about 19%); a two-sided
+/// wick (each wick longer than the body, range over 3x the median) in at least 25% of blocks; two
+/// or more days moving over 20%; listed under 60 days ago (when a venue says); perp turnover over
+/// 15x spot, or no spot on the scanned venues; a 7-day run-up over 100%. Values: block shares,
+/// day count, age in days, perp / spot ratio (infinite: no spot), run-up fraction.
+/// ponytail: equal weights and hand-set thresholds, uncalibrated; fit them on the 37 cases with scripts/althunt.py
+pub fn op_score(bars: &[HourBar], now: i64, perp24: f64, spot24: f64, listed: Option<i64>) -> Op {
+    let bars: Vec<&HourBar> = bars.iter().filter(|b| b.ts >= now - 30 * DAY && b.ts + HOUR <= now).collect();
+    if bars.len() < 7 * 24 { return Op::Collecting(bars.len() / 24); }
+    let mv = median(bars.iter().map(|b| b.qv).collect()).unwrap_or(0.0);
+    let mr = median(bars.iter().map(|b| b.h - b.l).collect()).unwrap_or(0.0);
+    // share of the 72 h blocks back from now (those with a day of hours or more) with an hour that hits
+    let blocks = |hit: &dyn Fn(&HourBar) -> bool| {
+        let (mut n, mut k) = (0, 0);
+        for i in 0..10 {
+            let (a, z) = (now - (i + 1) * 3 * DAY, now - i * 3 * DAY);
+            let inb: Vec<&&HourBar> = bars.iter().filter(|b| b.ts >= a && b.ts < z).collect();
+            if inb.len() < 24 { continue; }
+            n += 1;
+            if inb.iter().any(|b| hit(b)) { k += 1; }
+        }
+        if n == 0 { 0.0 } else { k as f64 / n as f64 }
+    };
+    let spikes = blocks(&|b| mv > 0.0 && b.qv >= 20.0 * mv);
+    let wicks = blocks(&|b| { let (top, bot) = (b.o.max(b.c), b.o.min(b.c)); b.h - top > top - bot && bot - b.l > top - bot && b.h - b.l > 3.0 * mr });
+    // closes a day apart, back from the last hour; a missing close skips that day
+    let close = |t: i64| bars.iter().rev().find(|b| b.ts + HOUR <= t && b.ts + 3 * HOUR > t).map(|b| b.c);
+    let end = bars.last().map_or(now, |b| b.ts + HOUR);
+    let days = (0..30).filter_map(|i| Some(close(end - i * DAY)? / close(end - (i + 1) * DAY)? - 1.0)).filter(|r| r.abs() > 0.2).count();
+    // highest close over the lowest of the 7 days before it (a rising minimum queue)
+    let (mut q, mut run) = (VecDeque::<(i64, f64)>::new(), 0.0f64);
+    for b in &bars {
+        while q.back().is_some_and(|x| x.1 >= b.c) { q.pop_back(); }
+        q.push_back((b.ts, b.c));
+        while q.front().is_some_and(|x| x.0 < b.ts - 7 * DAY) { q.pop_front(); }
+        run = run.max(b.c / q[0].1 - 1.0);
+    }
+    let ratio = if spot24 > 0.0 { perp24 / spot24 } else { f64::INFINITY };
+    let mut parts = vec![("spikes", spikes, spikes >= 0.4), ("wicks", wicks, wicks >= 0.25), ("days", days as f64, days >= 2)];
+    if let Some(t) = listed { let age = (now - t) as f64 / DAY as f64; parts.push(("new", age, age < 60.0)); }
+    parts.extend([("perp", ratio, ratio > 15.0), ("runup", run, run > 1.0)]);
+    Op::Score { score: 100.0 * parts.iter().filter(|p| p.2).count() as f64 / parts.len() as f64, parts }
+}
+
+/// Scores of the coins in `vols` ((perp, spot) 24 h volume by base) from the stored hours by base,
+/// each coin on the venue with the most hours. Coins with no hours that are not recorded either get none.
+pub fn op_scores(bars: &HashMap<String, Vec<(Exchange, HourBar)>>, vols: &HashMap<String, (f64, f64)>, listed: &HashMap<String, i64>, now: i64) -> HashMap<String, Op> {
+    let mut out = HashMap::new();
+    for (b, &(perp, spot)) in vols {
+        let hours = bars.get(b).map_or(&[][..], |v| v.as_slice());
+        if hours.is_empty() && perp < REC_MIN_VOL { continue; }
+        let mut n: HashMap<Exchange, usize> = HashMap::new();
+        for (e, _) in hours { *n.entry(*e).or_default() += 1; }
+        let ex = n.into_iter().max_by_key(|x| (x.1, x.0)).map(|x| x.0);
+        let mut series: Vec<HourBar> = hours.iter().filter(|x| Some(x.0) == ex).map(|x| x.1).collect();
+        series.sort_by_key(|x| x.ts);
+        out.insert(b.clone(), op_score(&series, now, perp, spot, listed.get(b).copied()));
+    }
+    out
 }
 
 // ---------------------------------------------------------------- alerts
@@ -372,7 +508,11 @@ pub fn parse(src: Src, v: &Value, meta: &mut Meta) -> Vec<Tick> {
                 let h = if prev > 0.0 && at > prev { at - prev } else { next - at } / 3.6e6;
                 Tick { fund: f("fundingRate").filter(|_| h > 0.0).map(|r| r / h), ..tick(E::Okx, false, b) }
             }),
-            BitgetMeta => { if let Some(h) = f("fundInterval") { meta.hours.insert((E::Bitget, s("symbol").to_string()), h); } None }
+            BitgetMeta => {
+                if let Some(h) = f("fundInterval") { meta.hours.insert((E::Bitget, s("symbol").to_string()), h); }
+                meta.listed_at(perp_base(E::Bitget, s("symbol").strip_suffix("USDT")), f("launchTime"));
+                None
+            }
             BitgetPerp => perp_base(E::Bitget, s("symbol").strip_suffix("USDT")).map(|b| Tick {
                 px: f("lastPr").unwrap_or(0.0), qvol: f("quoteVolume"), bvol: f("baseVolume"), oi: f("holdingAmount"),
                 fund: f("fundingRate").zip(hours(E::Bitget, s("symbol"))).map(|(r, h)| r / h), ..tick(E::Bitget, false, b) }),
@@ -380,6 +520,7 @@ pub fn parse(src: Src, v: &Value, meta: &mut Meta) -> Vec<Tick> {
             GateMeta => {
                 if let Some(secs) = f("funding_interval") { meta.hours.insert((E::Gate, s("name").to_string()), secs / 3600.0); }
                 if let Some(m) = f("quanto_multiplier") { meta.size.insert((E::Gate, s("name").to_string()), m); }
+                meta.listed_at(perp_base(E::Gate, s("name").strip_suffix("_USDT")), f("launch_time").or(f("create_time")).map(|x| x * 1000.0));
                 None
             }
             GatePerp => perp_base(E::Gate, s("contract").strip_suffix("_USDT")).map(|b| {
@@ -388,7 +529,11 @@ pub fn parse(src: Src, v: &Value, meta: &mut Meta) -> Vec<Tick> {
                     fund: f("funding_rate").zip(hours(E::Gate, s("contract"))).map(|(r, h)| r / h), ..tick(E::Gate, false, b) }
             }),
             GateSpot => spot_base(s("currency_pair").strip_suffix("_USDT")).map(|b| Tick { px: f("last").unwrap_or(0.0), qvol: f("quote_volume"), bvol: f("base_volume"), ..tick(E::Gate, true, b) }),
-            MexcMeta => { if let Some(c) = f("contractSize") { meta.size.insert((E::Mexc, s("symbol").to_string()), c); } None }
+            MexcMeta => {
+                if let Some(c) = f("contractSize") { meta.size.insert((E::Mexc, s("symbol").to_string()), c); }
+                meta.listed_at(perp_base(E::Mexc, s("symbol").strip_suffix("_USDT")), f("createTime"));
+                None
+            }
             // sizes are contracts: nothing until the contract sizes are known. Funding: MEXC's
             // interval is not in its all-symbol data (one request per symbol), so none
             MexcPerp => meta.size.get(&(E::Mexc, s("symbol").to_string())).copied().and_then(|cs| perp_base(E::Mexc, s("symbol").strip_suffix("_USDT")).map(|b| Tick {
@@ -564,6 +709,67 @@ mod tests {
         assert_eq!(crossed(&a, &r), vec![2]);
     }
 
+    fn hours(n: usize, now: i64, f: impl Fn(usize) -> (f64, f64, f64, f64)) -> Vec<HourBar> {
+        (0..n).map(|i| { let (p, h, l, qv) = f(i); HourBar { ts: now - (n - i) as i64 * HOUR, o: p, h, l, c: p, qv } }).collect()
+    }
+
+    #[test]
+    fn operator_score_from_hourly_series() {
+        let now = 1000 * DAY;
+        // an ordinary coin: flat, steady volume, spot half the perp turnover, listed long ago
+        let calm = hours(30 * 24, now, |i| { let p = 1.0 + 0.001 * (i % 2) as f64; (p, p * 1.002, p * 0.998, 100.0) });
+        let Op::Score { score, parts } = op_score(&calm, now, 1e7, 5e6, Some(now - 400 * DAY)) else { panic!() };
+        assert!(score == 0.0 && parts.len() == 6, "{parts:?}");
+        // the operator type: a 30x hour every other day, a two-sided wick every 60 h, a week from 1 to 3, a crash, no spot, new
+        let op = hours(30 * 24, now, |i| {
+            let p = match i { 0..240 => 1.0, 240..408 => 1.0 + 2.0 * (i - 240) as f64 / 168.0, 408..432 => 3.0, _ => 1.2 };
+            let (h, l) = if i % 60 == 7 { (p * 1.08, p * 0.92) } else { (p * 1.002, p * 0.998) };
+            (p, h, l, if i % 48 == 5 { 3000.0 } else { 100.0 })
+        });
+        let Op::Score { score, parts } = op_score(&op, now, 1e7, 0.0, Some(now - 20 * DAY)) else { panic!() };
+        assert!(score == 100.0, "{parts:?}");
+        let get = |k: &str| parts.iter().find(|p| p.0 == k).unwrap().1;
+        assert!(get("spikes") == 1.0 && get("wicks") == 1.0 && get("days") >= 2.0 && get("perp").is_infinite() && (get("runup") - 2.0).abs() < 0.02 && (get("new") - 20.0).abs() < 1e-9);
+        // no listing date: five traits; under a week of hours: collecting
+        let Op::Score { score, parts } = op_score(&op, now, 1e7, 1e7, None) else { panic!() };
+        assert!(parts.len() == 5 && score == 80.0, "{parts:?}");
+        assert_eq!(op_score(&op[..5 * 24 + 3], now, 1e7, 0.0, None), Op::Collecting(5));
+        // a coin's hours come from its venue with the most; unrecorded coins without hours get none
+        let bars = HashMap::from([("OP".to_string(), op.iter().map(|b| (E::Bybit, *b)).chain(calm[..200].iter().map(|b| (E::Binance, *b))).collect::<Vec<_>>())]);
+        let vols = HashMap::from([("OP".to_string(), (1e7, 0.0)), ("NEW".to_string(), (2e6, 0.0)), ("DUST".to_string(), (1e5, 0.0))]);
+        let s = op_scores(&bars, &vols, &HashMap::new(), now);
+        assert!(matches!(s["OP"], Op::Score { score, .. } if score == 100.0) && s["NEW"] == Op::Collecting(0) && !s.contains_key("DUST"));
+    }
+
+    #[test]
+    fn hourly_bars_from_samples() {
+        let mut s = Scan::default();
+        let h0 = 10 * HOUR;
+        // every 30 s from a minute before the hour to a minute after: price 1 -> 2, 1 000 more in the rolling day
+        for k in -2..=122 {
+            let ts = h0 + k * 30_000;
+            let f = ((ts - h0) as f64 / HOUR as f64).clamp(0.0, 1.0);
+            let (px, vol) = (1.0 + f, 96_000.0 + 1_000.0 * f);
+            let mut ticks = vec![Tick { qvol: Some(5e6), ..t(E::Bybit, false, "REC", px, vol, 0.0) }, Tick { qvol: Some(1e6), ..t(E::Binance, false, "REC", px * 1.01, vol, 0.0) },
+                Tick { qvol: Some(1e5), ..t(E::Gate, false, "THIN", px, vol, 0.0) }];
+            // a 7 min hole in the hour: no bar
+            if !(10 * MIN..17 * MIN).contains(&(ts - h0)) { ticks.push(Tick { qvol: Some(5e6), ..t(E::Gate, false, "HOLE", px, vol, 0.0) }); }
+            s.ingest(ts, ticks);
+        }
+        let bars = s.hour_bars(h0);
+        // Binance first, though Bybit trades more; under the volume floor or with a hole: nothing
+        assert_eq!(bars.len(), 1, "{bars:?}");
+        let (ex, base, b) = &bars[0];
+        assert_eq!((*ex, base.as_str(), b.ts), (E::Binance, "REC", h0));
+        assert!((b.o - 1.01).abs() < 1e-9 && (b.c - 2.02).abs() < 1e-9 && (b.h - 2.02).abs() < 1e-9 && (b.l - 1.01).abs() < 1e-9, "{b:?}");
+        // 1 000 more in the day plus the hour that left it (97 000 / 24), at the hour's mean price
+        assert!((b.qv - (1_000.0 + 97_000.0 / 24.0) * 1.515).abs() < 1.0, "{b:?}");
+        // the next hour is not over
+        assert!(s.hour_bars(h0 + HOUR).is_empty());
+        let k = json!([[h0, "1", "2", "0.5", "1.5", "10", h0 + HOUR - 1, "15", 3], [h0 + HOUR, "1.5", "1.6", "1.4", "1.6", "1", h0 + 2 * HOUR - 1, "1.6", 1]]);
+        assert_eq!(kline_bars(&k, h0 + HOUR + 1), vec![HourBar { ts: h0, o: 1.0, h: 2.0, l: 0.5, c: 1.5, qv: 15.0 }]);
+    }
+
     #[test]
     fn venue_payloads_parse() {
         let mut m = Meta::default();
@@ -600,7 +806,7 @@ mod tests {
         let x = one(Src::BitgetSpot, json!({"data": [{"symbol": "PEPEUSDT", "lastPr": "0.0000043", "quoteVolume": "1000", "baseVolume": "2"}]}), &mut m);
         assert!(x.spot && x.qvol == Some(1000.0));
 
-        assert!(parse(Src::GateMeta, &json!([{"name": "BTC_USDT", "quanto_multiplier": "0.0001", "funding_interval": 28800}]), &mut m).is_empty());
+        assert!(parse(Src::GateMeta, &json!([{"name": "BTC_USDT", "quanto_multiplier": "0.0001", "funding_interval": 28800, "launch_time": 1574035200}]), &mut m).is_empty());
         let x = one(Src::GatePerp, json!([{"contract": "BTC_USDT", "last": "80306.8", "volume_24h_base": "48037", "volume_24h_quote": "3847719007", "funding_rate": "0.000068", "total_size": "575451480", "quanto_multiplier": "0.0001"}]), &mut m);
         assert_eq!((x.bvol, x.qvol, x.fund), (Some(48037.0), Some(3847719007.0), Some(0.000068 / 8.0)));
         assert!((x.oi.unwrap() - 57545.148).abs() < 1e-6);
@@ -610,7 +816,9 @@ mod tests {
         // MEXC: nothing before the contract sizes; funding never (interval not in the all-symbol data)
         let mexc = json!({"data": [{"symbol": "BTC_USDT", "lastPrice": 80325.3, "volume24": 274644274, "amount24": 2202578850.54, "holdVol": 534683085, "fundingRate": 8.7e-05}]});
         assert!(parse(Src::MexcPerp, &mexc, &mut m).is_empty());
-        parse(Src::MexcMeta, &json!({"data": [{"symbol": "BTC_USDT", "contractSize": 0.0001}]}), &mut m);
+        parse(Src::MexcMeta, &json!({"data": [{"symbol": "BTC_USDT", "contractSize": 0.0001, "createTime": 1591242684000i64}]}), &mut m);
+        // the oldest listing a venue reports (Gate, seconds) wins over a later one (MEXC, ms)
+        assert_eq!(m.listed["BTC"], 1574035200000);
         let x = one(Src::MexcPerp, mexc, &mut m);
         assert!((x.oi.unwrap() - 53468.3085).abs() < 1e-6 && (x.bvol.unwrap() - 27464.4274).abs() < 1e-6 && x.fund.is_none());
 
