@@ -7,6 +7,7 @@ use depth::*;
 
 #[tokio::main]
 async fn main() {
+    depth::ws::cli_proxy();
     let a: Vec<String> = std::env::args().skip(1).collect();
     let usage = "usage: probe <exchange> <spot|margin|perp|option> <base> [quote=USDT] [seconds=20]";
     let ex = a.first().and_then(|s| Exchange::parse(s)).expect(usage);

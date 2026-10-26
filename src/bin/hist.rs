@@ -4,6 +4,7 @@ use depth::*;
 
 #[tokio::main]
 async fn main() {
+    depth::ws::cli_proxy();
     let a: Vec<String> = std::env::args().skip(1).collect();
     let usage = "usage: hist <exchange> <spot|margin|perp> <base> [quote=USDT] [bars=1000] [tf minutes=1]";
     let ex = a.first().and_then(|s| Exchange::parse(s)).expect(usage);

@@ -68,6 +68,7 @@ fn print(a: &Agg, base: &str) {
 
 #[tokio::main]
 async fn main() {
+    depth::ws::cli_proxy();
     let a: Vec<String> = std::env::args().skip(1).collect();
     let base = a.first().map(|s| s.to_uppercase()).unwrap_or("BTC".into());
     let secs: u64 = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(60);

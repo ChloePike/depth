@@ -164,6 +164,14 @@ fn remote_dns(url: &str) -> String {
 
 fn ws_proxy() -> Option<String> { NET.lock().unwrap().ws.clone() }
 
+/// CLI tools: ALL_PROXY when set (an explicit choice beats the OS settings), else the system proxy.
+pub fn cli_proxy() {
+    match ["ALL_PROXY", "all_proxy"].iter().find_map(|k| std::env::var(k).ok()) {
+        Some(u) => { set_proxy(ProxyMode::Custom, &u); }
+        None => { set_proxy(ProxyMode::System, ""); }
+    }
+}
+
 /// The system SOCKS proxy: macOS network settings, else ALL_PROXY.
 /// ponytail: a system with only an HTTP proxy leaves WebSockets direct; add HTTP CONNECT if that matters.
 fn system_socks() -> Option<String> {
@@ -186,7 +194,8 @@ pub fn http() -> reqwest::Client {
         .pool_idle_timeout(Duration::from_secs(30)).tcp_keepalive(Duration::from_secs(15)).user_agent("depth/0.1");
     let b = match n.mode {
         ProxyMode::None => b.no_proxy(),
-        ProxyMode::System => b, // reqwest reads the OS settings and *_PROXY
+        // the SOCKS proxy the WebSockets use; without one reqwest reads the OS settings and *_PROXY
+        ProxyMode::System => match &n.ws { Some(u) => b.proxy(reqwest::Proxy::all(u.as_str()).unwrap()), None => b },
         ProxyMode::Custom => b.proxy(reqwest::Proxy::all(remote_dns(&n.url)).unwrap()),
     };
     let c = b.build().unwrap();

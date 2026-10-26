@@ -4,6 +4,7 @@ use depth::trade;
 
 #[tokio::main]
 async fn main() {
+    depth::ws::cli_proxy();
     let base = std::env::args().nth(1).unwrap_or("BTC".into()).to_uppercase();
     let sym = trade::symbol(&base);
     // `account BTC pm`: raw Portfolio Margin account fields (read-only, weight 20)

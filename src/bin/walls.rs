@@ -70,6 +70,7 @@ fn biggest_l3(a: &Agg, mid: f64, px: f64, bid: bool, bin: f64, now: i64) -> f64 
 
 #[tokio::main]
 async fn main() {
+    depth::ws::cli_proxy();
     let a: Vec<String> = std::env::args().skip(1).collect();
     let base = a.first().map(|s| s.to_uppercase()).unwrap_or("BTC".into());
     let minutes: u64 = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(20);
