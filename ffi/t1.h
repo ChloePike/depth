@@ -6,6 +6,8 @@
 
 typedef struct T1View T1View;
 
+// 1 for the first Depth of this user, 0 when another one runs (already notified): call before the window exists
+int32_t t1_instance_lock(void);
 T1View *t1_view_new(void *native, float w, float h, float scale);
 void t1_view_free(T1View *v);
 void t1_view_resize(T1View *v, float w, float h, float scale);

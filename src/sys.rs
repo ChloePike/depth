@@ -283,6 +283,32 @@ pub fn install_panic_log() {
     });
 }
 
+// ---------------------------------------------------------------- one instance
+
+/// Take the exclusive lock on `p` (created if missing). The lock belongs to the open file, so a
+/// second open of the same path fails even inside this process; the OS drops it when the file
+/// closes or the process dies, so a crash never leaves a stale lock.
+fn lock_file(p: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(p)?;
+    f.try_lock().map_err(|e| match e { std::fs::TryLockError::WouldBlock => std::io::ErrorKind::WouldBlock.into(), std::fs::TryLockError::Error(e) => e })?;
+    Ok(f)
+}
+
+/// One Depth per user: true for the first caller, which holds `data_dir()/depth.lock` until it
+/// exits; false when another Depth runs (the caller says so and quits). A folder or filesystem
+/// that cannot lock counts as free, never as a reason not to start. `T1_MULTI` (a dev build beside
+/// the installed app) and screenshot runs (`T1_SHOT`) skip the check.
+pub fn lock_instance() -> bool {
+    static LOCK: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+    if std::env::var_os("T1_MULTI").is_some() || std::env::var_os("T1_SHOT").is_some() { return true; }
+    let Some(dir) = data_dir() else { return true };
+    let _ = std::fs::create_dir_all(&dir);
+    match lock_file(&dir.join("depth.lock")) {
+        Ok(f) => { let _ = LOCK.set(f); true }
+        Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+    }
+}
+
 // ---------------------------------------------------------------- notifications, sounds
 
 /// Run a helper process detached from our stdio, reaped on a thread. A helper that is not
@@ -365,5 +391,15 @@ mod tests {
         assert!((0..10).all(|i| super::allow(t0 + Duration::from_millis(i), &mut recent)));
         assert!(!super::allow(t0 + Duration::from_secs(9), &mut recent));
         assert!(super::allow(t0 + Duration::from_secs(11), &mut recent));
+    }
+
+    #[test]
+    fn one_holder_of_the_instance_lock() {
+        let p = std::env::temp_dir().join(format!("depth-lock-test-{}", std::process::id()));
+        let first = super::lock_file(&p).unwrap();
+        assert_eq!(super::lock_file(&p).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        drop(first);
+        assert!(super::lock_file(&p).is_ok());
+        let _ = std::fs::remove_file(p);
     }
 }

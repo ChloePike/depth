@@ -177,6 +177,11 @@ pub unsafe extern "C" fn t1_view_new(native: *mut c_void, w: f32, h: f32, scale:
 
 macro_rules! view { ($p:expr) => { match unsafe { $p.as_mut() } { Some(v) => v, None => return Default::default() } } }
 
+/// 1 for the first Depth of this user, 0 when another one runs (the notification is already shown):
+/// the host calls it before it creates its window and quits on 0. `T1_MULTI=1` always answers 1.
+#[unsafe(no_mangle)]
+pub extern "C" fn t1_instance_lock() -> i32 { t1_ui::single_instance() as i32 }
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn t1_view_free(v: *mut T1View) { if !v.is_null() { drop(unsafe { Box::from_raw(v) }); } }
 

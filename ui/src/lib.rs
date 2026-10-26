@@ -196,6 +196,16 @@ pub fn saved_window() -> Option<[f32; 4]> {
     Some(w).filter(|w| w.iter().all(|v| v.is_finite()) && w[2] >= 600.0 && w[3] >= 400.0)
 }
 
+/// One Depth per user (`sys::lock_instance`): false when another one runs, after saying so in the
+/// saved language; the caller then exits before it opens a window.
+pub fn single_instance() -> bool {
+    if depth::sys::lock_instance() { return true; }
+    let v: Option<serde_json::Value> = settings_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok());
+    set_lang(v.as_ref().and_then(|v| v["lang"].as_str()).unwrap_or_default());
+    depth::sys::notify(t("run.title"), t("run.body"));
+    false
+}
+
 thread_local! { static DROPPED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
 
 /// A list that keeps the entries that parse (one an older build does not know is dropped, not the list).
