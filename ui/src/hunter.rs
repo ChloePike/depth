@@ -5,7 +5,7 @@
 //! asks for repaints: the scanner does, once per rebuild.
 use super::{hms, kit, t, theme::*, top::{big, signed}};
 use crate::engine::Hunt;
-use depth::hunter::{Alerts, Op, Row, VENUES};
+use depth::hunter::{Alerts, Op, Row, LIQ_VENUES, VENUES};
 use depth::{now_ms, Exchange};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, RichText, Sense, Stroke, Ui};
 use std::cmp::Ordering;
@@ -172,7 +172,7 @@ impl HunterView {
                     Some((ts, None)) if now - ts <= 90_000 => (up(), t("hun.v_ok").replace("{}", &((now - ts) / 1000).to_string())),
                     _ => (dim(), t("hun.v_wait").to_string()),
                 };
-                let note = match e { Exchange::Binance => t("hun.note_binance"), Exchange::Mexc => t("hun.note_mexc"), _ => "" };
+                let note = match e { Exchange::Binance => t("hun.note_binance"), _ if !LIQ_VENUES.contains(&e) => t("hun.note_noliq"), _ => "" };
                 let name = format!("{e:?}");
                 let tip = [name.as_str(), t("hun.venues_tip"), why.as_str(), note].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n");
                 if venue_chip(ui, e, !hide, col).on_hover_text(tip).clicked() {

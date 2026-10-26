@@ -777,7 +777,7 @@ pub struct Hunt {
     pub log: VecDeque<(i64, String, String)>,
     /// per venue: last data (local ms) and the last request's error
     pub venue: HashMap<Exchange, (i64, Option<String>)>,
-    /// the coins on the page's top rows: those still collecting hours get Binance's (`spawn_hunter`)
+    /// the coins on the page's top rows: those still collecting hours get Binance's, all get its OI history (`hunt_binance`)
     pub want: Vec<String>,
 }
 
@@ -3019,13 +3019,13 @@ fn picker_mini(tickers: Arc<Mutex<Vec<Ticker>>>) -> impl std::future::Future<Out
 
 /// The Hunter's REST polls per venue: (payload, every n slots of 15 s). One request per slot, so a
 /// venue never sees two at once nor more than one every 15 s; meta (funding intervals, contract
-/// sizes, TradFi flags) first, then hourly. Perps every 30 s (Hyperliquid 15 s), spot every 60 s, OKX OI and funding every 2 min.
+/// sizes, TradFi flags) first, then hourly. Perps every 30 s (Hyperliquid 15 s), spot every 60 s, OKX OI and funding and MEXC funding every 2 min.
 const HUNT_JOBS: [(Exchange, &[(Src, u32)]); 6] = [
     (Exchange::Bybit, &[(Src::BybitInfo, 240), (Src::BybitPerp, 2), (Src::BybitSpot, 4)]),
     (Exchange::Okx, &[(Src::OkxInfo, 240), (Src::OkxPerp, 2), (Src::OkxOi, 8), (Src::OkxFunding, 8), (Src::OkxSpot, 4)]),
     (Exchange::Bitget, &[(Src::BitgetMeta, 240), (Src::BitgetPerp, 2), (Src::BitgetSpot, 4)]),
     (Exchange::Gate, &[(Src::GateMeta, 240), (Src::GatePerp, 2), (Src::GateSpot, 4)]),
-    (Exchange::Mexc, &[(Src::MexcMeta, 240), (Src::MexcPerp, 2)]),
+    (Exchange::Mexc, &[(Src::MexcMeta, 240), (Src::MexcPerp, 2), (Src::MexcFunding, 8)]),
     (Exchange::Hyperliquid, &[(Src::HlPerp, 1)]),
 ];
 /// Binance perps: all-market mini tickers (price, 24 h volume), mark prices every 3 s (funding;
@@ -3040,7 +3040,8 @@ fn hunt_alive(hunt: &Mutex<Hunt>, ex: Exchange, err: Option<String>) {
 }
 
 /// Starts the scanner on `rt`: one polling task per REST venue (2 s apart), Binance's all-market
-/// streams (they also keep the picker's prices live), OKX's all-swap liquidations, the 5 s
+/// streams (they also keep the picker's prices live), the liquidation feeds of OKX (all swaps), Bybit
+/// (every USDT perp) and Gate (all contracts), Binance's REST extras (`hunt_binance`), the 5 s
 /// rebuild that checks the alert rules, and the operator-type score: each finished hour stored,
 /// scores from the stored hours, and 30 days of Binance 1h klines for top-row coins still
 /// collecting. Venues switched off in the status bar are left out.
@@ -3083,8 +3084,55 @@ fn spawn_hunter(rt: &tokio::runtime::Runtime, off: &std::collections::HashSet<Ex
             for (b, ts, usd) in liqs(Exchange::Okx, &v, &sc.meta) { sc.liq(b, ts, usd); }
         }));
     }
+    if !off.contains(&Exchange::Bybit) {
+        // allLiquidation.<symbol> for every USDT perp on one connection (851 topics in 3 requests of 300 are accepted;
+        // the limit is 21 000 characters of args per request): the symbols come from the ticker payload
+        // the Bybit poll shares, and listings that appear later are subscribed as they show up
+        let known: Arc<Mutex<std::collections::HashSet<String>>> = Default::default();
+        let (tx, rx) = unbounded_channel::<String>();
+        let sub = |c: &[String]| serde_json::json!({"op": "subscribe", "args": c}).to_string();
+        let k = known.clone();
+        let spec = depth::ws::Spec::new("hunter bybit liq", "wss://stream.bybit.com/v5/public/linear").ping(Duration::from_secs(20), r#"{"op":"ping"}"#)
+            .dynamic(move || k.lock().unwrap().iter().cloned().collect::<Vec<_>>().chunks(300).map(sub).collect(), rx);
+        let scan = scan.clone();
+        rt.spawn(depth::ws::run(spec, move |f| {
+            let depth::ws::Frame::Text(s) = f else { return };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else { return };
+            if !v["topic"].as_str().is_some_and(|t| t.starts_with("allLiquidation.")) { return; }
+            let mut sc = scan.lock().unwrap();
+            for (b, ts, usd) in liqs(Exchange::Bybit, &v, &sc.meta) { sc.liq(b, ts, usd); }
+        }));
+        rt.spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(20));
+            loop {
+                tick.tick().await;
+                let Some((_, v)) = peek(Src::BybitPerp.url(), i64::MAX) else { continue };
+                let new: Vec<String> = {
+                    let k = known.lock().unwrap();
+                    v["result"]["list"].as_array().into_iter().flatten().filter_map(|x| x["symbol"].as_str()).filter(|s| s.ends_with("USDT") && !s.contains('-'))
+                        .map(|s| format!("allLiquidation.{s}")).filter(|t| !k.contains(t)).collect()
+                };
+                if new.is_empty() { continue; }
+                known.lock().unwrap().extend(new.iter().cloned());
+                for c in new.chunks(300) { let _ = tx.send(sub(c)); }
+            }
+        });
+    }
+    if !off.contains(&Exchange::Gate) {
+        // every contract: "!all" is accepted on futures.public_liquidates
+        let sub = r#"{"time":0,"channel":"futures.public_liquidates","event":"subscribe","payload":["!all"]}"#;
+        let spec = depth::ws::Spec::new("hunter gate liq", "wss://fx-ws.gateio.ws/v4/ws/usdt").ping(Duration::from_secs(10), r#"{"time":0,"channel":"futures.ping"}"#).sub(sub);
+        let scan = scan.clone();
+        rt.spawn(depth::ws::run(spec, move |f| {
+            let depth::ws::Frame::Text(s) = f else { return };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else { return };
+            if v["channel"] != "futures.public_liquidates" || v["event"] != "update" { return; }
+            let mut sc = scan.lock().unwrap();
+            for (b, ts, usd) in liqs(Exchange::Gate, &v, &sc.meta) { sc.liq(b, ts, usd); }
+        }));
+    }
     // set when the klines bootstrap stored hours: score again
-    let boot = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let boot =Arc::new(std::sync::atomic::AtomicBool::new(false));
     if binance { rt.spawn(hunt_binance(scan.clone(), hunt.clone(), boot.clone())); }
     rt.spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(5));
@@ -3140,10 +3188,12 @@ fn spawn_hunter(rt: &tokio::runtime::Runtime, off: &std::collections::HashSet<Ex
 }
 
 /// The Hunter's own Binance REST calls: one at a time, one request every 2 s at most. Each tick sends
-/// the first that is due: the contract list (its TradFi flags; hourly), or 1h klines of a top-row coin
-/// still collecting hours (each coin once per run).
+/// the first that is due: the contract list (its TradFi flags; hourly), 1h klines of a top-row coin
+/// still collecting hours (each coin once per run), or the 5 min open-interest history of a top-row
+/// coin (about once a minute each; Binance has no all-symbol OI, the other venues' OI comes in bulk).
 async fn hunt_binance(scan: Arc<Mutex<Scan>>, hunt: Arc<Mutex<Hunt>>, boot: Arc<std::sync::atomic::AtomicBool>) {
     let (mut done, mut info_due) = (std::collections::HashSet::new(), std::time::Instant::now());
+    let mut oi_at: HashMap<String, std::time::Instant> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_secs(2));
     loop {
         tick.tick().await;
@@ -3161,11 +3211,24 @@ async fn hunt_binance(scan: Arc<Mutex<Scan>>, hunt: Arc<Mutex<Hunt>>, boot: Arc<
             }
             continue;
         }
-        let next = {
+        let (next, oi) = {
             let h = hunt.lock().unwrap();
-            h.want.iter().find(|b| !done.contains(*b) && h.rows.iter().any(|r| &r.base == *b && r.venues.contains(&Exchange::Binance) && matches!(r.op, Some(Op::Collecting(_))))).cloned()
+            let on_binance = |b: &String| h.rows.iter().any(|r| &r.base == b && r.venues.contains(&Exchange::Binance));
+            let next = h.want.iter().find(|b| !done.contains(*b) && h.rows.iter().any(|r| &r.base == *b && r.venues.contains(&Exchange::Binance) && matches!(r.op, Some(Op::Collecting(_))))).cloned();
+            // the longest unread first (never read: first)
+            let oi = h.want.iter().filter(|b| on_binance(b) && oi_at.get(*b).is_none_or(|t| t.elapsed() >= Duration::from_secs(60))).min_by_key(|b| oi_at.get(*b).copied()).cloned();
+            (next, oi)
         };
-        let Some(b) = next else { continue };
+        let Some(b) = next else {
+            if let Some(b) = oi {
+                oi_at.insert(b.clone(), std::time::Instant::now());
+                match depth::ws::get_json(&format!("https://fapi.binance.com/futures/data/openInterestHist?symbol={b}USDT&period=5m&limit=13")).await {
+                    Ok(v) => scan.lock().unwrap().oi_hist(Exchange::Binance, &b, depth::hunter::oi_points(&v)),
+                    Err(e) => eprintln!("[hunter binance oi {b}] {e:#}"),
+                }
+            }
+            continue;
+        };
         done.insert(b.clone());
         match depth::ws::get_json(&format!("https://fapi.binance.com/fapi/v1/klines?symbol={b}USDT&interval=1h&limit=720")).await {
             Ok(v) => {
@@ -3243,10 +3306,28 @@ mod hunter_live {
         depth::ws::cli_proxy();
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
         let hunt: Arc<Mutex<Hunt>> = Default::default();
-        spawn_hunter(&rt, &Default::default(), Default::default(), hunt.clone(), Default::default(), Default::default(), Default::default());
-        let secs = std::env::var("HUNTER_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(75);
-        std::thread::sleep(Duration::from_secs(secs));
+        let scan: Arc<Mutex<Scan>> = Default::default();
+        spawn_hunter(&rt, &Default::default(), scan.clone(), hunt.clone(), Default::default(), Default::default(), Default::default());
+        let secs: u64 = std::env::var("HUNTER_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(75);
+        // halfway the page would have sent its top rows: Binance's OI history is read for those
+        std::thread::sleep(Duration::from_secs(secs / 2));
+        {
+            let mut h = hunt.lock().unwrap();
+            let mut r: Vec<&Row> = h.rows.iter().filter(|r| r.venues.contains(&Exchange::Binance)).collect();
+            r.sort_by(|a, b| b.vol24.total_cmp(&a.vol24));
+            let want = r.iter().take(10).map(|r| r.base.clone()).collect();
+            h.want = want;
+        }
+        std::thread::sleep(Duration::from_secs(secs - secs / 2));
         let h = hunt.lock().unwrap();
+        {
+            let sc = scan.lock().unwrap();
+            println!("TradFi flagged: {} bases; rows named like one: {:?}", sc.meta.tradfi.len(), h.rows.iter().filter(|r| sc.meta.tradfi.contains(&r.base)).map(|r| &r.base).collect::<Vec<_>>());
+        }
+        let liq: Vec<f64> = h.rows.iter().filter_map(|r| r.liq15).collect();
+        println!("liq15: {} rows with a feed, {} above 0, {:.0} USD in all; funding most extreme on MEXC for {} rows", liq.len(), liq.iter().filter(|x| **x > 0.0).count(), liq.iter().sum::<f64>(),
+            h.rows.iter().filter(|r| r.fund.is_some_and(|f| f.0 == Exchange::Mexc)).count());
+        println!("OI 1h known for {} rows; top-10 by volume with Binance: {:?}", h.rows.iter().filter(|r| r.oi_chg[1].is_some()).count(), h.want);
         let mut v: Vec<_> = h.venue.iter().collect();
         v.sort_by_key(|x| *x.0);
         for (e, (at, err)) in v { println!("{e:?}: last data {}s ago{}", (now_ms() - at) / 1000, err.as_ref().map(|e| format!(", last error: {e}")).unwrap_or_default()); }

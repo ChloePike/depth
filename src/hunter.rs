@@ -12,8 +12,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 /// The venues scanned: REST all-ticker polls, Binance over its all-market streams.
 pub const VENUES: [Exchange; 7] = [Exchange::Binance, Exchange::Bybit, Exchange::Okx, Exchange::Bitget, Exchange::Gate, Exchange::Mexc, Exchange::Hyperliquid];
-/// Venues with an all-market liquidation feed (Binance's is one snapshot per symbol per second).
-pub const LIQ_VENUES: [Exchange; 2] = [Exchange::Binance, Exchange::Okx];
+/// Venues with a public liquidation feed the scanner reads (Binance's is one snapshot per symbol per
+/// second). Bitget, MEXC and Hyperliquid publish none.
+pub const LIQ_VENUES: [Exchange; 4] = [Exchange::Binance, Exchange::Okx, Exchange::Bybit, Exchange::Gate];
 /// venues whose spot is scanned: the perp / spot turnover ratio compares these only
 pub const SPOT_VENUES: [Exchange; 5] = [Exchange::Binance, Exchange::Bybit, Exchange::Okx, Exchange::Bitget, Exchange::Gate];
 
@@ -75,7 +76,9 @@ impl Meta {
     }
 }
 
-struct Venue { ex: Exchange, spot: bool, s: VecDeque<Sample>, qvol: f64, bvol: f64, oi: f64, fund: Option<f64> }
+struct Venue { ex: Exchange, spot: bool, s: VecDeque<Sample>, qvol: f64, bvol: f64, oi: f64, fund: Option<f64>,
+    /// the venue's own OI history (ms, base units, oldest first) where it has no all-symbol OI (`Scan::oi_hist`)
+    oih: Vec<(i64, f64)> }
 
 impl Venue {
     fn push(&mut self, x: Sample) {
@@ -96,6 +99,21 @@ fn at(s: &VecDeque<Sample>, t: i64) -> Option<Sample> {
     let k = (t - a.ts) as f64 / (b.ts - a.ts) as f64;
     let mix = |x: f32, y: f32| if x > 0.0 && y > 0.0 { x + (y - x) * k as f32 } else { 0.0 };
     Some(Sample { ts: t, px: a.px + (b.px - a.px) * k, bvol: mix(a.bvol, b.bvol), oi: mix(a.oi, b.oi) })
+}
+
+/// a venue's OI history older than this (newest point) is not used
+const OIH_MAX_AGE: i64 = 15 * MIN;
+
+/// The history point nearest `t`, within half of Binance's 5 min step.
+fn oih_at(p: &[(i64, f64)], t: i64) -> Option<f64> {
+    p.iter().min_by_key(|x| (x.0 - t).abs()).filter(|x| (x.0 - t).abs() <= 150_000 && x.1 > 0.0).map(|x| x.1)
+}
+
+/// Binance `futures/data/openInterestHist` rows ({sumOpenInterest (base units), timestamp}) as (ms, OI), oldest first.
+pub fn oi_points(v: &Value) -> Vec<(i64, f64)> {
+    let mut p: Vec<(i64, f64)> = arr(v).iter().filter_map(|x| Some((x["timestamp"].as_i64()?, num(&x["sumOpenInterest"])))).filter(|x| x.1 > 0.0 && x.1.is_finite()).collect();
+    p.sort_by_key(|x| x.0);
+    p
 }
 
 fn median(mut v: Vec<f64>) -> Option<f64> {
@@ -163,7 +181,7 @@ impl Scan {
             if self.meta.tradfi.contains(&t.base) || (t.spot && !self.coins.contains_key(&t.base)) { continue; }
             let vs = self.coins.entry(t.base).or_default();
             let i = vs.iter().position(|v| v.ex == t.ex && v.spot == t.spot).unwrap_or_else(|| {
-                vs.push(Venue { ex: t.ex, spot: t.spot, s: VecDeque::new(), qvol: 0.0, bvol: 0.0, oi: 0.0, fund: None });
+                vs.push(Venue { ex: t.ex, spot: t.spot, s: VecDeque::new(), qvol: 0.0, bvol: 0.0, oi: 0.0, fund: None, oih: vec![] });
                 vs.len() - 1
             });
             let v = &mut vs[i];
@@ -174,6 +192,11 @@ impl Scan {
             if let Some(x) = t.fund.filter(|x| x.is_finite()) { v.fund = Some(x); }
             if t.px > 0.0 && t.px.is_finite() { let (bvol, oi) = (v.bvol as f32, v.oi as f32); v.push(Sample { ts, px: t.px, bvol, oi }); }
         }
+    }
+
+    /// `ex`'s perp open-interest history of `base` (`oi_points`), for venues with no all-symbol OI.
+    pub fn oi_hist(&mut self, ex: Exchange, base: &str, pts: Vec<(i64, f64)>) {
+        if let Some(v) = self.coins.get_mut(base).and_then(|vs| vs.iter_mut().find(|v| v.ex == ex && !v.spot)) { v.oih = pts; }
     }
 
     /// A liquidation of `usd` on `base` at `ts`.
@@ -229,8 +252,11 @@ fn row(base: &str, vs: &[Venue], liq: Option<&VecDeque<(i64, f64)>>, now: i64) -
     let vmult = (d > 0.0).then(|| n / d);
     let oi_chg = [15 * MIN, 60 * MIN].map(|w| {
         let (mut a, mut b) = (0.0, 0.0);
-        for (v, last) in perps.iter().filter(|x| x.1.oi > 0.0) {
-            if let Some(t) = at(&v.s, last.ts - w).filter(|t| t.oi > 0.0) { a += last.oi as f64; b += t.oi as f64; }
+        for (v, last) in &perps {
+            // a venue's own history (Binance) is read between its points, the newest up to ~10 min old; the others between samples
+            let hist = v.oih.last().filter(|p| now - p.0 <= OIH_MAX_AGE).and_then(|p| Some((p.1, oih_at(&v.oih, p.0 - w)?)));
+            let samp = || at(&v.s, last.ts - w).filter(|t| t.oi > 0.0 && last.oi > 0.0).map(|t| (last.oi as f64, t.oi as f64));
+            if let Some((x, y)) = hist.or_else(samp) { a += x; b += y; }
         }
         (b > 0.0).then(|| (a / b - 1.0) * 100.0)
     });
@@ -449,6 +475,8 @@ pub fn check<'a>(a: &Alerts, rows: &'a [Row], now: i64, last: &mut HashMap<Strin
 pub enum Src { BybitPerp, BybitSpot, OkxPerp, OkxSpot, OkxOi, OkxFunding, BitgetMeta, BitgetPerp, BitgetSpot, GateMeta, GatePerp, GateSpot, MexcMeta, MexcPerp, HlPerp,
     /// the picker's Binance spot poll (24 h MINI); Binance perps come over the all-market streams
     BinanceSpot, BinanceMini, BinanceMark,
+    /// MEXC's funding of every contract: rate and interval (`collectCycle`) together
+    MexcFunding,
     /// contract lists read for their TradFi flags only (hourly)
     BinanceInfo, BybitInfo, OkxInfo }
 
@@ -470,6 +498,7 @@ impl Src {
             Src::GateSpot => "https://api.gateio.ws/api/v4/spot/tickers",
             Src::MexcMeta => "https://contract.mexc.com/api/v1/contract/detail",
             Src::MexcPerp => "https://contract.mexc.com/api/v1/contract/ticker",
+            Src::MexcFunding => "https://contract.mexc.com/api/v1/contract/funding_rate",
             Src::HlPerp => "https://api.hyperliquid.xyz/info",
             Src::BinanceSpot => "https://api.binance.com/api/v3/ticker/24hr?type=MINI",
             Src::BinanceMini | Src::BinanceMark => "",
@@ -577,8 +606,10 @@ pub fn parse(src: Src, v: &Value, meta: &mut Meta) -> Vec<Tick> {
                 meta.listed_at(perp_base(E::Mexc, s("symbol").strip_suffix("_USDT")), f("createTime"));
                 None
             }
-            // sizes are contracts: nothing until the contract sizes are known. Funding: MEXC's
-            // interval is not in its all-symbol data (one request per symbol), so none
+            // funding: `fundingRate` per `collectCycle` hours (1, 4, 8 or 24 exist), no rate without its interval
+            MexcFunding => perp_base(E::Mexc, s("symbol").strip_suffix("_USDT")).map(|b| Tick {
+                fund: f("fundingRate").zip(f("collectCycle").filter(|h| *h > 0.0)).map(|(r, h)| r / h), ..tick(E::Mexc, false, b) }),
+            // sizes are contracts: nothing until the contract sizes are known (funding: MexcFunding)
             MexcPerp => meta.size.get(&(E::Mexc, s("symbol").to_string())).copied().and_then(|cs| perp_base(E::Mexc, s("symbol").strip_suffix("_USDT")).map(|b| Tick {
                 px: f("lastPrice").unwrap_or(0.0), qvol: f("amount24"), bvol: f("volume24").map(|v| v * cs), oi: f("holdVol").map(|v| v * cs), ..tick(E::Mexc, false, b) })),
             BinanceSpot => spot_base(s("symbol").strip_suffix("USDT")).map(|b| Tick { px: f("lastPrice").unwrap_or(0.0), qvol: f("quoteVolume"), bvol: f("volume"), ..tick(E::Binance, true, b) }),
@@ -600,11 +631,23 @@ fn hl(v: &Value) -> Vec<Tick> {
     }).collect()
 }
 
-/// Liquidations in one all-market liquidation frame: (base, ms, USD). Binance `!forceOrder@arr`
-/// data; OKX `liquidation-orders` (contracts, sized from the OI payload's contract value).
+/// Liquidations in one liquidation frame: (base, ms, USD). Binance `!forceOrder@arr` data; OKX
+/// `liquidation-orders` (contracts, sized from the OI payload's contract value); Bybit
+/// `allLiquidation.<symbol>` (base units, at the bankruptcy price); Gate `futures.public_liquidates`
+/// (signed contracts, sized from the contract list).
 pub fn liqs(ex: Exchange, v: &Value, meta: &Meta) -> Vec<(String, i64, f64)> {
     let mut out = vec![];
     match ex {
+        Exchange::Bybit => for d in arr(&v["data"]) {
+            if let Some(b) = perp_base(ex, d["s"].as_str().and_then(|s| s.strip_suffix("USDT"))) { out.push((b, d["T"].as_i64().unwrap_or(0), num(&d["v"]) * num(&d["p"]))); }
+        },
+        Exchange::Gate => for d in arr(&v["result"]) {
+            let c = d["contract"].as_str().unwrap_or_default();
+            let (Some(b), Some(m)) = (perp_base(ex, c.strip_suffix("_USDT")), meta.size.get(&(ex, c.to_string()))) else { continue };
+            // `time` is in ms on the wire today; seconds are read too
+            let t = d["time"].as_i64().unwrap_or(0);
+            out.push((b, if t < 100_000_000_000 { t * 1000 } else { t }, num(&d["size"]).abs() * m * num(&d["price"])));
+        },
         Exchange::Binance => {
             let o = &v["o"];
             if let Some(b) = perp_base(ex, o["s"].as_str().and_then(|s| s.strip_suffix("USDT"))) { out.push((b, o["T"].as_i64().unwrap_or(0), num(&o["ap"]) * num(&o["q"]))); }
@@ -695,8 +738,8 @@ mod tests {
         assert!((r.vmult.unwrap() - (1.0 + 2000.0 * 96.0 / 98_000.0)).abs() < 1e-3, "{:?}", r.vmult);
         let oi1h = r.oi_chg[1].unwrap();
         assert!((oi1h - 100.0 * (1.2 / (1.0 + 0.2 / 61.0) - 1.0)).abs() < 0.5, "{oi1h}");
-        // only the liquidation inside 15 min; OKX lists it (spot), but no listing perp venue has a feed
-        assert_eq!(r.liq15, None);
+        // only the liquidation inside 15 min (Bybit and Gate both have a feed)
+        assert_eq!(r.liq15, Some(5e5));
         // Gate perp 0.1% over the Okx spot = 0.2% = 20 bp; spot vs spot never counts
         let g = r.gap.unwrap();
         assert!((g.bp - 20.0).abs() < 0.5 && g.hi == (E::Gate, false) && g.lo == (E::Okx, true), "{g:?}");
@@ -709,8 +752,37 @@ mod tests {
     #[test]
     fn liquidations_count_where_a_feed_exists() {
         let (mut s, now) = scan();
+        // Bitget, MEXC and Hyperliquid publish no liquidations: no figure (not zero) for a coin only they list
+        s.ingest(now, vec![t(E::Bitget, false, "QUIET", 1.0, 1e6, 0.0), t(E::Hyperliquid, false, "QUIET", 1.0, 1e6, 0.0)]);
+        let rows = s.rows(now);
+        let liq = |b: &str| rows.iter().find(|r| r.base == b).unwrap().liq15;
+        assert_eq!((liq("PUMP"), liq("QUIET")), (Some(5e5), None));
+    }
+
+    /// Binance has no all-symbol OI: its 5 min history (13 points, the last two minutes old) joins
+    /// the sampled venues' sums, each venue measured against its own earlier value.
+    #[test]
+    fn open_interest_history_joins_the_sum() {
+        let (mut s, now) = scan();
         s.ingest(now, vec![t(E::Binance, false, "PUMP", 2.2, 96_000.0, 0.0)]);
-        assert_eq!(s.rows(now)[0].liq15, Some(5e5));
+        let own = s.rows(now)[0].oi_chg;
+        // no history yet: Bybit and Gate alone
+        assert!((own[1].unwrap() - 100.0 * (1.2 / (1.0 + 0.2 / 61.0) - 1.0)).abs() < 0.5);
+        let pts: Vec<(i64, f64)> = (0..13).map(|k| (now - 2 * MIN - (12 - k) * 5 * MIN, 2000.0 + 100.0 * k as f64)).collect();
+        s.oi_hist(E::Binance, "PUMP", pts);
+        // another venue's history is never attached to a coin it does not list
+        s.oi_hist(E::Binance, "NOPE", vec![(now, 1.0)]);
+        let r = s.rows(now).pop().unwrap();
+        let (b1h, b15) = (1000.0 * (1.0 + 0.2 / 61.0), 1000.0 * (1.0 + 0.2 * 46.0 / 61.0));
+        let want = [(2.0 * 1200.0 + 3200.0) / (2.0 * b15 + 2900.0), (2.0 * 1200.0 + 3200.0) / (2.0 * b1h + 2000.0)].map(|x| (x - 1.0) * 100.0);
+        // samples hold OI as f32
+        assert!((r.oi_chg[0].unwrap() - want[0]).abs() < 1e-4 && (r.oi_chg[1].unwrap() - want[1]).abs() < 1e-4, "{:?} {want:?}", r.oi_chg);
+        // a history that stopped coming (newest point over 15 min old) drops out
+        let old: Vec<(i64, f64)> = (0..13).map(|k| (now - 20 * MIN - (12 - k) * 5 * MIN, 2000.0)).collect();
+        s.oi_hist(E::Binance, "PUMP", old);
+        assert!((s.rows(now)[0].oi_chg[1].unwrap() - own[1].unwrap()).abs() < 1e-9);
+        let p = oi_points(&json!([{"sumOpenInterest": "93699.12", "timestamp": 2}, {"sumOpenInterest": "0", "timestamp": 1}, {"sumOpenInterest": "5.5", "timestamp": 0}]));
+        assert_eq!(p, vec![(0, 5.5), (2, 93699.12)]);
     }
 
     #[test]
@@ -893,7 +965,10 @@ mod tests {
         let x = one(Src::GateSpot, json!([{"currency_pair": "BTC_USDT", "last": "80300", "base_volume": "1", "quote_volume": "80300"}, {"currency_pair": "BTC_USDC", "last": "80300"}]), &mut m);
         assert!(x.spot && x.base == "BTC");
 
-        // MEXC: nothing before the contract sizes; funding never (interval not in the all-symbol data)
+        // MEXC: nothing before the contract sizes; funding comes with its own interval (hours), none without one
+        let f = parse(Src::MexcFunding, &json!({"data": [{"symbol": "BTC_USDT", "fundingRate": 0.000079, "collectCycle": 8}, {"symbol": "XAU_USDT", "fundingRate": 0.000029, "collectCycle": 4},
+            {"symbol": "ODD_USDT", "fundingRate": 0.001}, {"symbol": "BTC_USDC", "fundingRate": 0.1, "collectCycle": 8}]}), &mut m);
+        assert_eq!(f.iter().map(|t| (t.base.as_str(), t.fund)).collect::<Vec<_>>(), vec![("BTC", Some(0.000079 / 8.0)), ("XAU", Some(0.000029 / 4.0)), ("ODD", None)]);
         let mexc = json!({"data": [{"symbol": "BTC_USDT", "lastPrice": 80325.3, "volume24": 274644274, "amount24": 2202578850.54, "holdVol": 534683085, "fundingRate": 8.7e-05}]});
         assert!(parse(Src::MexcPerp, &mexc, &mut m).is_empty());
         parse(Src::MexcMeta, &json!({"data": [{"symbol": "BTC_USDT", "contractSize": 0.0001, "createTime": 1591242684000i64}]}), &mut m);
@@ -921,5 +996,13 @@ mod tests {
         assert!(x.spot && x.px == 80310.0);
         let l = liqs(E::Binance, &json!({"e": "forceOrder", "o": {"s": "BTCUSDT", "S": "SELL", "q": "0.5", "ap": "80000", "T": 1793015422591i64}}), &m);
         assert_eq!(l, vec![("BTC".to_string(), 1793015422591, 40000.0)]);
+        // Bybit: base units at the bankruptcy price, USDT perps only
+        let l = liqs(E::Bybit, &json!({"topic": "allLiquidation.ARBUSDT", "type": "snapshot", "data": [{"T": 1793019741489i64, "s": "ARBUSDT", "S": "Buy", "v": "9581.4", "p": "0.16857"},
+            {"T": 1793019741490i64, "s": "ARBUSDC", "S": "Buy", "v": "1", "p": "1"}]}), &m);
+        assert!(l.len() == 1 && l[0].0 == "ARB" && l[0].1 == 1793019741489 && (l[0].2 - 1615.1).abs() < 0.1, "{l:?}");
+        // Gate: signed contracts x multiplier (BTC_USDT: 0.0001 from the contract list) x price; size 0 and unlisted contracts give none
+        let l = liqs(E::Gate, &json!({"channel": "futures.public_liquidates", "event": "update", "result": [{"contract": "BTC_USDT", "price": "79973.7", "time": 1793019693243i64, "size": -1000},
+            {"contract": "BTC_USDT", "price": "79973.7", "time": 1793019693244i64, "size": 0}, {"contract": "NEW_USDT", "price": "1", "time": 1793019693245i64, "size": -5}]}), &m);
+        assert!(l.len() == 1 && l[0].0 == "BTC" && l[0].1 == 1793019693243 && (l[0].2 - 7997.37).abs() < 1e-6, "{l:?}");
     }
 }
