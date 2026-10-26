@@ -37,11 +37,19 @@ volume spikes, liquidation cascades, OI vs price divergence, crowded funding, sp
 basis extremes, whale prints, cross-venue dislocations; EWMA volatility forecast, book/flow
 pressure, carry table.
 
+**Hunter**: a page that scans every perp and spot market of Binance, Bybit, OKX, Bitget, Gate, MEXC and
+Hyperliquid at once for operator-run alts: 15m / 1h moves, volume multiple, the most extreme funding, OI change,
+liquidations, the largest cross-venue spot / perp gap, and an operator-type score from 30 days of hourly bars (it
+names the kind of coin, not when it moves). Majors and tokenized stocks / commodities are left out; alerts land in
+the page's log, system notifications only if you turn them on.
+
 **Trading** (Bybit and Binance verified on live accounts; OKX, Bitget, Gate, Kraken, Hyperliquid
 and Lighter implemented and marked untested): limit / market / post-only / BBO orders, smart order
 routing across venues, whole-position and staged TP/SL, close / reverse / close-all, positions with
 funding estimates and funding paid since open, account-wide liquidation estimates for unified /
 portfolio-margin accounts, order / trade / position history, wallets and transfers between a venue's accounts.
+Open orders edit in place (price, size or value), TP / SL typed as a price or as PnL % (ROE), pre-trade risk
+limits, a daily loss stop and a kill switch, and a demo account that trades every venue's live book without keys.
 Options on Bybit and Deribit (coin-settled BTC / ETH; both marked untested): limit orders from the chain and
 position insurance bought on the venue's real asks, held options with greeks.
 Private data arrives over WebSocket pushes, never REST polling.

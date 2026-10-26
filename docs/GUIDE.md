@@ -117,6 +117,24 @@ perp flow, basis extremes, whale prints, venues trading away from the index. Thr
 coin's own history; a kind repeats at most every 10 minutes unless it gets stronger. They describe what
 is happening; they are not trade recommendations.
 
+**Hunter page** (the *Hunter* pill after *Options*): every perp and spot market of Binance, Bybit, OKX,
+Bitget, Gate, MEXC and Hyperliquid in one table, one row per coin.
+- Columns: operator score, 15m and 1h change, volume multiple (last 15 minutes against the day's rate),
+  the most extreme hourly funding and its venue, OI change over 1h, the largest cross-venue gap (S spot,
+  P perp, both venues) and 24h volume. Hover a row for 5m change, OI 15m, liquidations, which venue
+  moved first and the venue list. 15m / 1h fill in once the page has run that long.
+- **Operator score** (0-100): six traits of documented operator coins over the last 30 days of hourly
+  bars (frequent 20x volume hours, two-sided wicks, 20% days, a recent listing, perp turnover over 30x
+  spot or no spot, a 7-day run-up over 100%). It needs 7 days of hours (*collecting n/7* until then; the
+  hours are fetched from Binance / Bybit at start, then recorded). It says what kind of coin it is,
+  never when it moves; the weights are not calibrated yet.
+- Filters: minimum 24h volume, venues, *Majors* (hidden by default), text, *Operator ≥*. Tokenized
+  stocks, commodities and currencies are always left out. Click a row to open the coin in Perpetual on
+  5-minute bars with the OI and funding panes.
+- Alerts (right column): 5m move, volume multiple, negative funding, cross-venue gap (both legs trading
+  over $1M a day, seen twice in a row). They go to the alert log; click a line to open the coin. System
+  notifications are off unless *Settings → General → Hunter system notifications* is on.
+
 ## 6. Connecting an exchange account
 
 Settings → **API Keys**. Keys are stored in the system keychain (macOS Keychain, Windows Credential
@@ -149,7 +167,9 @@ minimum size.
 3. Price typed, clicked from a single-venue book, or **BBO**: the venue prices the order on arrival at
    the opposite side (*Counterparty*) or your own side (*Queue*), level 1 / 5 / …
 4. Size in the coin, or the slider (100% = available margin × leverage).
-5. Optional TP / SL, applied to the position once the order fills.
+5. Optional TP / SL, applied to the position once the order fills. **⇄** beside each field switches
+   between a price and **PnL %** (ROE: PnL over initial margin, at this order's price and leverage); the
+   resulting price shows under the field and is what gets sent.
 6. Under the buttons, per side: **Est. liq. price**, **Margin**, **Max open**, then maker and taker fee
    rates, order value and fee.
    - Isolated / ordinary accounts: estimate at this leverage with a 0.5% maintenance rate.
@@ -161,6 +181,17 @@ minimum size.
 Orders are always priced from the chosen venue's own book in its own quote, never from the composite
 index. Markets a venue lists under another name (section 2) are not tradable from Depth yet: the order
 is refused instead of going to the wrong instrument.
+
+**Open orders**: click an order's price, size (the whole order, its filled part included) or value,
+type, Enter. Bybit and Binance perps amend the order in place (same id); elsewhere Depth cancels it and,
+once the cancel succeeded, places the rest at the new terms. Changes are checked against the venue's tick,
+step and minimums and your risk limits first, and shown in the confirmation.
+
+**Risk limits and kill switch** (Settings → Trading → *Risk limits*): maximum order value, a price band
+around the venue's own mark, a position limit per coin and a daily loss stop (after it, only closes until
+local midnight), checked before every perp order Depth sends; closes are never blocked. The red *Kill*
+button in the account strip (or its hotkey) cancels every order, TP / SL and algorithm on every venue
+with keys and closes every position, after one confirmation.
 
 **Smart routing** (Settings → Trading): splits a large order across venues by their own books and fees
 within your slippage and split limits; *Fixed* sends everything to one venue.

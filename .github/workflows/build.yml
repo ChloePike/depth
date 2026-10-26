@@ -105,6 +105,8 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          # a release created first with its notes keeps them: this table goes underneath
+          append_body: true
           body: |
             | File | App | OS |
             |---|---|---|
