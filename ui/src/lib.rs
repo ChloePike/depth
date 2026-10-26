@@ -271,6 +271,20 @@ impl Doc {
     }
 }
 
+/// settings.json as text plus whether it exists but could not be read. A file that is not UTF-8
+/// (UTF-16 from a Windows editor) comes through lossy, which `load_settings` flags.
+fn read_settings(p: &std::path::Path) -> (String, bool) {
+    match std::fs::read(p) {
+        Ok(b) => (String::from_utf8_lossy(&b).into_owned(), false),
+        Err(e) => (String::new(), e.kind() != std::io::ErrorKind::NotFound),
+    }
+}
+
+/// Copy settings.json to settings.json.<ext>; false (said on stderr) when the copy failed.
+fn keep_copy(p: &std::path::Path, ext: &str) -> bool {
+    std::fs::copy(p, p.with_extension(format!("json.{ext}"))).map_err(|e| eprintln!("[settings] cannot keep a copy of {} as .{ext}: {e}", p.display())).is_ok()
+}
+
 fn load_settings(text: &str) -> (Settings, bool) {
     DROPPED.with(|c| c.set(0));
     let v: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
@@ -303,6 +317,8 @@ pub struct App {
     pop: Option<(egui::Pos2, bool)>,
     /// last settings JSON written, and when it was last checked
     saved: (String, Instant),
+    /// settings.json exists but could not be read at start: nothing is saved until it reads
+    unreadable: bool,
     /// own window's position and size [x, y, w, h] (not hosted; kept while maximized / full screen)
     window: Option<[f32; 4]>,
     mode: Market,
@@ -386,10 +402,10 @@ impl App {
             subsecond::register_handler(std::sync::Arc::new(move || c.request_repaint()));
         }
         let env = |k: &str| std::env::var(k).ok();
-        let saved = settings_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+        let (saved, unreadable) = settings_path().map_or((String::new(), false), |p| read_settings(&p));
         let (st, lossy) = load_settings(&saved);
         // part of the file was dropped (or is newer than this build): keep a copy before the first save rewrites it
-        if lossy && let Some(p) = settings_path() && std::fs::copy(&p, p.with_extension("json.bad")).is_ok() { eprintln!("[settings] original kept in {}.bad", p.display()); }
+        if (lossy || unreadable) && let Some(p) = settings_path() && keep_copy(&p, "bad") { eprintln!("[settings] original kept in {}.bad", p.display()); }
         set_lang(&env("T1_LANG").or(st.lang.clone()).unwrap_or_default());
         let prefs = st.prefs.clone().unwrap_or_default();
         prefs.apply(&cc.egui_ctx);
@@ -422,7 +438,7 @@ impl App {
         if let Some(tf) = env("T1_TF").and_then(|s| s.parse().ok()) { chart.tf = tf; }
         let layout = env("T1_LAYOUT").or(st.layout).unwrap_or_else(|| "1".into());
         App {
-            eng, prefs, settings: Default::default(), command: Default::default(), back: None, help: false, kbd: kbd::Kbd::start(), tray: None, pop: None, saved: (saved, Instant::now()), window: st.window, mode, chart, book, opt: Default::default(), picker, trade, spot: Default::default(),
+            eng, prefs, settings: Default::default(), command: Default::default(), back: None, help: false, kbd: kbd::Kbd::start(), tray: None, pop: None, saved: (saved, Instant::now()), unreadable, window: st.window, mode, chart, book, opt: Default::default(), picker, trade, spot: Default::default(),
             rate: (Instant::now(), 0, 0.0),
             shot: env("T1_SHOT").map(|p| (p, env("T1_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(30.0))),
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
@@ -867,6 +883,11 @@ impl App {
         let Ok(json) = serde_json::to_string_pretty(&s) else { return };
         if json == self.saved.0 { return; }
         let Some(p) = settings_path() else { return };
+        // saving now would replace the real file with defaults: wait until it reads, and keep it as .bad first
+        if self.unreadable {
+            if !(std::fs::read(&p).is_ok() && keep_copy(&p, "bad")) { return; }
+            self.unreadable = false;
+        }
         let tmp = p.with_extension("json.tmp");
         let ok = p.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::write(&tmp, &json).is_ok() && std::fs::rename(&tmp, &p).is_ok();
         if ok { self.saved.0 = json; } else { eprintln!("settings: cannot write {}", p.display()); }
@@ -1381,5 +1402,23 @@ mod tests {
         // a key only a newer build writes, broken JSON: flagged; no file yet: not
         assert!(load_settings(r#"{"base": "BTC", "from_the_future": 1}"#).1 && load_settings("{oops").1);
         assert!(!load_settings("").1);
+    }
+
+    #[test]
+    fn settings_file_is_never_read_as_empty() {
+        let dir = std::env::temp_dir().join(format!("depth-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("settings.json");
+        assert_eq!(read_settings(&p), (String::new(), false));
+        // UTF-16 from a Windows editor is not UTF-8: it reads lossy and is flagged, not taken for "no file"
+        let utf16: Vec<u8> = "{\"base\": \"ETH\"}".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        std::fs::write(&p, &utf16).unwrap();
+        let (text, unreadable) = read_settings(&p);
+        assert!(!unreadable && !text.is_empty() && load_settings(&text).1);
+        assert!(keep_copy(&p, "bad") && std::fs::read(dir.join("settings.json.bad")).unwrap() == utf16);
+        // exists but cannot be read (a folder here): flagged; a copy that fails says so
+        assert_eq!(read_settings(&dir), (String::new(), true));
+        assert!(!keep_copy(&dir.join("nope.json"), "bad"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
