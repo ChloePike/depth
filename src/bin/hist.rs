@@ -1,4 +1,4 @@
-//! History check: `hist <exchange> <spot|margin|perp> <base> [quote=USDT] [minutes=1000]`.
+//! History check: `hist <exchange> <spot|margin|perp> <base> [quote=USDT] [bars=1000] [tf minutes=1] [before=<ms>]`.
 //! Fetches the startup REST history and validates it. Non-zero exit on failure.
 use depth::*;
 
@@ -6,7 +6,7 @@ use depth::*;
 async fn main() {
     depth::ws::cli_proxy();
     let a: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: hist <exchange> <spot|margin|perp> <base> [quote=USDT] [bars=1000] [tf minutes=1]";
+    let usage = "usage: hist <exchange> <spot|margin|perp> <base> [quote=USDT] [bars=1000] [tf minutes=1] [before=<ms>]";
     let ex = a.first().and_then(|s| Exchange::parse(s)).expect(usage);
     let market = a.get(1).and_then(|s| Market::parse(s)).expect(usage);
     let base = a.get(2).expect(usage).to_uppercase();
@@ -14,9 +14,11 @@ async fn main() {
     let minutes: usize = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(1000);
     let tf: u32 = a.get(5).and_then(|s| s.parse().ok()).unwrap_or(1);
     let step = tf as i64 * 60_000;
+    // an older page: the bars ending at this time (the scroll-back fetch)
+    let until: Option<i64> = a.get(6).and_then(|s| s.strip_prefix("before=").unwrap_or(s).parse().ok());
 
     let t0 = std::time::Instant::now();
-    let h = match ex::history_tf(ex, &Sub { market, base, quote }, tf, minutes).await {
+    let h = match ex::history_until(ex, &Sub { market, base, quote }, tf, minutes, until).await {
         Ok(h) => h,
         Err(e) => { println!("FAIL history error: {e:#}"); std::process::exit(1) }
     };
@@ -34,7 +36,7 @@ async fn main() {
         println!("klines   {:>5}  {} .. {}  gaps {gaps}  with taker-buy {with_buy}", k.len(), age(f.t), age(l.t));
         println!("         last {:?}", l);
         if k.windows(2).any(|w| w[1].t <= w[0].t) { bad.push("klines not strictly ascending".into()); }
-        if now - l.t > step + 2 * 60_000 { bad.push(format!("last kline is {} old", age(l.t))); }
+        if until.is_none() && now - l.t > step + 2 * 60_000 { bad.push(format!("last kline is {} old", age(l.t))); }
         if k.len() < minutes * 9 / 10 && market != Market::Option { bad.push(format!("only {} klines for {minutes} requested", k.len())); }
         if k.iter().any(|x| !(x.l <= x.o.min(x.c) && x.h >= x.o.max(x.c) && x.l > 0.0 && x.vol >= 0.0)) { bad.push("kline with invalid OHLC/volume".into()); }
         if k.iter().any(|x| x.buy.is_some_and(|b| b < 0.0 || b > x.vol * 1.0001)) { bad.push("taker-buy outside 0..vol".into()); }

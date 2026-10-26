@@ -58,19 +58,23 @@ pub async fn history(ex: Exchange, sub: &Sub, minutes: usize) -> anyhow::Result<
 
 /// Recent REST history at `tf`-minute resolution (`bars` candles), for chart timeframes above 1m.
 /// OI / long-short / taker series use the venue's closest period not finer than needed.
-pub async fn history_tf(ex: Exchange, sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<History> {
+pub async fn history_tf(ex: Exchange, sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<History> { history_until(ex, sub, tf, bars, None).await }
+
+/// `history_tf` for the `bars` candles ending at the one containing `until` ms (None = now): the page
+/// before data already loaded. A venue that cannot reach that far back returns less, or nothing.
+pub async fn history_until(ex: Exchange, sub: &Sub, tf: u32, bars: usize, until: Option<i64>) -> anyhow::Result<History> {
     let Some(sub) = &venue_sub(ex, sub) else { return Ok(History::default()) };
     match ex {
-        Exchange::Binance => binance::history_tf(sub, tf, bars).await,
-        Exchange::Bybit => bybit::history_tf(sub, tf, bars).await,
-        Exchange::Bitget => bitget::history_tf(sub, tf, bars).await,
-        Exchange::Okx => okx::history_tf(sub, tf, bars).await,
-        Exchange::Mexc => mexc::history_tf(sub, tf, bars).await,
-        Exchange::Coinbase => coinbase::history_tf(sub, tf, bars).await,
-        Exchange::Kraken => kraken::history_tf(sub, tf, bars).await,
-        Exchange::Gate => gate::history_tf(sub, tf, bars).await,
-        Exchange::Hyperliquid => hyperliquid::history_tf(sub, tf, bars).await,
-        Exchange::Lighter => lighter::history_tf(sub, tf, bars).await,
-        Exchange::Deribit => deribit::history_tf(sub, tf, bars).await,
+        Exchange::Binance => binance::history_until(sub, tf, bars, until).await,
+        Exchange::Bybit => bybit::history_until(sub, tf, bars, until).await,
+        Exchange::Bitget => bitget::history_until(sub, tf, bars, until).await,
+        Exchange::Okx => okx::history_until(sub, tf, bars, until).await,
+        Exchange::Mexc => mexc::history_until(sub, tf, bars, until).await,
+        Exchange::Coinbase => coinbase::history_until(sub, tf, bars, until).await,
+        Exchange::Kraken => kraken::history_until(sub, tf, bars, until).await,
+        Exchange::Gate => gate::history_until(sub, tf, bars, until).await,
+        Exchange::Hyperliquid => hyperliquid::history_until(sub, tf, bars, until).await,
+        Exchange::Lighter => lighter::history_until(sub, tf, bars, until).await,
+        Exchange::Deribit => deribit::history_until(sub, tf, bars, until).await,
     }
 }

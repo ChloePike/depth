@@ -227,16 +227,16 @@ async fn poll_option_info(e: Emit, underlying: String) -> anyhow::Result<()> {
 }
 
 /// Recent REST history for the chart (1m); see `History`.
-pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_tf(sub, 1, minutes).await }
+pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_until(sub, 1, minutes, None).await }
 
-/// `history` at `tf`-minute resolution; see `ex::history_tf`.
-pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<History> {
+/// `history` at `tf`-minute resolution; see `ex::history_until`.
+pub async fn history_until(sub: &Sub, tf: u32, bars: usize, until: Option<i64>) -> anyhow::Result<History> {
     let sym = format!("{}_{}", sub.base, sub.quote).to_uppercase();
     let perp = match sub.market { Market::Option => return Ok(History::default()), m => m == Market::Perp };
     // candle interval (spot and futures agree) and the contract_stats period not coarser than it (finest is 5m)
     let (iv, stats_iv, stats_min) = match tf { 1 => ("1m", "5m", 5), 5 => ("5m", "5m", 5), 15 => ("15m", "15m", 15),
         60 => ("1h", "1h", 60), 240 => ("4h", "4h", 240), _ => anyhow::bail!("gate: unsupported timeframe {tf}m") };
-    let (start, end) = window_tf(tf, bars);
+    let (start, end) = window_tf_until(tf, bars, until);
     let step = tf as i64 * 60_000;
     // spot: 1000 points per request, futures: 2000; from/to are inclusive seconds
     let per = if perp { 2000 } else { 1000 } * step;
@@ -256,12 +256,13 @@ pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<Histo
     // contract_stats with `from` returns `limit` rows ascending; funding: one row per settlement (>= 1h apart)
     // ponytail: one request each, capped at 2000 stats rows / 1000 settlements and 180 days back (venue limits)
     let (from_s, now_s) = (start / 1000, now_ms() / 1000);
+    let to_s = until.map_or(now_s, |_| (end + step - 1) / 1000);
     let stats_n = (bars * tf as usize / stats_min + 2).min(2000);
     let (candles, contract, stats, fund) = tokio::join!(candles,
         get(format!("{REST}/futures/usdt/contracts/{sym}")),
         get(format!("{REST}/futures/usdt/contract_stats?contract={sym}&interval={stats_iv}&from={}&limit={stats_n}", (from_s - from_s % (stats_min as i64 * 60)).max(now_s - 180 * 86400 + 3600))),
-        // settlement stamps can trail the hour by seconds, so `to` is now
-        get(format!("{REST}/futures/usdt/funding_rate?contract={sym}&from={}&to={now_s}&limit=1000", (from_s - 8 * 3600).max(now_s - 180 * 86400 + 60))));
+        // settlement stamps can trail the hour by seconds, so `to` is now (or the end of an older window)
+        get(format!("{REST}/futures/usdt/funding_rate?contract={sym}&from={}&to={to_s}&limit=1000", (from_s - 8 * 3600).max(now_s - 180 * 86400 + 60))));
     let contract = contract?;
     let mult = opt_num(&contract["quanto_multiplier"]).filter(|m| *m > 0.0).ok_or_else(|| anyhow::anyhow!("no quanto_multiplier: {contract}"))?;
     // same interval source as the live connector
@@ -274,6 +275,7 @@ pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<Histo
     let stats = stats.unwrap_or_else(|e| { eprintln!("[gate history] {e:#}"); Value::Null });
     for r in stats.as_array().into_iter().flatten() {
         let t = num(&r["time"]) as i64 * 1000;
+        if t >= end + step { continue; } // the stats call returns rows from its start onward: past an older window
         if let Some(oi) = opt_num(&r["open_interest"]).filter(|x| *x > 0.0) { h.oi.push((t, oi * mult)); }
         if let Some(x) = opt_num(&r["lsr_account"]) { h.long_short.push((t, x)); }
         if let (Some(b), Some(s)) = (opt_num(&r["long_taker_size"]), opt_num(&r["short_taker_size"])) { h.taker.push((t, b * mult, s * mult)); }

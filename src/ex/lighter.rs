@@ -176,18 +176,18 @@ mod tests {
 }
 
 /// Recent REST history for the chart (one-minute candles); see `History`.
-pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_tf(sub, 1, minutes).await }
+pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_until(sub, 1, minutes, None).await }
 
-/// `bars` candles of `tf` minutes; see `ex::history_tf`.
+/// `bars` candles of `tf` minutes; see `ex::history_until`.
 /// /candles (resolution 1m/5m/15m/1h/4h, 500 per request, newest within the range; v = base volume,
 /// no taker split) and /fundings (hourly, unsigned percent `rate` + `direction`, 500 hours per
 /// request; the server caps count_back near 750). Perp only.
 // ponytail: no public OI, long/short or taker history on Lighter; those stay empty
-pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<History> {
+pub async fn history_until(sub: &Sub, tf: u32, bars: usize, until: Option<i64>) -> anyhow::Result<History> {
     let res = match tf { 1 => "1m", 5 => "5m", 15 => "15m", 60 => "1h", 240 => "4h", _ => anyhow::bail!("lighter has no {tf}m candles") };
     if sub.market != Market::Perp { return Ok(History::default()) }
     let Some(id) = market_id(&sub.base.to_uppercase()).await? else { return Ok(History::default()) };
-    let (start, end) = window_tf(tf, bars);
+    let (start, end) = window_tf_until(tf, bars, until);
     let step = tf as i64 * 60_000;
     let page = 500 * step;
     let pages = (start..=end).step_by(page as usize).map(|s| {
@@ -198,7 +198,7 @@ pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<Histo
     // end_timestamp and ignores start_timestamp, so count_back is sized to each page (+1: pages lost
     // their edge row otherwise; the overlap is deduped below)
     const FPAGE: i64 = 500 * 3600;
-    let (fstart, fend) = (start / 1000 - 3600, now_ms() / 1000);
+    let (fstart, fend) = (start / 1000 - 3600, until.map_or_else(now_ms, |_| end + step - 1) / 1000);
     let fpages = (fstart..=fend).step_by(FPAGE as usize).map(|s| {
         let to = (s + FPAGE - 1).min(fend);
         let url = format!("{REST}/fundings?market_id={id}&resolution=1h&start_timestamp={s}&end_timestamp={to}&count_back={}", (to - s) / 3600 + 2);

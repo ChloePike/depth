@@ -217,17 +217,18 @@ async fn poll_option_info(e: Emit, underlying: String) -> anyhow::Result<()> {
 }
 
 /// Recent 1m REST history for the chart; see `History`.
-pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_tf(sub, 1, minutes).await }
+pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_until(sub, 1, minutes, None).await }
 
 /// Last `bars` `tf`-minute candles (forming one included) plus, for perps, OI / long-short over
 /// the same window and settled funding. Klines carry taker-buy volume, so `taker` stays empty.
 /// Perp extras are best effort: a failing endpoint is logged and left empty.
-pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<History> {
+pub async fn history_until(sub: &Sub, tf: u32, bars: usize, until: Option<i64>) -> anyhow::Result<History> {
     let sym = format!("{}{}", sub.base, sub.quote).to_uppercase();
     let interval = match tf { 1 => "1m", 5 => "5m", 15 => "15m", 60 => "1h", 240 => "4h", _ => anyhow::bail!("unsupported timeframe {tf}m") };
     let step = tf as i64 * 60_000;
-    let (start, end) = window_tf(tf, bars);
-    let now = now_ms();
+    let (start, end) = window_tf_until(tf, bars, until);
+    // upper bound of every request: the window's last candle for an older page, else now
+    let now = until.map_or_else(now_ms, |_| end + step - 1);
     let api = match sub.market {
         Market::Option => return Ok(History::default()),
         Market::Spot | Market::Margin => "https://api.binance.com/api/v3/klines",
@@ -249,7 +250,7 @@ pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<Histo
     // served (an older startTime is rejected), so the window is clamped to that
     let (pm, period) = [(5, "5m"), (15, "15m"), (60, "1h"), (240, "4h")].into_iter().filter(|p| p.0 <= tf).last().unwrap_or((5, "5m"));
     let ps = pm as i64 * 60_000;
-    let start_p = (start / ps * ps).max((now - 30 * 86_400_000 + 60_000 + ps - 1) / ps * ps);
+    let start_p = (start / ps * ps).max((now_ms() - 30 * 86_400_000 + 60_000 + ps - 1) / ps * ps);
     let stat = |path: &str, field: &'static str| {
         let urls = pages(start_p, now, ps, 500).into_iter()
             .map(|(s, e)| format!("{F}/futures/data/{path}?symbol={sym}&period={period}&startTime={s}&endTime={e}&limit=500")).collect();

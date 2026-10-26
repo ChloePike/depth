@@ -16,7 +16,7 @@ const STALE_MS: i64 = 10_000;
 /// live updates kept per venue while its history loads
 const PENDING_CAP: usize = 200_000;
 /// 7 days of minute bars per series
-const BAR_CAP: usize = 7 * 24 * 60;
+pub const BAR_CAP: usize = 7 * 24 * 60;
 /// 2 hours of one-second heatmap columns
 const HEAT_CAP: usize = 2 * 3600;
 /// heatmap / aggregated book range around mid
@@ -242,6 +242,12 @@ pub fn history_bars_tf(h: &History, bar_ms: i64) -> Vec<Bar> {
     ffill(&mut bars, &h.funding, bar_ms, |b, v| b.funding_settled = Some(v));
     ffill(&mut bars, &h.long_short, bar_ms, |b, v| b.ls = Some(v));
     bars
+}
+
+/// Bars before a series' first known OI (`first`) take that value, flat: a venue whose OI starts
+/// later than its candles leaves no step in the cross-venue OI.
+fn backfill_oi<'a>(first: Option<f64>, bars: impl Iterator<Item = &'a mut Bar>) {
+    if let Some(v) = first { for b in bars.take_while(|b| b.oi.is_none()) { b.oi = Some(v); } }
 }
 
 fn add_flow(b: &mut Bar, qty: f64, side: Side) {
@@ -1088,6 +1094,43 @@ impl Agg {
         set.agg.insert(Market::Perp, perp);
     }
 
+    /// The venue's oldest loaded bar at timeframe `tf` (minutes) and how many bars it holds; None
+    /// when nothing is loaded. A scroll-back page ends one bar before it.
+    pub fn oldest_bar(&self, ex: Exchange, market: Market, tf: u32) -> Option<(i64, usize)> {
+        if tf <= 1 {
+            let s = self.series.get(&(Some(ex), market))?;
+            return Some((s.bars.front()?.t, s.bars.len()));
+        }
+        let b = self.tf.get(&tf)?.venues.get(&(ex, market))?;
+        Some((b.first()?.t, b.len()))
+    }
+
+    /// Scroll-back: put a page of 1m history in front of the venue's loaded bars (their CVD runs on
+    /// from the page's). The front is trimmed to `BAR_CAP` as ever, so 1m scroll-back ends at 7 days.
+    /// Call `finish_history` once after the pages of all venues.
+    // ponytail: raise BAR_CAP, or page older minutes from SQLite, if a longer 1m window matters
+    pub fn prepend_history(&mut self, ex: Exchange, market: Market, h: &History) {
+        let s = self.series.entry((Some(ex), market)).or_default();
+        let offset = s.seed(history_bars(h));
+        backfill_oi(s.bars.iter().find_map(|b| b.oi), s.bars.iter_mut());
+        self.venues.entry((ex, market)).or_default().cvd += offset;
+    }
+
+    /// `prepend_history` at timeframe `tf`: only bars older than the loaded ones are taken, the front
+    /// is trimmed to `TF_CAP`. Call `finish_history_tf(tf)` once after the pages of all venues.
+    pub fn prepend_history_tf(&mut self, ex: Exchange, market: Market, tf: u32, h: &History) {
+        let Some(bars) = self.tf.get_mut(&tf).and_then(|s| s.venues.get_mut(&(ex, market))) else { return };
+        let Some(first) = bars.first().map(|b| b.t) else { return };
+        let mut older = history_bars_tf(h, tf as i64 * 60_000);
+        older.retain(|b| b.t < first);
+        let offset = older.last().map_or(0.0, |b| b.cvd);
+        for b in bars.iter_mut() { b.cvd += offset; }
+        older.append(bars);
+        *bars = older;
+        backfill_oi(bars.iter().find_map(|b| b.oi), bars.iter_mut());
+        bars.drain(..bars.len().saturating_sub(TF_CAP));
+    }
+
     /// One venue's per-minute premium over the composite, in bp: its close (USDT) against the
     /// cross-venue close of the same minute.
     /// ponytail: converts with today's FX rate, fine while USDT/USD moves a few bp a day.
@@ -1489,6 +1532,65 @@ mod tests {
         assert_eq!(g.len(), 2);
         assert_eq!((g[0].c, g[0].vol, g[0].cvd, g[0].oi), (102.0, 4.0, 2.0, Some(10.0)));
         assert!((set.bars(Some(Exchange::Okx), Market::Perp).unwrap()[1].basis_bps.unwrap() - 400.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn prepend_keeps_cvd_and_oi_continuous() {
+        let mut a = Agg::default();
+        let t0 = 1_000 * BAR_MS;
+        let k = |i: i64, buy: f64| Kline { t: t0 + i * BAR_MS, o: 100.0, h: 100.0, l: 100.0, c: 100.0, vol: 10.0, buy: Some(buy) };
+        // Binance: history minutes 3..5 (net +4, -6, 0) with OI, then two live minutes (+1, -2)
+        a.load_history(Exchange::Binance, Market::Perp, &History { klines: vec![k(3, 7.0), k(4, 2.0), k(5, 5.0)], oi: vec![(t0 + 3 * BAR_MS, 50.0)], ..Default::default() });
+        // OKX has no OI history at all
+        a.load_history(Exchange::Okx, Market::Perp, &History { klines: vec![k(3, 5.0), k(4, 5.0), k(5, 5.0)], ..Default::default() });
+        a.finish_history();
+        a.on(&msg(Exchange::Binance, Market::Perp, "X", t0 + 6 * BAR_MS, Event::Trade { px: 100.0, qty: 1.0, side: Side::Buy }));
+        a.on(&msg(Exchange::Binance, Market::Perp, "X", t0 + 7 * BAR_MS, Event::Trade { px: 100.0, qty: 2.0, side: Side::Sell }));
+        let cvd = |a: &Agg, ex| a.series[&(Some(ex), Market::Perp)].bars.iter().map(|b| b.cvd).collect::<Vec<_>>();
+        assert_eq!(cvd(&a, Exchange::Binance), vec![4.0, -2.0, -2.0, -1.0, -3.0]);
+        assert_eq!(a.oldest_bar(Exchange::Binance, Market::Perp, 1), Some((t0 + 3 * BAR_MS, 5)));
+        // the page before: minutes 0..2, +2 each, no OI
+        a.prepend_history(Exchange::Binance, Market::Perp, &History { klines: vec![k(0, 6.0), k(1, 6.0), k(2, 6.0)], ..Default::default() });
+        a.prepend_history(Exchange::Okx, Market::Perp, &History { klines: vec![k(0, 5.0), k(1, 5.0), k(2, 5.0)], ..Default::default() });
+        a.finish_history();
+        // cumulative from the oldest bar: every step is that minute's net flow
+        assert_eq!(cvd(&a, Exchange::Binance), vec![2.0, 4.0, 6.0, 10.0, 4.0, 4.0, 5.0, 3.0]);
+        let bars = &a.series[&(Some(Exchange::Binance), Market::Perp)].bars;
+        assert!(bars.iter().zip(bars.iter().skip(1)).all(|(x, y)| y.t == x.t + BAR_MS));
+        assert_eq!(a.venues[&(Exchange::Binance, Market::Perp)].cvd, 3.0);
+        assert_eq!(a.oldest_bar(Exchange::Binance, Market::Perp, 1), Some((t0, 8)));
+        // the cross-venue series was rebuilt over the longer window, ending at the same CVD
+        let g = &a.series[&(None, Market::Perp)].bars;
+        assert_eq!((g.len(), g[0].t, g.back().unwrap().cvd, a.cvd_total(Market::Perp)), (8, t0, 3.0, 3.0));
+        // OI: the page has none, so its minutes take the first known value; OKX still back-fills on its first live OI
+        assert!(bars.iter().all(|b| b.oi == Some(50.0)));
+        a.on(&msg(Exchange::Okx, Market::Perp, "X", t0 + 7 * BAR_MS, Event::OpenInterest { oi: 7.0, oi_usd: None }));
+        assert!(a.series[&(None, Market::Perp)].bars.iter().all(|b| b.oi == Some(57.0)));
+    }
+
+    #[test]
+    fn prepend_tf_trims_to_cap_and_ignores_overlap() {
+        let mut a = Agg::default();
+        let h = 3_600_000;
+        let k = |i: i64| Kline { t: i * h, o: 1.0, h: 1.0, l: 1.0, c: 1.0, vol: 2.0, buy: Some(1.5) };
+        a.load_history_tf(Exchange::Binance, Market::Perp, 60, &History { klines: (5..8).map(k).collect(), ..Default::default() });
+        let page = |r: std::ops::Range<i64>| History { klines: r.map(k).collect(), ..Default::default() };
+        // an empty page changes nothing (and leaves the oldest bar where it was)
+        a.prepend_history_tf(Exchange::Binance, Market::Perp, 60, &History::default());
+        assert_eq!(a.oldest_bar(Exchange::Binance, Market::Perp, 60), Some((5 * h, 3)));
+        // a page overlapping the loaded bars adds only what is older than the first one
+        a.prepend_history_tf(Exchange::Binance, Market::Perp, 60, &page(3..7));
+        let bars = &a.tf[&60].venues[&(Exchange::Binance, Market::Perp)];
+        assert_eq!(bars.iter().map(|b| (b.t / h, b.cvd)).collect::<Vec<_>>(), vec![(3, 1.0), (4, 2.0), (5, 3.0), (6, 4.0), (7, 5.0)]);
+        // a venue that was never loaded is skipped
+        a.prepend_history_tf(Exchange::Okx, Market::Perp, 60, &page(0..3));
+        assert!(!a.tf[&60].venues.contains_key(&(Exchange::Okx, Market::Perp)));
+        // past TF_CAP the oldest bars of the page are dropped, the loaded ones kept
+        a.load_history_tf(Exchange::Bybit, Market::Perp, 60, &History { klines: (10_000..10_000 + TF_CAP as i64 - 10).map(k).collect(), ..Default::default() });
+        a.prepend_history_tf(Exchange::Bybit, Market::Perp, 60, &page(9_900..10_000));
+        let bars = &a.tf[&60].venues[&(Exchange::Bybit, Market::Perp)];
+        assert_eq!((bars.len(), bars[0].t / h, bars.last().unwrap().t / h), (TF_CAP, 9_990, 10_000 + TF_CAP as i64 - 11));
+        assert!(bars.windows(2).all(|w| w[1].t == w[0].t + h && w[1].cvd > w[0].cvd));
     }
 
     #[test]

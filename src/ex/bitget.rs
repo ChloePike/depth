@@ -132,15 +132,15 @@ async fn poll_borrow(e: Emit, sym: String, assets: [String; 2]) -> anyhow::Resul
 }
 
 /// Recent REST history for the chart (1m); see `History`.
-pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_tf(sub, 1, minutes).await }
+pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_until(sub, 1, minutes, None).await }
 
-/// `history` at `tf`-minute resolution; see `ex::history_tf`.
-pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<History> {
+/// `history` at `tf`-minute resolution; see `ex::history_until`.
+pub async fn history_until(sub: &Sub, tf: u32, bars: usize, until: Option<i64>) -> anyhow::Result<History> {
     let sym = format!("{}{}", sub.base, sub.quote).to_uppercase();
     let perp = match sub.market { Market::Option => return Ok(History::default()), m => m == Market::Perp };
     let (spot_iv, mix_iv) = match tf { 1 => ("1min", "1m"), 5 => ("5min", "5m"), 15 => ("15min", "15m"),
         60 => ("1h", "1H"), 240 => ("4h", "4H"), _ => anyhow::bail!("bitget: unsupported timeframe {tf}m") };
-    let (start, end) = window_tf(tf, bars);
+    let (start, end) = window_tf_until(tf, bars, until);
     let step = tf as i64 * 60_000;
     // up to 1000 candles per request ending at endTime (inclusive open time); mix also caps one request at 90 days
     let per = if perp { 1000.min(90 * 1440 / tf as i64) } else { 1000 };
@@ -162,14 +162,17 @@ pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<Histo
         let hours = opt_num(&rate["data"][0]["fundingRateInterval"]).filter(|h| *h > 0.0)
             .ok_or_else(|| anyhow::anyhow!("no fundingRateInterval: {rate}"))?;
         let n = ((end - start) as f64 / (hours * 3.6e6)) as usize + 2;
-        let pages = all((1..=n.div_ceil(100)).map(|p| format!(
+        // pages count from the newest settlement: skip the ones after an older window
+        let skip = until.map_or(0, |_| ((now_ms() - end) as f64 / (hours * 3.6e6)) as usize);
+        let pages = all((skip / 100 + 1..=(skip + n).div_ceil(100)).map(|p| format!(
             "{REST}/api/v2/mix/market/history-fund-rate?symbol={sym}&productType=USDT-FUTURES&pageSize=100&pageNo={p}")).collect()).await?;
         anyhow::Ok((hours, pages))
     };
     let (candles, fund, ls, taker) = tokio::join!(all(urls),
         async { if perp { funding.await } else { Ok((1.0, vec![])) } },
-        async { if perp { ratio("long-short").await } else { Ok(Value::Null) } },
-        async { if perp { ratio("taker-buy-sell").await } else { Ok(Value::Null) } });
+        // the ratio endpoints ignore time params: an older page has none
+        async { if perp && until.is_none() { ratio("long-short").await } else { Ok(Value::Null) } },
+        async { if perp && until.is_none() { ratio("taker-buy-sell").await } else { Ok(Value::Null) } });
     // rows: [ts, o, h, l, c, base vol, ...]; perp sizes are already in base coin
     let klines: Vec<Kline> = candles?.iter().flat_map(|v| v["data"].as_array().cloned().unwrap_or_default()).map(|r| Kline {
         t: num(&r[0]) as i64, o: num(&r[1]), h: num(&r[2]), l: num(&r[3]), c: num(&r[4]), vol: num(&r[5]), buy: None,
@@ -184,7 +187,7 @@ pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<Histo
         Ok((hours, pages)) => {
             let from = start - (hours * 3.6e6) as i64; // keep the settlement just before the window
             h.funding = pages.iter().flat_map(rows).map(|r| (num(&r["fundingTime"]) as i64, num(&r["fundingRate"]) / hours))
-                .filter(|(t, r)| *t >= from && r.is_finite()).collect();
+                .filter(|(t, r)| *t >= from && *t < end + step && r.is_finite()).collect();
             h.funding.sort_by_key(|x| x.0);
             h.funding.dedup_by_key(|x| x.0);
         }

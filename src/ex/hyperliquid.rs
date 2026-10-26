@@ -356,14 +356,14 @@ fn on_msg(e: &Emit, coin: &str, skip_trades: &mut bool, book: &mut L2, deep: &De
 }
 
 /// Recent REST history for the chart (one-minute candles); see `History`.
-pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_tf(sub, 1, minutes).await }
+pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_until(sub, 1, minutes, None).await }
 
-/// `bars` candles of `tf` minutes; see `ex::history_tf`.
+/// `bars` candles of `tf` minutes; see `ex::history_until`.
 /// candleSnapshot (interval 1m/5m/15m/1h/4h, sizes in base, empty periods omitted -> forward-filled;
 /// only the newest 5000 candles of each interval exist, so 1m reaches back ~3.5 days) and
 /// fundingHistory (hourly fraction, stamped at settlement, 500 rows per request, paged by startTime).
 /// No public OI, long/short or taker history.
-pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<History> {
+pub async fn history_until(sub: &Sub, tf: u32, bars: usize, until: Option<i64>) -> anyhow::Result<History> {
     let iv = match tf { 1 => "1m", 5 => "5m", 15 => "15m", 60 => "1h", 240 => "4h", _ => anyhow::bail!("hyperliquid has no {tf}m candles") };
     let coin = match sub.market {
         Market::Perp => coin(&sub.base),
@@ -373,7 +373,7 @@ pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<Histo
         },
         Market::Option => return Ok(History::default()),
     };
-    let (start, end) = window_tf(tf, bars);
+    let (start, end) = window_tf_until(tf, bars, until);
     let step = tf as i64 * 60_000;
     // 5000 candles per request
     let pages = (start..=end).step_by((5000 * step) as usize).map(|s| {
@@ -386,7 +386,9 @@ pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<Histo
         // pages run in sequence: each starts after the last row of the previous one
         let mut from = start - 3_600_000;
         loop {
-            let v = ws::post_json(INFO, &json!({"type": "fundingHistory", "coin": coin, "startTime": from})).await?;
+            let mut req = json!({"type": "fundingHistory", "coin": coin, "startTime": from});
+            if until.is_some() { req["endTime"] = json!(end + step - 1); }
+            let v = ws::post_json(INFO, &req).await?;
             let rows: Vec<(i64, f64)> = v.as_array().into_iter().flatten().map(|r| (r["time"].as_i64().unwrap_or(0), num(&r["fundingRate"]))).collect();
             let Some(&(last, _)) = rows.last() else { break };
             let full = rows.len() >= 500;

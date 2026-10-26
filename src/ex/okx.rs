@@ -235,13 +235,13 @@ fn on_option(e: &Emit, mult: f64, idx: &mut f64, fwd: &mut HashMap<String, f64>,
 }
 
 /// Recent 1m REST history for the chart; see `History`.
-pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_tf(sub, 1, minutes).await }
+pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_until(sub, 1, minutes, None).await }
 
 /// Last `bars` `tf`-minute candles (forming one included) plus, for perps, OI / long-short /
 /// taker volume over the same window and settled funding. OKX candles have no taker split, so
 /// perps get rubik taker volume (base coin). Perp extras are best effort: a failing endpoint is
 /// logged and left empty.
-pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<History> {
+pub async fn history_until(sub: &Sub, tf: u32, bars: usize, until: Option<i64>) -> anyhow::Result<History> {
     let (b, q) = (sub.base.to_uppercase(), sub.quote.to_uppercase());
     let sym = match sub.market {
         Market::Option => return Ok(History::default()),
@@ -252,8 +252,9 @@ pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<Histo
     let bar = match tf { 1 => "1m", 5 => "5m", 15 => "15m", 60 => "1H", 240 => "4H", _ => bail!("unsupported timeframe {tf}m") };
     let perp = sub.market == Market::Perp;
     let step = tf as i64 * 60_000;
-    let (start, end) = window_tf(tf, bars);
-    let now = now_ms();
+    let (start, end) = window_tf_until(tf, bars, until);
+    // upper bound of every request: the window's last candle for an older page, else now
+    let now = until.map_or_else(now_ms, |_| end + step - 1);
     let klines = async {
         let mult = if perp { ct_val(&sym).await? } else { 1.0 };
         // history-candles serves recent bars too (incl. the forming one), 300 per page, 20 req/2s;
@@ -313,7 +314,7 @@ pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<Histo
         let from = start - 8 * 3_600_000;
         // 400 rows per page, newest first; `after` pages to older rows. OKX serves about 3 months.
         // ponytail: at most 5 pages (2000 settlements)
-        let (mut list, mut after) = (vec![], String::new());
+        let (mut list, mut after) = (vec![], until.map_or(String::new(), |_| format!("&after={}", end + step)));
         for _ in 0..5 {
             let page = get(&format!("public/funding-rate-history?instId={sym}&limit=400{after}")).await?.as_array().cloned().unwrap_or_default();
             let Some(oldest) = page.iter().map(|r| ms(&r["fundingTime"])).filter(|t| *t > 0).min() else { break };

@@ -139,26 +139,26 @@ fn on_perp(e: &Emit, seq: &mut Option<i64>, f: Frame) -> bool {
 const CHARTS: &str = "https://futures.kraken.com/api/charts/v1";
 
 /// Recent REST history for the chart (one-minute candles); see `History`.
-pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_tf(sub, 1, minutes).await }
+pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_until(sub, 1, minutes, None).await }
 
-/// `bars` candles of `tf` minutes; see `ex::history_tf`.
+/// `bars` candles of `tf` minutes; see `ex::history_until`.
 /// Spot: OHLC (interval = tf) keeps only the last 720 candles of each interval; for 1m older minutes
 /// are rebuilt from public Trades, larger periods return at most 720 candles.
 /// Perp: charts API (2000 points per request, resolution 1m..4h) for candles, and analytics
 /// (interval = tf in seconds) for OI, long/short accounts and the taker split
 /// (trade-volume +- aggressor-differential); funding from historicalfundingrates.
-pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<History> {
+pub async fn history_until(sub: &Sub, tf: u32, bars: usize, until: Option<i64>) -> anyhow::Result<History> {
     let res = match tf { 1 => "1m", 5 => "5m", 15 => "15m", 60 => "1h", 240 => "4h", _ => anyhow::bail!("kraken has no {tf}m candles") };
     let (base, mut quote) = (sub.base.to_uppercase(), sub.quote.to_uppercase());
     if quote == "USDT" || quote == "USDC" { quote = "USD".into(); }
     let xbt = if base == "BTC" { "XBT".to_string() } else { base.clone() };
-    let (start, end) = window_tf(tf, bars);
+    let (start, end) = window_tf_until(tf, bars, until);
     match sub.market {
         Market::Spot | Market::Margin => {
             let listed = ws::get_json(&format!("https://api.kraken.com/0/public/AssetPairs?pair={xbt}{quote}")).await
                 .is_ok_and(|v| v["result"].as_object().is_some_and(|r| !r.is_empty()));
             let pair = format!("{xbt}{}", if listed { &quote } else { "USD" });
-            spot_history(&pair, tf, start, end, bars).await
+            spot_history(&pair, tf, start, end, bars, until.is_some()).await
         }
         Market::Perp => perp_history(&format!("PF_{xbt}USD"), tf, res, start, end, bars).await,
         Market::Option => Ok(History::default()),
@@ -171,7 +171,7 @@ fn spot_rows(v: &Value) -> Vec<Value> {
         .and_then(|(_, a)| a.as_array().cloned()).unwrap_or_default()
 }
 
-async fn spot_history(pair: &str, tf: u32, start: i64, end: i64, bars: usize) -> anyhow::Result<History> {
+async fn spot_history(pair: &str, tf: u32, start: i64, end: i64, bars: usize, older: bool) -> anyhow::Result<History> {
     use futures_util::{StreamExt, TryStreamExt};
     let v = ws::get_json(&format!("https://api.kraken.com/0/public/OHLC?pair={pair}&interval={tf}&since={}", start / 1000 - tf as i64 * 60)).await?;
     // [time, open, high, low, close, vwap, volume, count]
@@ -179,12 +179,14 @@ async fn spot_history(pair: &str, tf: u32, start: i64, end: i64, bars: usize) ->
         o: num(&r[1]), h: num(&r[2]), l: num(&r[3]), c: num(&r[4]), vol: num(&r[6]), buy: None }).collect();
     // ponytail: above 1m the 720-candle OHLC cap is the limit (15m ~7.5 days, 4h ~120 days); a
     // trades backfill would cost thousands of requests there
-    if tf != 1 { return Ok(History { klines: continuous_tf(k, end, bars, tf), ..Default::default() }) }
+    // an older page is what the OHLC cap still holds: no Trades rebuild for scroll-back
+    if tf != 1 || older { return Ok(History { klines: continuous_tf(k, end, bars, tf), ..Default::default() }) }
     let first = k.iter().map(|x| x.t).min().unwrap_or(end + 60_000);
     // ponytail: ~1 Trades request per 10-20 min of BTC/USD history, 4 in flight; a busy market or a
     // long window costs many requests (Kraken public limit ~1/s sustained). Drop if startup gets slow.
     const CHUNK: i64 = 15 * 60_000;
-    let chunks: Vec<i64> = (start..first).step_by(CHUNK as usize).collect();
+    // at most 1000 minutes before the OHLC part: a longer downtime leaves a hole that `History::merge` treats as a stale cache
+    let chunks: Vec<i64> = (start.max(first - 1000 * 60_000)..first).step_by(CHUNK as usize).collect();
     // best effort: on a rate limit keep the OHLC part rather than failing the whole history
     match futures_util::stream::iter(chunks).map(|s| trade_bars(pair, s, (s + CHUNK).min(first)))
         .buffered(4).try_collect::<Vec<Vec<Kline>>>().await {
@@ -271,7 +273,7 @@ async fn perp_history(sym: &str, tf: u32, res: &str, start: i64, end: i64, bars:
     // relativeFundingRate is already the hourly relative rate, stamped at settlement
     let funding = fund?["rates"].as_array().into_iter().flatten()
         .map(|r| (rfc_ms(&r["timestamp"]), num(&r["relativeFundingRate"])))
-        .filter(|(t, r)| *t >= start - 3_600_000 && r.is_finite()).collect();
+        .filter(|(t, r)| *t >= start - 3_600_000 && *t < end + tf as i64 * 60_000 && r.is_finite()).collect();
     Ok(History { klines: continuous_tf(klines, end, bars, tf), oi, funding, long_short: ls, taker })
 }
 

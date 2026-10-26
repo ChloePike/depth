@@ -225,16 +225,30 @@ pub fn window(minutes: usize) -> (i64, i64) { window_tf(1, minutes) }
 
 /// open time of the current `tf`-minute candle and of the first of the last `bars` candles, in ms
 /// (candles aligned to UTC multiples of `tf`, which is how every venue buckets 1m..4h)
-pub fn window_tf(tf: u32, bars: usize) -> (i64, i64) {
+pub fn window_tf(tf: u32, bars: usize) -> (i64, i64) { window_tf_until(tf, bars, None) }
+
+/// `window_tf` ending at the candle containing `end_ms` (None = now): the page before a loaded one.
+pub fn window_tf_until(tf: u32, bars: usize, end_ms: Option<i64>) -> (i64, i64) {
     let step = tf as i64 * 60_000;
-    let end = now_ms() / step * step;
+    let end = end_ms.unwrap_or_else(now_ms) / step * step;
     (end - (bars.max(1) as i64 - 1) * step, end)
 }
 
+/// Candles kept per cached timeframe above 1m (1m keeps `agg::BAR_CAP`).
+pub const TF_CAP: usize = 5000;
+pub fn bar_cap(tf: u32) -> usize { if tf <= 1 { agg::BAR_CAP } else { TF_CAP } }
+
 impl History {
+    /// Cache blob: MessagePack (7 days of 1m bars are ~3x smaller than JSON); `decode` also reads the JSON of older versions.
+    pub fn encode(&self) -> Option<Vec<u8>> { rmp_serde::to_vec(self).ok() }
+    pub fn decode(b: &[u8]) -> Option<History> { rmp_serde::from_slice(b).ok().or_else(|| serde_json::from_slice(b).ok()) }
+
     /// `self` (older, e.g. from the local cache) updated with `newer` (a fresh fetch): rows are
     /// merged by time with the newer value winning, then trimmed to the last `bars` candles.
+    /// A hole between the two (the venue could not reach back to the cache's tip) leaves `newer` alone.
     pub fn merge(mut self, newer: History, bars: usize, tf: u32) -> History {
+        let step = tf as i64 * 60_000;
+        if let (Some(a), Some(b)) = (self.klines.last(), newer.klines.first()) { if b.t > a.t + step { return newer; } }
         fn m<T: Copy>(a: &mut Vec<T>, b: Vec<T>, t: impl Fn(&T) -> i64) {
             let cut = b.first().map(&t).unwrap_or(i64::MAX);
             a.retain(|x| t(x) < cut);
@@ -286,6 +300,50 @@ mod tests {
         let h = old.merge(new, 5, 1);
         assert_eq!(h.klines.iter().map(|x| (x.t / 60_000, x.c)).collect::<Vec<_>>(), vec![(2, 1.0), (3, 1.0), (4, 2.0), (5, 2.0), (6, 2.0)]);
         assert_eq!(h.oi.last(), Some(&(4 * 60_000, 4.0)));
+    }
+
+    #[test]
+    fn history_merge_keeps_old_rows_under_a_larger_cap_and_drops_a_stale_cache() {
+        let k = |i: i64, c: f64| Kline { t: i * 60_000, o: c, h: c, l: c, c, vol: 1.0, buy: None };
+        let old = History { klines: (0..5).map(|i| k(i, 1.0)).collect(), ..Default::default() };
+        let new = History { klines: (4..7).map(|i| k(i, 2.0)).collect(), ..Default::default() };
+        // the cap exceeds both inputs: nothing is trimmed, the overlap takes the newer value
+        let h = old.clone().merge(new.clone(), 100, 1);
+        assert_eq!(h.klines.iter().map(|x| (x.t / 60_000, x.c)).collect::<Vec<_>>(), vec![(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0), (4, 2.0), (5, 2.0), (6, 2.0)]);
+        // a hole between the cache tip and the fetch (the venue could not reach back): the fetch stands alone
+        let far = History { klines: (9..12).map(|i| k(i, 3.0)).collect(), ..Default::default() };
+        assert_eq!(old.clone().merge(far, 100, 1).klines.iter().map(|x| x.t / 60_000).collect::<Vec<_>>(), vec![9, 10, 11]);
+        // adjacent (no overlap, no hole) still merges
+        let next = History { klines: (5..8).map(|i| k(i, 3.0)).collect(), ..Default::default() };
+        assert_eq!(old.merge(next, 100, 1).klines.len(), 8);
+    }
+
+    #[test]
+    fn window_tf_until_aligns_end() {
+        // 2026-01-01T10:07:30Z; a 15m window ending in the candle containing it
+        let t = 1_767_262_050_000;
+        let (start, end) = window_tf_until(15, 4, Some(t));
+        assert_eq!(end % 900_000, 0);
+        assert!(end <= t && t < end + 900_000);
+        assert_eq!(end - start, 3 * 900_000);
+        let (s, e) = window_tf(15, 4);
+        assert_eq!((e - s, e % 900_000), (3 * 900_000, 0));
+        assert_eq!(bar_cap(1), agg::BAR_CAP);
+        assert_eq!(bar_cap(60), TF_CAP);
+    }
+
+    #[test]
+    fn history_blob_is_msgpack_and_reads_old_json() {
+        let k = |i: i64| Kline { t: 1_767_262_000_000 + i * 60_000, o: 67123.456789, h: 67200.123456, l: 67001.987654, c: 67150.314159, vol: 31.271828, buy: (i % 2 == 0).then_some(12.345678) };
+        let h = History { klines: (0..50).map(k).collect(), oi: vec![(0, 5.0)], funding: vec![(0, 1e-5)], long_short: vec![(0, 1.2)], taker: vec![(0, 1.0, 2.0)] };
+        let b = h.encode().unwrap();
+        let json = serde_json::to_vec(&h).unwrap();
+        assert!(b.len() * 3 < json.len() * 2, "{} vs {}", b.len(), json.len());
+        for blob in [&b, &json] {
+            let back = History::decode(blob).unwrap();
+            assert_eq!((back.klines.len(), back.klines[3].buy, back.oi, back.taker), (50, None, vec![(0, 5.0)], vec![(0, 1.0, 2.0)]));
+        }
+        assert!(History::decode(b"garbage").is_none());
     }
 
     #[test]

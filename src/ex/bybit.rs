@@ -224,18 +224,19 @@ fn on_option(e: &Emit, m: &Value, fwd: &mut HashMap<String, f64>) -> bool {
 }
 
 /// Recent 1m REST history for the chart; see `History`.
-pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_tf(sub, 1, minutes).await }
+pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_until(sub, 1, minutes, None).await }
 
 /// Last `bars` `tf`-minute candles (forming one included) plus, for perps, OI / long-short over
 /// the same window and settled funding. Bybit candles have no taker split and there is no public
 /// taker-volume history, so `taker` stays empty. Perp extras are best effort: a failing endpoint
 /// is logged and left empty.
-pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<History> {
+pub async fn history_until(sub: &Sub, tf: u32, bars: usize, until: Option<i64>) -> anyhow::Result<History> {
     let sym = format!("{}{}", sub.base, sub.quote).to_uppercase();
     if ![1, 5, 15, 60, 240].contains(&tf) { anyhow::bail!("unsupported timeframe {tf}m") }
     let step = tf as i64 * 60_000;
-    let (start, end) = window_tf(tf, bars);
-    let now = now_ms();
+    let (start, end) = window_tf_until(tf, bars, until);
+    // upper bound of every request: the window's last candle for an older page, else now
+    let now = until.map_or_else(now_ms, |_| end + step - 1);
     let cat = match sub.market {
         Market::Option => return Ok(History::default()),
         Market::Spot | Market::Margin => "spot",

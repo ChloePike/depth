@@ -907,6 +907,7 @@ impl App {
         for act in acts {
             match act {
                 chart::ChartAct::Fill(px) => self.trade.fill = Some((self.trade.ex, px)),
+                chart::ChartAct::Older(tf) => self.eng.ensure_older(tf as u32, ctx),
                 chart::ChartAct::Position { entry, stop, target, qty } => {
                     // the whole order into the perp panel: limit at the entry, the size, TP at the target, SL at the
                     // stop (the native hosts' panel takes the entry price, as a book click). The last state document:

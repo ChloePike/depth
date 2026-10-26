@@ -684,6 +684,8 @@ pub struct Stats {
     pub usdt: Option<f64>,
     /// venues still loading per chart timeframe (minutes)
     pub tf_pending: HashMap<u32, usize>,
+    /// scroll-back pages in flight per chart timeframe (minutes)
+    pub older_pending: HashMap<u32, usize>,
     /// messages waiting in the pump queue (should stay near 0)
     pub backlog: usize,
     /// last exchange-timestamp -> local receive delays per venue, ms (trades and BBOs only:
@@ -738,6 +740,8 @@ pub struct Engine {
     pub watched: Arc<Mutex<HashMap<String, f64>>>,
     /// Binance margin borrow APR from the user's key: asset -> (APR, read at ms); kept across base switches
     borrow: Arc<Mutex<HashMap<String, (f64, i64)>>>,
+    /// scroll-back pages asked for: (venue, market, timeframe, oldest bar when asked)
+    older_done: Arc<Mutex<std::collections::HashSet<(Exchange, Market, u32, i64)>>>,
     /// the Keychain's keys; `Account::keys` holds the active set (`active`)
     pub real_keys: HashMap<Exchange, Keys>,
 }
@@ -754,7 +758,7 @@ impl Engine {
             let mut a = Account::default();
             a.keys = trade::KEY_VENUES.into_iter().filter_map(|ex| Some((ex, active_keys(depth::demo::on(), &real_keys, ex)?))).collect();
             Arc::new(Mutex::new(a))
-        }, wants_options: Default::default(), wants_l3: Default::default(), l3_started: false, hl_l3: None, l3_flowscan: false, off: Default::default(), acct_rt: None, acct_tx: None, streams: HashMap::new(), key_tests: Default::default(), watch_rt: None, watching: HashMap::new(), watched: Default::default(), borrow: Default::default(), real_keys }
+        }, wants_options: Default::default(), wants_l3: Default::default(), l3_started: false, hl_l3: None, l3_flowscan: false, off: Default::default(), acct_rt: None, acct_tx: None, streams: HashMap::new(), key_tests: Default::default(), watch_rt: None, watching: HashMap::new(), watched: Default::default(), borrow: Default::default(), older_done: Default::default(), real_keys }
     }
 
     /// (Re)subscribe everything for `base`: spot + perp live and history, USDT/USD, heatmap sampling.
@@ -768,6 +772,7 @@ impl Engine {
         self.stats = Arc::new(Mutex::new(Stats { hist_pending: self.venues().len() * HISTORY_MARKETS.len(), hist_total: self.venues().len() * HISTORY_MARKETS.len(), ..Default::default() }));
         self.started = vec![];
         self.tfs = vec![];
+        self.older_done.lock().unwrap().clear();
         self.venue_tasks.clear();
         self.l3_started = false;
         self.hl_l3 = None;
@@ -1271,6 +1276,50 @@ impl Engine {
                 });
             }
         }
+    }
+
+    /// Scroll-back: for every venue, fetch the page (`HISTORY_MINUTES` bars: klines, plus OI, funding and
+    /// long-short where the venue serves them) of `tf`-minute history before its oldest loaded bar and put
+    /// it in front. Each page is asked once per (venue, market, timeframe, oldest bar): an empty answer
+    /// leaves the oldest bar where it was, so that venue is never asked again (its retention is reached);
+    /// a failed one is asked again on the next scroll to the edge. The 1m series stops at its 7-day
+    /// cap, the others at `TF_CAP`. The agg and stats locks may be held by the caller (the chart's
+    /// actions run under them), so everything that locks runs on the runtime.
+    pub fn ensure_older(&self, tf: u32, ctx: &eframe::egui::Context) {
+        let Some(rt) = self.rt.as_ref() else { return };
+        let (agg, stats, done, ctx) = (self.agg.clone(), self.stats.clone(), self.older_done.clone(), ctx.clone());
+        let venues: Vec<(Exchange, Market, Sub)> = self.venues().into_iter().flat_map(|e| HISTORY_MARKETS.map(|m| (e, m, self.sub(m)))).collect();
+        let step = tf as i64 * 60_000;
+        rt.spawn(async move {
+            let plan: Vec<_> = {
+                let a = agg.lock().unwrap();
+                let mut s = stats.lock().unwrap();
+                // first loads still running: their bars are not the oldest yet
+                if s.hist_pending > 0 || s.tf_pending.get(&tf).is_some_and(|p| *p > 0) { return; }
+                let plan = older_plan(&a, &mut done.lock().unwrap(), venues, tf);
+                *s.older_pending.entry(tf).or_default() += plan.len();
+                plan
+            };
+            for (e, m, sub, first) in plan {
+                let (agg, stats, done, ctx) = (agg.clone(), stats.clone(), done.clone(), ctx.clone());
+                tokio::spawn(async move {
+                    let h = ex::history_until(e, &sub, tf, HISTORY_MINUTES, Some(first - step)).await;
+                    if std::env::var("T1_DIAG").is_ok() { eprintln!("[older] {e:?} {m:?} {tf}m before {first}: {} bars", h.as_ref().map_or(0, |h| h.klines.len())); }
+                    let mut a = agg.lock().unwrap();
+                    match h {
+                        Ok(h) if tf <= 1 => a.prepend_history(e, m, &h),
+                        Ok(h) => a.prepend_history_tf(e, m, tf, &h),
+                        Err(err) => { eprintln!("[history] {e:?} {m:?} {tf}m older: {err:#}"); done.lock().unwrap().remove(&(e, m, tf, first)); }
+                    }
+                    let mut s = stats.lock().unwrap();
+                    let p = s.older_pending.entry(tf).or_default();
+                    *p = p.saturating_sub(1);
+                    // one rebuild for the whole round, not one per venue
+                    if *p == 0 { if tf <= 1 { a.finish_history() } else { a.finish_history_tf(tf) } }
+                    ctx.request_repaint();
+                });
+            }
+        });
     }
 
     /// Place an order (rules fetched once per symbol and cached); the result lands in the account log.
@@ -1959,21 +2008,37 @@ impl Engine {
     }
 }
 
+/// The venues to fetch a scroll-back page for: those with bars loaded below the cap whose page before
+/// the oldest one was not asked yet (`done` remembers it, so an empty answer is never asked twice).
+fn older_plan(a: &Agg, done: &mut std::collections::HashSet<(Exchange, Market, u32, i64)>, venues: Vec<(Exchange, Market, Sub)>, tf: u32) -> Vec<(Exchange, Market, Sub, i64)> {
+    venues.into_iter().filter_map(|(e, m, sub)| {
+        let (first, len) = a.oldest_bar(e, m, tf)?;
+        (len < depth::bar_cap(tf) && done.insert((e, m, tf, first))).then_some((e, m, sub, first))
+    }).collect()
+}
+
 fn cache_key(ex: Exchange, sub: &Sub, tf: u32) -> String { format!("{}/{ex:?}-{:?}-{tf}m", sub.base, sub.market) }
 
-/// History from the local cache plus only the candles since its last bar; a full fetch when
-/// there is no usable cache. On fetch failure the cache alone is used. The result is written back.
+/// Bars to fetch on top of a cache whose last bar opened at `tip`: those since it (+2 to refresh
+/// the forming candle and overlap). None without a cache or when the cache is older than the
+/// timeframe's cap: a plain `HISTORY_MINUTES` fetch then replaces it.
+fn fetch_plan(tip: Option<i64>, now: i64, tf: u32) -> Option<usize> {
+    let n = ((now - tip?).max(0) / (tf as i64 * 60_000) + 2) as usize;
+    (n <= depth::bar_cap(tf)).then_some(n)
+}
+
+/// History from the local cache plus only the candles since its last bar, merged up to the
+/// timeframe's cap (so the cache grows with every run); `HISTORY_MINUTES` bars when there is no
+/// usable cache. On fetch failure the cache alone is used. The result is written back.
 async fn cached_history(ex: Exchange, sub: &Sub, tf: u32, stats: &Arc<Mutex<Stats>>) -> History {
     let key = cache_key(ex, sub, tf);
-    let cached: Option<History> = depth::db::hist_get(&key).and_then(|b| serde_json::from_slice(&b).ok());
-    let step = tf as i64 * 60_000;
-    // bars missing since the cached tip (+2 to refresh the forming candle and overlap)
-    let need = cached.as_ref().and_then(|c| c.klines.last()).map(|k| ((now_ms() - k.t) / step + 2) as usize).filter(|n| *n < HISTORY_MINUTES);
+    let cached: Option<History> = depth::db::hist_get(&key).and_then(|b| History::decode(&b));
+    let need = fetch_plan(cached.as_ref().and_then(|c| c.klines.last()).map(|k| k.t), now_ms(), tf);
     let t0 = std::time::Instant::now();
     let fetched = ex::history_tf(ex, sub, tf, need.unwrap_or(HISTORY_MINUTES)).await;
     if std::env::var("T1_DIAG").is_ok() { eprintln!("[cache] {ex:?} {:?} {tf}m fetched {} bars in {:?}", sub.market, need.unwrap_or(HISTORY_MINUTES), t0.elapsed()); }
     let h = match (cached, fetched, need) {
-        (Some(c), Ok(f), Some(_)) => c.merge(f, HISTORY_MINUTES, tf),
+        (Some(c), Ok(f), Some(_)) => c.merge(f, depth::bar_cap(tf), tf),
         (_, Ok(f), _) => f,
         (c, Err(e), _) => {
             eprintln!("[history] {ex:?} {:?} {tf}m: {e:#}", sub.market);
@@ -1981,7 +2046,7 @@ async fn cached_history(ex: Exchange, sub: &Sub, tf: u32, stats: &Arc<Mutex<Stat
             return c.unwrap_or_default();
         }
     };
-    if !h.klines.is_empty() { if let Ok(b) = serde_json::to_vec(&h) { depth::db::hist_put(&key, &b); } }
+    if !h.klines.is_empty() { if let Some(b) = h.encode() { depth::db::hist_put(&key, &b); } }
     h
 }
 
@@ -2233,6 +2298,54 @@ mod tests {
 
     fn pos(side: Side, qty: f64) -> Position {
         Position { ex: Exchange::Binance, symbol: "BTCUSDT".into(), side, qty, entry: 100.0, mark: 0.0, liq: None, upnl: 0.0, lev: 0.0, margin: 0.0, cross: None }
+    }
+
+    #[test]
+    fn scroll_back_asks_each_page_once_and_stops_on_an_empty_one() {
+        use depth::Kline;
+        let h = 3_600_000;
+        let k = |i: i64| Kline { t: i * h, o: 1.0, h: 1.0, l: 1.0, c: 1.0, vol: 2.0, buy: Some(1.5) };
+        let page = |r: std::ops::Range<i64>| History { klines: r.map(k).collect(), ..Default::default() };
+        let mut a = Agg::default();
+        let sub = |m| Sub { market: m, base: "BTC".into(), quote: "USDT".into() };
+        let venues = || vec![(Exchange::Binance, Market::Perp, sub(Market::Perp)), (Exchange::Okx, Market::Perp, sub(Market::Perp)), (Exchange::Bybit, Market::Perp, sub(Market::Perp))];
+        for e in [Exchange::Binance, Exchange::Okx] { a.load_history_tf(e, Market::Perp, 60, &page(100..110)); }
+        let mut done = Default::default();
+        let ids = |p: Vec<(Exchange, Market, Sub, i64)>| p.into_iter().map(|x| (x.0, x.3 / h)).collect::<Vec<_>>();
+        // the two loaded venues are asked for the page before bar 100; Bybit has nothing loaded
+        assert_eq!(ids(older_plan(&a, &mut done, venues(), 60)), vec![(Exchange::Binance, 100), (Exchange::Okx, 100)]);
+        // asked again while the pages are in flight or after: nothing, however often the chart asks
+        assert!(older_plan(&a, &mut done, venues(), 60).is_empty());
+        // Binance answers with a page, OKX with an empty one (its retention is reached)
+        a.prepend_history_tf(Exchange::Binance, Market::Perp, 60, &page(90..100));
+        a.prepend_history_tf(Exchange::Okx, Market::Perp, 60, &History::default());
+        a.finish_history_tf(60);
+        // only Binance has an older bar to ask beyond; OKX's key is spent for good
+        assert_eq!(ids(older_plan(&a, &mut done, venues(), 60)), vec![(Exchange::Binance, 90)]);
+        assert!(older_plan(&a, &mut done, venues(), 60).is_empty());
+        // a venue at the cap is not asked at all
+        a.load_history_tf(Exchange::Bybit, Market::Perp, 60, &page(0..depth::TF_CAP as i64));
+        assert!(older_plan(&a, &mut done, venues(), 60).is_empty());
+        // other timeframes keep their own keys
+        a.load_history_tf(Exchange::Binance, Market::Perp, 15, &page(0..10));
+        assert_eq!(ids(older_plan(&a, &mut done, venues(), 15)), vec![(Exchange::Binance, 0)]);
+    }
+
+    #[test]
+    fn fetch_plan_tops_up_a_cache_up_to_the_cap() {
+        let now = 1_000_000 * 60_000;
+        assert_eq!(fetch_plan(None, now, 1), None);
+        // tip in the forming minute: the +2 overlap only
+        assert_eq!(fetch_plan(Some(now - 30_000), now, 1), Some(2));
+        // 20 h of downtime on 1m is past the old 1000-bar trim and now merges
+        assert_eq!(fetch_plan(Some(now - 20 * 3_600_000), now, 1), Some(1202));
+        // the 1m cap is 7 days, the other timeframes 5000 bars; beyond it the cache is replaced
+        assert_eq!(fetch_plan(Some(now - 166 * 3_600_000), now, 1), Some(9962));
+        assert_eq!(fetch_plan(Some(now - 7 * 86_400_000), now, 1), None);
+        assert_eq!(fetch_plan(Some(now - 4000 * 900_000), now, 15), Some(4002));
+        assert_eq!(fetch_plan(Some(now - 6000 * 900_000), now, 15), None);
+        // a tip ahead of the clock never wraps
+        assert_eq!(fetch_plan(Some(now + 60_000), now, 1), Some(2));
     }
 
     #[test]

@@ -137,14 +137,14 @@ fn on_msg(e: &Emit, sym: &str, mult: f64, seq: &mut Option<i64>, f: Frame) -> bo
 }
 
 /// Recent REST history for the chart (one-minute candles); see `History`.
-pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_tf(sub, 1, minutes).await }
+pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_until(sub, 1, minutes, None).await }
 
-/// `bars` candles of `tf` minutes; see `ex::history_tf`.
+/// `bars` candles of `tf` minutes; see `ex::history_until`.
 /// Candles: native granularity (1m/5m/15m/1h/4h), 300 per request (cap 350), newest first, empty
 /// periods omitted (forward-filled here); no taker split.
 /// ponytail: CDE perps have no public OI or funding history; funding is the single last settlement
 /// from the product details, OI comes only from the live poll.
-pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<History> {
+pub async fn history_until(sub: &Sub, tf: u32, bars: usize, until: Option<i64>) -> anyhow::Result<History> {
     use futures_util::{StreamExt, TryStreamExt};
     let gran = match tf { 1 => "ONE_MINUTE", 5 => "FIVE_MINUTE", 15 => "FIFTEEN_MINUTE", 60 => "ONE_HOUR", 240 => "FOUR_HOUR",
         _ => anyhow::bail!("coinbase has no {tf}m candles") };
@@ -159,7 +159,7 @@ pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<Histo
         }
         Market::Option => return Ok(History::default()),
     };
-    let (start, end) = window_tf(tf, bars);
+    let (start, end) = window_tf_until(tf, bars, until);
     let step = tf as i64 * 60_000;
     const PAGE: i64 = 300; // candles per request, under the 350 cap
     let pages: Vec<i64> = (start..=end).step_by((PAGE * step) as usize).collect();
@@ -177,7 +177,8 @@ pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<Histo
     let mut h = History { klines: continuous_tf(k.concat(), end, bars, tf), ..Default::default() };
     let f = &product["future_product_details"];
     let every = f["funding_interval"].as_str().and_then(|s| s.trim_end_matches('s').parse::<i64>().ok()).unwrap_or(3600);
-    if let (Some(t), Some(r)) = (f["funding_time"].as_str().map(iso_ms).filter(|t| *t > 0), opt_num(&f["funding_rate"])) {
+    // the one settlement is today's: not part of an older page
+    if let (Some(t), Some(r)) = (f["funding_time"].as_str().map(iso_ms).filter(|t| *t > 0 && until.is_none()), opt_num(&f["funding_rate"])) {
         h.funding.push((t, r * 3600.0 / every as f64));
     }
     Ok(h)

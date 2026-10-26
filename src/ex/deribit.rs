@@ -122,9 +122,9 @@ fn ticker(e: &Emit, last: &mut HashMap<String, (f64, f64)>, d: &Value) {
     e.send(s, ts, Event::Bbo { bid: z("best_bid_price") * idx, bid_qty: z("best_bid_amount"), ask: z("best_ask_price") * idx, ask_qty: z("best_ask_amount") });
 }
 
-pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_tf(sub, 1, minutes).await }
+pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_until(sub, 1, minutes, None).await }
 
-pub async fn history_tf(_sub: &Sub, _tf: u32, _bars: usize) -> anyhow::Result<History> { Ok(History::default()) }
+pub async fn history_until(_sub: &Sub, _tf: u32, _bars: usize, _until: Option<i64>) -> anyhow::Result<History> { Ok(History::default()) }
 
 #[cfg(test)]
 mod tests {

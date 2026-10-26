@@ -221,17 +221,17 @@ mod tests {
 }
 
 /// Recent REST history for the chart (1m); see `History`.
-pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_tf(sub, 1, minutes).await }
+pub async fn history(sub: &Sub, minutes: usize) -> anyhow::Result<History> { history_until(sub, 1, minutes, None).await }
 
-/// `history` at `tf`-minute resolution; see `ex::history_tf`.
+/// `history` at `tf`-minute resolution; see `ex::history_until`.
 // ponytail: MEXC has no public OI, long/short or taker-volume history (contract web endpoints are blocked);
 // those series stay empty and fill from the live feed
-pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<History> {
+pub async fn history_until(sub: &Sub, tf: u32, bars: usize, until: Option<i64>) -> anyhow::Result<History> {
     let (b, q) = (sub.base.to_uppercase(), sub.quote.to_uppercase());
     let perp = match sub.market { Market::Option => return Ok(History::default()), m => m == Market::Perp };
     let (spot_iv, fut_iv) = match tf { 1 => ("1m", "Min1"), 5 => ("5m", "Min5"), 15 => ("15m", "Min15"),
         60 => ("60m", "Min60"), 240 => ("4h", "Hour4"), _ => anyhow::bail!("mexc: unsupported timeframe {tf}m") };
-    let (start, end) = window_tf(tf, bars);
+    let (start, end) = window_tf_until(tf, bars, until);
     let step = tf as i64 * 60_000;
     // spot: 500 rows per request (startTime/endTime ms, endTime exclusive); contract: 2000 rows (start/end seconds)
     let per = if perp { 2000 } else { 500 } * step;
@@ -249,8 +249,10 @@ pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<Histo
         let funding = async {
             let (cs, _, hours) = perp_init(&sym).await?;
             let n = ((end - start) as f64 / (hours * 3.6e6)) as usize + 2;
-            let pages = all((1..=n.div_ceil(1000)).map(|p| format!(
-                "https://contract.mexc.com/api/v1/contract/funding_rate/history?symbol={sym}&page_num={p}&page_size={}", n.min(1000))).collect()).await;
+            // pages count from the newest settlement: skip the ones after an older window
+            let (size, skip) = (n.min(1000), until.map_or(0, |_| ((now_ms() - end) as f64 / (hours * 3.6e6)) as usize));
+            let pages = all((skip / size + 1..=(skip + n).div_ceil(size)).map(|p| format!(
+                "https://contract.mexc.com/api/v1/contract/funding_rate/history?symbol={sym}&page_num={p}&page_size={size}")).collect()).await;
             anyhow::Ok((cs, hours, pages))
         };
         let (candles, init) = tokio::join!(all(urls), funding);
@@ -269,7 +271,7 @@ pub async fn history_tf(sub: &Sub, tf: u32, bars: usize) -> anyhow::Result<Histo
         h.funding = fund.iter().flat_map(|v| v["data"]["resultList"].as_array().cloned().unwrap_or_default()).map(|r| {
             let cyc = opt_num(&r["collectCycle"]).filter(|c| *c > 0.0).unwrap_or(hours);
             (r["settleTime"].as_i64().unwrap_or(0), num(&r["fundingRate"]) / cyc)
-        }).filter(|(t, r)| *t >= from && r.is_finite()).collect();
+        }).filter(|(t, r)| *t >= from && *t < end + step && r.is_finite()).collect();
         h.funding.sort_by_key(|x| x.0);
         h.funding.dedup_by_key(|x| x.0);
     } else {

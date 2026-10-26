@@ -103,9 +103,10 @@ pub struct ChartLine { pub price: f64, pub ex: Option<Exchange>, pub tag: String
 pub enum LineAct { Order(Exchange, String), TpSl(Exchange, String), Preview(&'static str) }
 
 /// Requests from the chart to the app: move an order / trigger, put a price into the order panel,
-/// or a position tool's whole order (entry, stop, target and the size risking its share of equity).
+/// a position tool's whole order (entry, stop, target and the size risking its share of equity), or the
+/// native interval whose history page before the oldest loaded bar is wanted (the view reached it).
 #[derive(Clone, Debug)]
-pub enum ChartAct { Move(LineAct, f64), Cancel(LineAct), Fill(f64), Position { entry: f64, stop: f64, target: f64, qty: Option<f64> } }
+pub enum ChartAct { Move(LineAct, f64), Cancel(LineAct), Fill(f64), Position { entry: f64, stop: f64, target: f64, qty: Option<f64> }, Older(i64) }
 
 /// One moving average line: period, color (0xRRGGBB), exponential instead of simple, shown.
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -234,6 +235,8 @@ pub struct Chart {
     #[serde(skip)] pending_move: Option<(LineAct, String, f64, Option<f64>, Pos2)>,
     /// requests for the app, drained each frame
     #[serde(skip)] pub actions: Vec<ChartAct>,
+    /// (native interval, oldest bar) an `Older` request went out for; cleared when the view leaves the left edge
+    #[serde(skip)] older_req: Option<(i64, i64)>,
     /// set by the app: confirm before moving orders; keys present (order tools shown); account equity
     /// (USD) for the position tool's size; whether the trading venue amends in place
     #[serde(skip)] pub confirm: bool,
@@ -255,7 +258,7 @@ impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: true, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, fills_on: true, algos: true, whale_usd: 100_000.0, cone: false, style: 2, lines: vec![], wants_options: false, fills: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], older_req: None, confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: true, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, fills_on: true, algos: true, whale_usd: 100_000.0, cone: false, style: 2, lines: vec![], wants_options: false, fills: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
             panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, false), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false), (Pane::Delta, false), (Pane::Iv, false), (Pane::Skew, false)],
         }
     }
@@ -397,6 +400,12 @@ impl Chart {
         self.right = self.right.clamp(-n_vis * 0.5, bars.len() as f32);
         let right_edge = bars.len() as f32 - 1.0 + 4.0 - self.right;
         let fr = Frame { first: right_edge - n_vis, right_edge, bar_w: self.bar_w, plot: main };
+        // the view reached the oldest loaded bar: ask for the page before it, once per oldest bar (and not
+        // while the interval's history is still loading)
+        if fr.first >= 1.0 { self.older_req = None; } else if !loading_tf {
+            let req = (native_tf(self.tf), bars[0].t);
+            if self.older_req != Some(req) { self.older_req = Some(req); self.actions.push(ChartAct::Older(req.0)); }
+        }
         let i0 = fr.first.floor().max(0.0) as usize;
         let i1 = (right_edge.ceil() as usize).min(bars.len() - 1);
         if i0 > i1 { return; }
