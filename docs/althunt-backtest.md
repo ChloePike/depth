@@ -408,3 +408,33 @@ Real book depth (Binance bookDepth archive, nearest snapshot before the firing) 
 - KOGE / BR (Alpha pools): on-chain PancakeSwap pools; LP removal is on-chain data
 - USDe/wBETH/BNSOL, ATOM 2025-10-10: Binance spot depeg / 8 ms print; not an operator move
 - TAIKO Korean cage pump 2026-06: KRW spot venues; no perp signal
+
+## Classic cases only (2026-10-26)
+
+`python3 scripts/althunt.py fetch --only <case symbols> --sample 0` then `study --offline`: 37 documented
+operator cases with Binance USD-M data (5m metrics for every case window). For each signal: cases where it was
+true at some hour in the 72h before the move's start t0 / cases where it was evaluable, the median lead, and the
+same coin's "normal-time rate" (share of its 72h blocks in [t0-90d, t0-14d] where the signal was also true).
+
+| signal | before t0 | median lead | normal-time rate on the same coins |
+|---|---|---|---|
+| volume spike 20x | 29/33 | 60h | 40-84% |
+| pre-move drift | 25/35 | 40h | 64-96% |
+| already up 40% | 17/35 | 59h | 8-100% |
+| spike and retrace | 16/34 | 50h | 24-52% |
+| volume + OI up | 15/33 | 56h | 12-48% |
+| two-sided wicks | 14/33 | 67h | 0-48% |
+| crowd extremely long | 12/33 | 61h | 28-72% |
+| negative funding while rising | 3/32 | 49h | 0-8% |
+| OI stacking into a flat price | 3/34 | 8h | 0-16% |
+| price up while OI falls | 5/36 | 55h | 0-8% |
+| top traders long, crowd short | 0/33 | - | - |
+| funding at the cap | 1/38 | - | - |
+
+Reading: the frequent "precursors" are these coins' normal state (they also show in half or more of ordinary
+72h blocks), so they identify an operator-type coin, not the timing of its move; rare states (funding squeeze,
+OI stacking, price up / OI down) seldom preceded a case. COAI (97x), MMT and the ACT crash had no precursor at all.
+For an ordinary alt, a 20x volume spike shows in ~19% of 72h blocks (2.14 firings per coin-month in the scan), so
+operator coins show it 2-4x as often. Use: an "operator-type" watchlist score from the last 7-30 days (spike /
+wick / drift frequency, listing age, perp-dominated turnover, repeat offender), plus live momentum alerts on it;
+no early-warning claim.
