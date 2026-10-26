@@ -1,5 +1,0 @@
-module CT1 [system] {
-    header "t1.h"
-    link "t1_ffi"
-    export *
-}

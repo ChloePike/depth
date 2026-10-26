@@ -1,6 +1,6 @@
-//! Bridge for the native (SwiftUI) panels: one JSON state snapshot the host polls, and JSON
-//! actions it sends. egui keeps drawing the chart, book and option chain; everything else
-//! (title bar, order entry, account tables, settings, status bar) is SwiftUI.
+//! Bridge between the egui panels and the engine: one JSON state snapshot (`state_json`, rebuilt a few
+//! times a second by `App::state_doc`) that the order entry, account tables, settings and header read,
+//! and the JSON actions (`call`) those panels send back.
 use super::{l, App};
 use eframe::egui;
 use serde_json::{json, Value};
@@ -13,14 +13,14 @@ fn parse_ex(v: &Value) -> Option<Exchange> { Exchange::parse(v.as_str()?) }
 fn side_name(s: Side) -> &'static str { if s == Side::Buy { "long" } else { "short" } }
 
 impl App {
-    /// Everything the native panels show, as one JSON document (polled ~5x a second).
-    pub fn state_json(&mut self) -> String {
-        // alerts are checked here too: the host polls this twice a second even when the chart is hidden
+    /// Everything the panels show, as one JSON document.
+    pub(crate) fn state_json(&mut self) -> String {
+        // alerts are checked here too, so they fire while the chart is hidden (the Hunter page)
         { let agg = self.eng.agg.clone(); let g = agg.lock().unwrap(); self.alerts_tick(&g); }
-        let fired: Vec<Value> = self.chart.fired.drain(..).map(|(title, body)| json!({"title": title, "body": body})).collect();
         let a = self.eng.agg.lock().unwrap();
         let st = self.eng.stats.lock().unwrap();
         let book_market = match self.mode { Market::Margin | Market::Option => Market::Spot, m => m };
+        // messages per second (the keyboard's live light, `kbd_state`), measured over about a second
         let now = Instant::now();
         if now.duration_since(self.rate.0).as_secs_f64() >= 1.0 {
             self.rate.2 = st.total.saturating_sub(self.rate.1) as f64 / now.duration_since(self.rate.0).as_secs_f64();
@@ -33,10 +33,6 @@ impl App {
             v.get(v.len() / 2).copied()
         };
         let nowms = now_ms();
-        let venues: Vec<Value> = Exchange::ALL.iter().map(|&e| {
-            let last = st.venue.iter().filter(|((x, _), _)| *x == e).map(|(_, v)| v.1).max();
-            json!({"ex": ex_name(e), "on": !self.eng.off.contains(&e), "alive": last.is_some_and(|l| nowms - l < 5_000), "lat_ms": st.latency(e)})
-        }).collect();
 
         let ex = self.trade.ex;
         let symbol = trade::symbol(&self.eng.base);
@@ -58,10 +54,6 @@ impl App {
             "vol24_base": tk.as_ref().map(|t| t.base_vol), "vol24_usd": tk.as_ref().map(|t| t.quote_vol), "chg24": tk.as_ref().map(|t| t.chg_pct),
             "funding_pred_bph": a.funding_oi_weighted().map(|f| f * 1e4), "funding_settled_bph": a.funding_settled_oi_weighted().map(|f| f * 1e4),
             "basis_bps": basis, "cvd": a.cvd_total(book_market),
-        });
-        let stats = json!({
-            "msgs_per_s": self.rate.2, "mem_mb": st.rss_mb, "backlog": st.backlog,
-            "history": [st.hist_total.saturating_sub(st.hist_pending), st.hist_total], "errors": st.hist_errors.len(), "hist_errors": st.hist_errors,
         });
         let push_ms = st.latency(ex);
         drop(st);
@@ -199,36 +191,23 @@ impl App {
                 "book_bid_usd": usd(&b), "book_ask_usd": usd(&k), "carry": carry,
             })
         };
-        let (chart, book) = {
-            let ag = self.eng.agg.lock().unwrap();
-            let mut b = self.book.native_json(&ag, self.mode);
-            b["width"] = self.book_w.into();
-            let mut c = self.chart.native_json(&ag, self.mode, &self.eng.base);
-            c["layout"] = self.layout.clone().into();
-            (c, b)
-        };
         json!({
             "base": self.eng.base, "mode": format!("{:?}", self.mode), "lang": super::lang_code(), "langs": super::LANGS, "demo": depth::demo::on(),
-            "header": header, "venues": venues, "stats": stats, "trade": trade_v,
+            "header": header, "trade": trade_v,
             "positions": positions, "opt_positions": opt_positions, "orders": orders, "tpsl": tpsl, "tpsl_wait": tpsl_wait,
             "history": {"orders": hist.0, "fills": hist.1, "closed": hist.2, "updated_ms": (hist.3 != i64::MAX).then_some(hist.3),
                         "loading": !self.eng.account.lock().unwrap().history_loading.is_empty()},
             "wallets": wallets, "balances": balances, "algos": algos, "transferring": transferring, "binance_pm": pm, "log": log, "keys": keys,
             "prefs": serde_json::to_value(&self.prefs).unwrap_or(Value::Null),
             "route": serde_json::to_value(&self.route).unwrap_or(Value::Null),
-            "chart": chart, "book": book, "fired": fired, "signals": signals, "quant": quant,
+            "signals": signals, "quant": quant,
             "book_click": self.trade.fill.map(|(e, px)| json!({"ex": ex_name(e), "px": px})),
             "tradable": trade::TRADABLE.iter().map(|e| ex_name(*e)).collect::<Vec<_>>(),
             "risk": risk, "kill": kill, "plans": plans,
         }).to_string()
     }
 
-    /// One action from the native panels; returns {"ok": true, ...} or {"ok": false, "error": ...}.
-    pub fn call_json(&mut self, ctx: &egui::Context, req: &str) -> String {
-        let r = serde_json::from_str::<Value>(req).map_err(|e| e.to_string()).and_then(|v| self.call(ctx, &v));
-        match r { Ok(v) => { let mut v = v; v["ok"] = true.into(); v.to_string() } Err(e) => json!({"ok": false, "error": e}).to_string() }
-    }
-
+    /// One action from the panels; returns the op's result or an error message.
     pub(crate) fn call(&mut self, ctx: &egui::Context, v: &Value) -> Result<Value, String> {
         let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
         let f = |k: &str| v[k].as_f64();
@@ -236,14 +215,6 @@ impl App {
         match v["op"].as_str().unwrap_or_default() {
             "set_base" => { let b = s("base").to_uppercase(); if !b.is_empty() && b != self.eng.base { self.pending_base = Some(b); } }
             "set_mode" => { if let Some(m) = Market::parse(&s("mode")) { self.pending_mode = Some(m); } }
-            "toggle_venue" => {
-                let e = exv()?;
-                let on = self.eng.off.contains(&e);
-                if !on && self.eng.off.len() + 1 >= Exchange::ALL.len() { return Err("keep at least one venue".into()); }
-                // only this venue connects / disconnects; the others keep streaming
-                self.eng.set_venue(e, on, ctx);
-                if !on { if self.chart.src == Some(e) { self.chart.src = None; } if self.book.src == Some(e) { self.book.src = None; } }
-            }
             "set_trade_venue" => { let e = exv()?; if !trade::TRADABLE.contains(&e) { return Err("not tradable".into()); } self.trade.ex = e; self.route.fixed = e; }
             "cache_size" => return Ok(json!({"bytes": depth::sys::cache_bytes()})),
             "clear_cache" => return Ok(json!({"freed": depth::sys::clear_cache(), "bytes": depth::sys::cache_bytes()})),
@@ -266,10 +237,6 @@ impl App {
             // the daily loss stop counts from now
             "risk_reset" => self.eng.account.lock().unwrap().day_start.1.clear(),
             "set_route" => { self.route = serde_json::from_value(v["route"].clone()).map_err(|e| e.to_string())?; }
-            "tickers" => {
-                let t = self.eng.tickers.lock().unwrap();
-                return Ok(json!({"tickers": t.iter().map(|x| json!({"base": x.base, "last": x.last, "chg_pct": x.chg_pct, "quote_vol": x.quote_vol})).collect::<Vec<_>>()}));
-            }
             "preview" | "place" => {
                 let req = self.order_req(v)?;
                 let plan = self.plan_at(&req, None, v["tpsl"] == true)?;
@@ -362,17 +329,6 @@ impl App {
                 let t = self.eng.account.lock().unwrap().tpsl.iter().find(|t| t.ex == e && t.id == id).cloned().ok_or("TP/SL not found")?;
                 self.eng.cancel_tpsl(&t, ctx);
             }
-            "chart" => {
-                if let Some(l) = v["layout"].as_str() { self.layout = l.to_string(); }
-                let b = self.eng.base.clone();
-                self.chart.native_set(v, &b);
-            }
-            "book" => self.book.native_set(v),
-            "book_levels" => {
-                let scope = self.eng.venues().into_iter().collect();
-                let n = v["n"].as_u64().unwrap_or(20).clamp(3, 50) as usize;
-                return Ok(self.book.native_levels(&self.eng.agg.lock().unwrap(), self.mode, &scope, n));
-            }
             "venue_share" => {
                 // per venue: resting depth within +-1% of its own mid (USDT) and traded volume over the window
                 let a = self.eng.agg.lock().unwrap();
@@ -435,7 +391,6 @@ impl App {
                 let lev = v["leverage"].as_u64().ok_or("leverage")? as u32;
                 self.eng.set_leverage(self.trade.ex, trade::symbol(&self.eng.base), lev, ctx);
             }
-            "book_fill" => { if let (Some(e), Some(px)) = (parse_ex(&v["ex"]), v["px"].as_f64()) { self.trade.fill = Some((e, px)); } }
             "load_history" => self.eng.load_history(ctx),
             "load_wallets" => self.eng.load_wallets(exv()?, ctx),
             "transfer" => {

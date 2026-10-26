@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "ui", "ffi"]
+members = [".", "ui"]
 default-members = [".", "ui"]
 
 [package]

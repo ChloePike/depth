@@ -1,7 +1,5 @@
-//! Account strip for the egui app: a port of the SwiftUI host's AccountPanel, AccountTables and
-//! AccountAssets (positions, open orders, TP/SL, signals, history, order log, assets and the
-//! transfer sheet). It reads the same state document (`App::state_json`) and sends the same ops
-//! (`App::call`) as the native panels, so both hosts act identically.
+//! Account strip: positions, open orders, TP/SL, signals, history, order log, assets and the
+//! transfer sheet. It reads the state document (`App::state_json`) and sends ops (`App::call`).
 use super::kit::{self, Look, H, H_LG, H_SM};
 use super::order::{dialog, dialog_buttons, dialog_title, leak, parse, tpsl_modal, usd, Call, TpSlSheet};
 use super::{fmt_dp, fmt_px, hms, l, lf, theme::*};
@@ -88,7 +86,7 @@ impl Default for AccountPanel {
     }
 }
 
-// ---- formatting (the Swift `Fmt`) ----
+// ---- formatting ----
 
 fn s(v: &Value) -> &str { v.as_str().unwrap_or_default() }
 fn f(v: &Value) -> f64 { v.as_f64().unwrap_or(0.0) }
@@ -1507,7 +1505,7 @@ impl AccountPanel {
 mod tests {
     use super::*;
     #[test]
-    fn formats_like_the_swift_tables() {
+    fn formats_the_tables() {
         assert_eq!(qty(1234.56), "1,234.6");
         assert_eq!(qty(0.5), "0.50000");
         assert_eq!(signed_d(-0.001, 2), "0.00");

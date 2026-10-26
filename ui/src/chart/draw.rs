@@ -8,14 +8,6 @@ use super::fmt::{fmt_qty_chart, span};
 pub(super) enum Tool { HLine, Trend, Ray, Fib, Rect, Channel, Text, Measure, Position }
 
 impl Tool {
-    const ALL: [Tool; 9] = [Tool::HLine, Tool::Trend, Tool::Ray, Tool::Fib, Tool::Rect, Tool::Channel, Tool::Text, Tool::Measure, Tool::Position];
-    pub(super) fn id(self) -> &'static str {
-        match self {
-            Tool::HLine => "hline", Tool::Trend => "trend", Tool::Ray => "ray", Tool::Fib => "fib", Tool::Rect => "rect",
-            Tool::Channel => "channel", Tool::Text => "text", Tool::Measure => "measure", Tool::Position => "position",
-        }
-    }
-    pub(super) fn parse(s: &str) -> Option<Tool> { Tool::ALL.into_iter().find(|t| t.id() == s) }
     /// clicks needed to place it
     fn points(self) -> usize { match self { Tool::HLine | Tool::Text => 1, Tool::Channel => 3, _ => 2 } }
 }

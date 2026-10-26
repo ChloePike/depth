@@ -1,21 +1,11 @@
 #!/bin/sh
-# Build the SwiftUI app (app/) around the Rust staticlib (ffi/) and install it.
+# Build the egui app (ui/src/main.rs) and install it as a macOS app bundle.
 # APP=<path> overrides the destination (default: /Applications/Depth.app).
-# HOST=egui bundles the plain egui app (ui/src/main.rs) instead of the SwiftUI host.
-# Keys, folders and UserDefaults of the old "Terminal One" build (local.terminal-one) are migrated
-# on first launch (sys.rs, App.swift).
+# Keys and folders of the old "Terminal One" build are migrated on first launch (sys.rs).
 set -e
 cd "$(dirname "$0")/.."
-if [ "$HOST" = "egui" ]; then
-  cargo build --release -p t1-ui --bin depth
-  BIN=target/release/depth
-else
-  CARGO_TARGET_DIR=target/main cargo build --release -p t1-ffi
-  # SwiftPM does not track the staticlib: without this it keeps the old binary and the old Rust code
-  rm -f app/.build/release/Depth
-  (cd app && swift build -c release)
-  BIN=app/.build/release/Depth
-fi
+cargo build --release -p t1-ui --bin depth
+BIN=target/release/depth
 APP="${APP:-/Applications/Depth.app}"
 # the app was called Terminal One before: remove that copy so only one is installed
 [ "$APP" = "/Applications/Depth.app" ] && rm -rf "/Applications/Terminal One.app"
@@ -25,7 +15,6 @@ cp "$BIN" "$APP/Contents/MacOS/Depth"
 cp assets/icons/*.png "$APP/Contents/Resources/"
 # app icon (rendered by scripts/make-icon.swift, converted with iconutil)
 cp assets/appicon/Depth.icns "$APP/Contents/Resources/Depth.icns"
-cp app/Resources/*.txt "$APP/Contents/Resources/" 2>/dev/null || true
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -6,8 +6,7 @@
 
 | 系统 | 文件 | 说明 |
 |---|---|---|
-| macOS（Apple 芯片） | `Depth-macos-arm64.zip` | 日常使用的版本。未公证：第一次打开请**右键 Depth.app → 打开 → 打开**（或执行一次 `xattr -dr com.apple.quarantine /Applications/Depth.app`）。 |
-| macOS 原生外壳 | `Depth-macos-arm64-swiftui.zip` | 同一个终端，套在 SwiftUI 窗口里。 |
+| macOS（Apple 芯片） | `Depth-macos-arm64.zip` | 未公证：第一次打开请**右键 Depth.app → 打开 → 打开**（或执行一次 `xattr -dr com.apple.quarantine /Applications/Depth.app`）。 |
 | Windows x64 | `Depth-windows-x64.zip` | 未签名，SmartScreen 会提示一次。 |
 | Linux x64 | `Depth-linux-x64.tar.gz` | 需要支持 OpenGL / Vulkan 的桌面环境。 |
 

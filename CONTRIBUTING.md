@@ -3,7 +3,7 @@
 Thanks for helping. A few rules keep the codebase consistent:
 
 - **English only** in code: identifiers, comments, log and error strings. UI text goes through the
-  translation files (`assets/i18n/*.txt`, `app/Resources/zh-*.txt`).
+  translation files (`assets/i18n/*.txt`, `assets/i18n/panels/*.txt`).
 - **Connectors stay thin**: one file per exchange in `src/ex/`, `serde_json::Value` parsing, every
   payload converted to `Event`. Sizes in base units, funding as an hourly rate, open interest one-sided.
 - **No REST polling for account data.** Private state comes from WebSocket pushes; every REST call goes
@@ -14,6 +14,6 @@ Thanks for helping. A few rules keep the codebase consistent:
   After touching `src/lib.rs` or `src/ws.rs`, run `scripts/probe-all.sh 20`.
 - Keep changes small and tested: `cargo test --workspace` must pass.
 
-Build the app with `scripts/bundle.sh` (macOS 26, Rust stable, Swift 6).
+Build the app with `scripts/bundle.sh` (macOS 26, Rust stable) or `cargo build --release -p t1-ui` (any OS).
 
 By contributing you agree that your contribution is licensed under the GPL-3.0-or-later.

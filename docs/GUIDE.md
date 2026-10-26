@@ -6,8 +6,7 @@
 
 | OS | File | Notes |
 |---|---|---|
-| macOS (Apple silicon) | `Depth-macos-arm64.zip` | The app used day to day. Not notarized: first launch **right-click Depth.app → Open → Open** (or `xattr -dr com.apple.quarantine /Applications/Depth.app` once). |
-| macOS, native shell | `Depth-macos-arm64-swiftui.zip` | Same terminal inside a SwiftUI window. |
+| macOS (Apple silicon) | `Depth-macos-arm64.zip` | Not notarized: first launch **right-click Depth.app → Open → Open** (or `xattr -dr com.apple.quarantine /Applications/Depth.app` once). |
 | Windows x64 | `Depth-windows-x64.zip` | Unsigned: SmartScreen asks once. |
 | Linux x64 | `Depth-linux-x64.tar.gz` | Needs a desktop with OpenGL / Vulkan. |
 

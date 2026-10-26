@@ -187,7 +187,7 @@ pub struct Chart {
     scale: Scale,
     /// positions / orders of the current symbol, set by the app every frame
     #[serde(skip)] pub lines: Vec<ChartLine>,
-    /// an option-data pane is on: the host subscribes the option chains
+    /// an option-data pane is on: the app subscribes the option chains
     #[serde(skip)] pub wants_options: bool,
     /// own fills of the current symbol (perp), oldest first, set by the app when they change
     #[serde(skip)] pub fills: Vec<depth::trade::Fill>,
@@ -221,7 +221,7 @@ pub struct Chart {
     #[serde(skip)] replay: Option<Replay>,
     /// last price seen per base, to detect alert crossings
     #[serde(skip)] alert_px: std::collections::HashMap<String, f64>,
-    /// alerts that fired since the host last asked: (title, body)
+    /// alerts that fired since the app last notified: (title, body)
     #[serde(skip)] pub fired: Vec<(String, String)>,
     /// banner of the last alert and until when it shows
     #[serde(skip)] toast: Option<(String, std::time::Instant, Color32)>,
@@ -379,8 +379,7 @@ impl Chart {
         for p in [Pane::Premium, Pane::Ofi, Pane::BookFlow, Pane::Rsi, Pane::Macd, Pane::Delta, Pane::Iv, Pane::Skew] { if !self.panes.iter().any(|x| x.0 == p) { self.panes.push((p, false)); } }
         let smarket = if market == Market::Margin { Market::Spot } else { market };
         self.wants_options = self.panes.iter().any(|(p, on)| *on && matches!(p, Pane::Iv | Pane::Skew));
-        // hosted: the native toolbar above the chart drives these through native_set
-        if !native() { self.toolbar(ui, a, smarket, base); }
+        self.toolbar(ui, a, smarket, base);
         self.base_unit = base.to_string();
         let Some((raw, bars, loading_tf, now, next_t, live)) = self.load_bars(ui, a, smarket) else { return };
 
@@ -673,86 +672,6 @@ impl Chart {
     /// Back to auto-fit at the live edge: a manual price range from one symbol is meaningless for
     /// another (BTC at 80k vs a coin at 0.3 would leave the chart empty).
     pub fn reset_view(&mut self) { self.y_range = None; self.right = 0.0; self.pending.clear(); self.liq = LiqCache::default(); self.cache = HeatCache::default(); }
-
-    /// Chart controls for the native toolbar.
-    pub fn native_json(&self, a: &Agg, market: Market, base: &str) -> serde_json::Value {
-        let market = if market == Market::Margin { Market::Spot } else { market };
-        let mut venues: Vec<String> = a.series.keys().filter(|(e, m)| *m == market && e.is_some()).filter_map(|(e, _)| e.map(|e| format!("{e:?}"))).collect();
-        venues.sort();
-        let tool = self.tool.map(Tool::id);
-        // armed alerts, the current symbol first
-        let mut alerts: Vec<serde_json::Value> = self.drawings.iter().flat_map(|(b, l)| l.iter().enumerate().filter_map(move |(i, d)| {
-            let s = d.alert.as_ref()?;
-            Some(serde_json::json!({"base": b, "i": i, "px": d.level_at(depth::now_ms()), "kind": d.tool.id(), "sound": s, "sound_name": sound_name(s)}))
-        })).collect();
-        alerts.sort_by(|x, y| (x["base"].as_str() != Some(base), x["base"].as_str()).cmp(&(y["base"].as_str() != Some(base), y["base"].as_str())));
-        serde_json::json!({
-            "tf": self.tf, "tfs": TFS.iter().map(|(m, l)| serde_json::json!([m, l])).collect::<Vec<_>>(), "quick": TF_QUICK,
-            "src": self.src.map(|e| format!("{e:?}")), "venues": venues,
-            "panes": self.panes.iter().filter(|(p, _)| !p.perp_only() || market == Market::Perp)
-                .map(|(p, on)| serde_json::json!({"key": p.key(), "label": t(p.key()), "on": on})).collect::<Vec<_>>(),
-            "ma": self.ma, "heat": self.heat, "liqmap": self.liqmap, "sr": self.sr, "walls": self.walls, "mark": self.mark, "breakouts": self.breakouts, "vwap": self.vwap, "bb": self.bb, "cone": self.cone, "perp": market == Market::Perp,
-            "mas": self.mas.iter().map(|m| serde_json::json!({"n": m.n, "col": format!("#{:06x}", m.col), "ema": m.ema, "on": m.on})).collect::<Vec<_>>(), "magnet": self.magnet,
-            "ind": self.ind, "hide": self.hide, "fp": self.fp, "fp_style": self.fp_style, "whales": self.whales, "alert_sound": self.alert_sound,
-            "replay": match self.replay { None => "off", Some(Replay { at: None, .. }) => "pick", Some(_) => "on" },
-            "sounds": sounds(),
-            "alerts": alerts,
-            "tool": tool, "drawings": self.drawings.get(base).map_or(0, |v| v.len()), "panned": self.right.abs() > 0.5 || self.bar_w != 7.0,
-        })
-    }
-
-    /// Apply one change from the native toolbar: {tf}, {src: venue|null}, {pane: key, on}, {ma|heat|liqmap: bool},
-    /// {tool: "hline"|"trend"|"ray"|null}, {clear_drawings: true}, {reset_view: true}.
-    pub fn native_set(&mut self, v: &serde_json::Value, base: &str) {
-        if let Some(tf) = v["tf"].as_i64() { if TFS.iter().any(|(m, _)| *m == tf) { self.tf = tf; } }
-        if v.get("src").is_some() { self.src = v["src"].as_str().and_then(Exchange::parse); }
-        if let Some(k) = v["pane"].as_str() { for (p, on) in self.panes.iter_mut() { if p.key() == k { *on = v["on"].as_bool().unwrap_or(!*on); } } }
-        if let Some(b) = v["ma"].as_bool() { self.ma = b; }
-        if let Some(b) = v["heat"].as_bool() { self.heat = b; }
-        if let Some(b) = v["liqmap"].as_bool() { self.liqmap = b; }
-        if let Some(b) = v["sr"].as_bool() { self.sr = b; }
-        if let Some(b) = v["walls"].as_bool() { self.walls = b; }
-        if let Some(b) = v["mark"].as_bool() { self.mark = b; }
-        if let Some(b) = v["breakouts"].as_bool() { self.breakouts = b; }
-        if let Some(b) = v["vwap"].as_bool() { self.vwap = b; }
-        if let Some(b) = v["cone"].as_bool() { self.cone = b; }
-        if let Some(b) = v["bb"].as_bool() { self.bb = b; }
-        if let Some(b) = v["magnet"].as_bool() { self.magnet = b; }
-        if let Some(b) = v["hide"].as_bool() { self.hide = b; }
-        if let Some(b) = v["fp"].as_bool() { self.fp = b; }
-        if let Some(n) = v["fp_style"].as_u64() { self.fp_style = (n as u8).min(1); }
-        if let Some(b) = v["whales"].as_bool() { self.whales = b; }
-        // {ind: {rsi?, macd?: [f, s, g], bb_n?, bb_k?}}
-        let ind = &v["ind"];
-        if let Some(n) = ind["rsi"].as_u64() { self.ind.rsi = (n as usize).clamp(1, 500); }
-        if let Some(m) = ind["macd"].as_array() { for (k, x) in m.iter().take(3).enumerate() { if let Some(n) = x.as_u64() { self.ind.macd[k] = (n as usize).clamp(1, 500); } } }
-        if let Some(n) = ind["bb_n"].as_u64() { self.ind.bb_n = (n as usize).clamp(1, 500); }
-        if let Some(k) = ind["bb_k"].as_f64() { self.ind.bb_k = k.clamp(0.1, 10.0); }
-        if let Some(b) = v["replay"].as_bool() { self.replay = b.then(|| Replay::new(None, 0.0)); }
-        if let Some(s) = v["alert_sound"].as_str() { self.alert_sound = s.to_string(); play_sound(s); }
-        if let Some(s) = v["play"].as_str() { play_sound(s); }
-        // {alert: {base, i, sound?: id, off?: true}}
-        let al = &v["alert"];
-        if let (Some(b), Some(i)) = (al["base"].as_str(), al["i"].as_u64()) {
-            if let Some(d) = self.drawings.get_mut(b).and_then(|l| l.get_mut(i as usize)) {
-                if let Some(s) = al["sound"].as_str() { d.alert = Some(s.to_string()); play_sound(s); }
-                if al["off"].as_bool() == Some(true) { d.alert = None; }
-            }
-        }
-        // {ma_line: i, n?, col?: "#rrggbb", ema?, on?}
-        if let Some(m) = v["ma_line"].as_u64().and_then(|i| self.mas.get_mut(i as usize)) {
-            if let Some(n) = v["n"].as_u64() { m.n = (n as usize).clamp(1, 1000); }
-            if let Some(c) = v["col"].as_str().and_then(|c| u32::from_str_radix(c.trim_start_matches('#'), 16).ok()) { m.col = c & 0xffffff; }
-            if let Some(b) = v["ema"].as_bool() { m.ema = b; }
-            if let Some(b) = v["on"].as_bool() { m.on = b; }
-        }
-        if v.get("tool").is_some() {
-            self.tool = v["tool"].as_str().and_then(Tool::parse);
-            self.pending.clear();
-        }
-        if v["clear_drawings"].as_bool() == Some(true) { self.drawings.remove(base); }
-        if v["reset_view"].as_bool() == Some(true) { self.right = 0.0; self.bar_w = 7.0; self.y_range = None; }
-    }
 }
 
 /// Alert sounds: "none", macOS system sounds ("sys:Glass") and the bundled ones ("depth:chime").

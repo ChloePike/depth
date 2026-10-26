@@ -18,8 +18,7 @@ static RADIUS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(4)
 pub fn set_radius(r: u8) { RADIUS.store(r.min(12), Relaxed); }
 pub fn radius() -> u8 { RADIUS.load(Relaxed) }
 const fn pick(d: Color32, l: Color32, light: bool) -> Color32 { if light { l } else { d } }
-/// Translucent overlays (white on dark, black on light): they read the same on the solid egui
-/// panel and on the native window.
+/// Translucent overlays (white on dark, black on light): they read the same on any panel.
 const fn veil(a: u8, light: bool) -> Color32 { if light { Color32::from_rgba_premultiplied(0, 0, 0, a) } else { Color32::from_rgba_premultiplied(a, a, a, a) } }
 pub fn panel2() -> Color32 { veil(if light() { 8 } else { 13 }, light()) }
 pub fn hl() -> Color32 { veil(if light() { 14 } else { 23 }, light()) }
@@ -39,20 +38,13 @@ pub fn label_bg() -> Color32 { pick(Color32::from_rgb(0x1c, 0x1c, 0x1c), Color32
 /// off-state track of switches and sliders
 pub fn track() -> Color32 { pick(Color32::from_rgb(0x38, 0x38, 0x38), Color32::from_rgb(0xd1, 0xd1, 0xd6), light()) }
 /// the window behind the panels: the gutters between them read as black seams
-fn bg_c() -> Color32 { pick(if term() { Color32::BLACK } else { Color32::from_rgb(0x05, 0x05, 0x05) }, Color32::from_rgb(0xe9, 0xe9, 0xec), light()) }
+pub fn bg() -> Color32 { pick(if term() { Color32::BLACK } else { Color32::from_rgb(0x05, 0x05, 0x05) }, Color32::from_rgb(0xe9, 0xe9, 0xec), light()) }
 /// Opaque fill of popups, menus and windows (the panel veils are translucent and would show what is under them).
 pub fn popup_bg() -> Color32 { pick(Color32::from_rgb(0x1c, 0x1c, 0x1c), Color32::from_rgb(0xff, 0xff, 0xff), light()) }
-pub fn panel_c() -> Color32 { pick(if term() { Color32::BLACK } else { Color32::from_rgb(0x0f, 0x0f, 0x0f) }, Color32::WHITE, light()) }
+pub fn panel() -> Color32 { pick(if term() { Color32::BLACK } else { Color32::from_rgb(0x0f, 0x0f, 0x0f) }, Color32::WHITE, light()) }
 /// input wells (text fields): a step darker than controls
 pub fn well() -> Color32 { pick(if term() { Color32::from_rgb(0x0b, 0x0b, 0x0b) } else { Color32::from_rgb(0x12, 0x12, 0x12) }, Color32::from_rgb(0xf6, 0xf6, 0xf8), light()) }
 
-static NATIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Hosted in the SwiftUI window: egui leaves its backgrounds transparent and the native window
-/// (with its wallpaper tinting) shows through.
-pub fn set_native(on: bool) { NATIVE.store(on, Relaxed); }
-pub fn native() -> bool { NATIVE.load(Relaxed) }
-pub fn bg() -> Color32 { if native() { Color32::TRANSPARENT } else { bg_c() } }
-pub fn panel() -> Color32 { if native() { Color32::TRANSPARENT } else { panel_c() } }
 /// User-adjustable colors (Settings > Appearance), packed 0xRRGGBB; read every frame.
 static ACCENT_C: AtomicU32 = AtomicU32::new(0x4c9eeb);
 static UP_C: AtomicU32 = AtomicU32::new(0x26a69a);

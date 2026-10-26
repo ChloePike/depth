@@ -60,7 +60,6 @@ pub(super) fn sma(vals: &[f64], n: usize) -> Vec<Option<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::Tool;
     use super::super::fmt::countdown;
 
     #[test]
@@ -70,7 +69,6 @@ mod tests {
         assert_eq!(e[2], Some(2.0));
         // k = 2 / (3 + 1) = 0.5
         assert_eq!(e[3], Some(3.0));
-        assert_eq!(Tool::parse("fib").map(Tool::id), Some("fib"));
     }
 
     #[test]

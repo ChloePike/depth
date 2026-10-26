@@ -5,8 +5,7 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/ChloePike/depth"
 
-# The terminal's egui interface (chart, book, panels), shared by the eframe app (src/main.rs)
-# and the SwiftUI host (ffi/).
+# The terminal: the eframe app (src/main.rs) with its egui interface (chart, book, panels).
 [dependencies]
 depth = { path = ".." }
 anyhow = "1.0.104"

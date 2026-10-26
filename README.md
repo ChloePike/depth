@@ -64,16 +64,16 @@ troubleshooting) is in **[docs/GUIDE.md](docs/GUIDE.md)** ([中文](docs/GUIDE.z
 
 ## Download
 
-Each [release](https://github.com/ChloePike/depth/releases) has macOS (Apple silicon; plain and
-SwiftUI shell), Windows x64 (plain and WinUI shell) and Linux x64 builds. macOS builds are ad-hoc
-signed, not notarized: on first launch, right-click Depth.app and choose Open. Windows builds are unsigned.
+Each [release](https://github.com/ChloePike/depth/releases) has macOS (Apple silicon), Windows x64 and
+Linux x64 builds. macOS builds are ad-hoc signed, not notarized: on first launch, right-click Depth.app
+and choose Open. Windows builds are unsigned.
 
 ## Build
 
-Requirements: macOS 26, Rust (stable, edition 2024), Swift 6 (Command Line Tools or Xcode).
+Requirements: Rust (stable, edition 2024). The app bundle needs macOS 26; the binary builds on any OS.
 
 ```sh
-scripts/bundle.sh                 # builds and installs /Applications/Depth.app
+scripts/bundle.sh                 # builds and installs /Applications/Depth.app (macOS)
 APP=dist/Depth.app scripts/bundle.sh   # build into another location
 ```
 
@@ -83,7 +83,7 @@ Development:
 cargo test --workspace                                   # unit tests
 cargo run --bin probe -- binance perp BTC USDT 20        # live check of one connector
 scripts/probe-all.sh 20                                  # every exchange x market
-cargo run --release -p t1-ui                             # the all-egui build (any platform)
+cargo run --release -p t1-ui                             # run the app (any platform)
 ```
 
 ## Layout
@@ -91,9 +91,7 @@ cargo run --release -p t1-ui                             # the all-egui build (a
 ```
 src/        data layer: exchange connectors (src/ex), aggregation (agg.rs), trading (trade/),
             routing (route.rs), signals and models (quant.rs), WebSocket / REST plumbing (ws.rs)
-ui/         egui UI: chart, book, options; the native app hosts it for the chart and book
-ffi/        C ABI used by the SwiftUI app (state snapshot as JSON, actions, rendering into a view)
-app/        SwiftUI macOS app: toolbar, order panel, account tables, settings
+ui/         the app (eframe / egui): chart, book, options, order panel, account tables, settings
 scripts/    bundling, icon, live regression
 ```
 

@@ -1,4 +1,4 @@
-//! Pair picker: a port of the SwiftUI host's SymbolPicker. USDT perpetuals (engine tickers),
+//! Pair picker: USDT perpetuals (engine tickers),
 //! search ranked exact > prefix > contains, sortable columns, favorites and recently opened pairs
 //! (favorites.txt / recent.txt under ~/Library/Application Support/Depth). Click picks; arrows move
 //! the selection, Enter picks it (or the first match), Escape closes. Hotkeys (default ⌘K, ⌘[ ⌘], ⌘D)

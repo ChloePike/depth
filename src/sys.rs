@@ -329,8 +329,7 @@ fn allow(now: std::time::Instant, recent: &mut std::collections::VecDeque<std::t
 }
 
 /// An OS notification with a title line and a body: macOS Notification Center through osascript,
-/// a Windows toast through PowerShell, Linux libnotify's `notify-send`. Never blocks; shown by the
-/// plain egui build only (the native hosts post notifications themselves).
+/// a Windows toast through PowerShell, Linux libnotify's `notify-send`. Never blocks.
 pub fn notify(title: &str, body: &str) {
     static RECENT: std::sync::Mutex<std::collections::VecDeque<std::time::Instant>> = std::sync::Mutex::new(std::collections::VecDeque::new());
     if !allow(std::time::Instant::now(), &mut RECENT.lock().unwrap()) { return eprintln!("[notify] too many notifications, dropped: {title}"); }

@@ -1,5 +1,5 @@
-//! Settings dialog (gear in the title bar, Cmd-,): egui port of SettingsView.swift / SettingsKeys.swift.
-//! Like the order panel it reads the JSON state document and writes through the native ops
+//! Settings dialog (gear in the title bar, Cmd-,).
+//! Like the order panel it reads the JSON state document and writes through the ops
 //! (`set_prefs` / `set_route` with the whole object, `set_lang`, `save_keys`, ...), so there is no Save.
 //! `Prefs` persist in settings.json; `apply` pushes them into the palette, zoom and style.
 use super::hotkeys::{self, Act, Rec};
@@ -68,7 +68,7 @@ impl Default for Prefs {
 #[serde(rename_all = "lowercase")]
 pub enum ThemePref { #[default] System, Dark, Light }
 
-// TradingView-style teal / coral (calmer than the system neon pair); SwiftUI (T1.green / T1.red) uses the same
+// TradingView-style teal / coral (calmer than the system neon pair)
 const GREEN: Color32 = Color32::from_rgb(0x26, 0xa6, 0x9a);
 const RED: Color32 = Color32::from_rgb(0xef, 0x53, 0x50);
 const ACCENTS: [(&str, [u8; 3]); 6] = [("Blue", [0x4c, 0x9e, 0xeb]), ("Gold", [0xf0, 0xb9, 0x0b]), ("Violet", [0x9b, 0x8c, 0xf0]),
@@ -151,7 +151,7 @@ impl SettingsView {
     pub fn show(&mut self, ctx: &egui::Context, st: &Value, call: &mut Call) {
         if !self.open { return; }
         // design: a popup surface (radius 6, hairline, soft wide shadow)
-        let frame = egui::Frame::new().fill(panel_c()).corner_radius(6).stroke(egui::Stroke::new(1.0, line())).inner_margin(0)
+        let frame = egui::Frame::new().fill(panel()).corner_radius(6).stroke(egui::Stroke::new(1.0, line())).inner_margin(0)
             .shadow(egui::Shadow { offset: [0, 12], blur: 40, spread: 0, color: Color32::from_black_alpha(if light() { 50 } else { 150 }) });
         let was_recording = self.recording.is_some();
         let m = egui::Modal::new(egui::Id::new("settings")).frame(frame).show(ctx, |ui| {
@@ -529,7 +529,7 @@ impl SettingsView {
                     let (r, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), if exists { egui::Sense::click() } else { egui::Sense::hover() });
                     let c = r.center();
                     ui.painter().circle_filled(c, 7.5, if exists && resp.hovered() { accent() } else if exists { mu() } else { dim().linear_multiply(0.5) });
-                    let s = egui::Stroke::new(1.5, panel_c());
+                    let s = egui::Stroke::new(1.5, panel());
                     ui.painter().line_segment([c - egui::vec2(3.5, 0.0), c + egui::vec2(3.5, 0.0)], s);
                     ui.painter().line_segment([c + egui::vec2(0.5, -3.0), c + egui::vec2(3.5, 0.0)], s);
                     ui.painter().line_segment([c + egui::vec2(0.5, 3.0), c + egui::vec2(3.5, 0.0)], s);
@@ -568,7 +568,7 @@ const TZS: [i32; 30] = [-600, -540, -480, -420, -360, -300, -240, -180, -120, -6
 
 fn prefs(st: &Value) -> Prefs { serde_json::from_value(st["prefs"].clone()).unwrap_or_default() }
 
-/// `cur` with the keys of `patch` replaced: the native hosts know only some of the prefs and send just those.
+/// `cur` with the keys of `patch` replaced; a key the patch leaves out keeps its value.
 pub(crate) fn merge_prefs(cur: &Prefs, patch: &Value) -> Result<Prefs, String> {
     let mut base = serde_json::to_value(cur).map_err(|e| e.to_string())?;
     for (k, v) in patch.as_object().ok_or("prefs must be an object")? { base[k] = v.clone(); }
@@ -756,7 +756,7 @@ fn trading(ui: &mut Ui, st: &Value, call: &mut Call, resetting: &mut bool) {
     set_prefs(&p0, &p, call);
 }
 
-/// Number row with a unit column (Swift `SettingsNumber`); true when the value changed.
+/// Number row with a unit column; true when the value changed.
 fn number(ui: &mut Ui, title: &str, v: &mut f64, decimals: usize, unit: &str) -> bool {
     let mut changed = false;
     row(ui, title, |ui| {
@@ -767,7 +767,7 @@ fn number(ui: &mut Ui, title: &str, v: &mut f64, decimals: usize, unit: &str) ->
     changed
 }
 
-/// Value with − / + buttons (Swift `Stepper`).
+/// Value with − / + buttons.
 fn stepper(ui: &mut Ui, v: &mut usize, lo: usize, hi: usize) {
     ui.spacing_mut().item_spacing.x = 0.0;
     ui.spacing_mut().item_spacing.x = 4.0;

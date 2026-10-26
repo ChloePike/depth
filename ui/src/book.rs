@@ -1,5 +1,5 @@
 //! Order book (cross-venue USD or one venue) and the trade tape.
-use super::{fmt_dp, fmt_px, fmt_qty, kit, l, step_dp, t, theme::*};
+use super::{fmt_dp, fmt_px, kit, l, step_dp, t, theme::*};
 use eframe::egui::{self, pos2, vec2, Align2, Rect, Sense, Stroke, Ui};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -11,8 +11,6 @@ const ROW: f32 = 21.0;
 const HEAD: f32 = 18.0;
 const MID_H: f32 = 38.0;
 const RATIO_H: f32 = 36.0;
-/// height of the native header laid over the book column (points)
-pub const NATIVE_HEADER: f32 = 62.0;
 
 /// Price grouping steps: powers of ten from the finest (as on the venues: 0.1 / 1 / 10 / 100 for BTC).
 const GROUPS: [f64; 4] = [1.0, 10.0, 100.0, 1000.0];
@@ -25,11 +23,11 @@ fn base_step(mid: f64) -> f64 { 10f64.powi(mid.max(1e-12).log10().floor() as i32
 /// grouping, units, tape filter) persist in settings.json; the rest is runtime state.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-pub struct BookView { trades: bool,
+pub struct BookView { pub trades: bool,
     /// the trade tape under the book (Settings); off, the book fills the column
     #[serde(skip)] pub show_tape: bool,
 
-    /// 2 venues, 3 quant (own window only); otherwise `trades` picks book or tape
+    /// 2 venues, 3 quant; otherwise `trades` picks book or tape
     pub page: u8, pub src: Option<Exchange>, group: usize, #[serde(skip)] pub clicked: Option<(Exchange, f64)>, quote: bool,
     /// tape filter: index into MIN_USD
     min_usd: usize,
@@ -75,81 +73,13 @@ fn group(levels: impl Iterator<Item = (f64, f64)>, bin: f64, up: bool, ex: Excha
 }
 
 impl BookView {
-    /// Book controls for the native header.
-    pub fn native_json(&self, a: &Agg, market: Market) -> serde_json::Value {
-        let market = if market == Market::Margin { Market::Spot } else { market };
-        let mut vs: Vec<String> = a.venues.keys().filter(|(_, m)| *m == market).map(|(e, _)| format!("{e:?}")).collect();
-        vs.sort();
-        let mid = match self.src { None => a.mid(market), Some(e) => a.venues.get(&(e, market)).and_then(|v| v.mid()) };
-        let groups: Vec<String> = mid.map(|m| { let b = base_step(m); GROUPS.iter().map(|g| fmt_dp(b * g, step_dp(b * g))).collect() }).unwrap_or_default();
-        serde_json::json!({"trades": self.trades, "quote": self.quote, "src": self.src.map(|e| format!("{e:?}")), "venues": vs, "group": self.group, "groups": groups})
-    }
-
-    /// Levels for the native book: `n` per side, best first, already grouped / aligned / in the chosen unit;
-    /// or the latest trades when the trades tab is open.
-    pub fn native_levels(&self, a: &Agg, market: Market, scope: &HashSet<Exchange>, n: usize) -> serde_json::Value {
-        use serde_json::json;
-        let market = if market == Market::Margin { Market::Spot } else { market };
-        if self.trades {
-            let rows: Vec<_> = a.trades.iter().rev()
-                .filter(|x| x.market == market && scope.contains(&x.ex) && self.src.is_none_or(|e| e == x.ex))
-                .take(n * 2).collect();
-            let big = { let mut q: Vec<f64> = rows.iter().map(|x| x.qty).collect(); q.sort_by(f64::total_cmp); q.get(q.len() * 9 / 10).copied().unwrap_or(f64::MAX) };
-            return json!({"trades": rows.iter().map(|x| json!({"px": fmt_px(x.px), "qty": fmt_qty(x.qty), "buy": x.side == Side::Buy,
-                "big": x.qty >= big, "t": super::hms(x.ts), "ex": format!("{:?}", x.ex)})).collect::<Vec<_>>()});
-        }
-        let Some(mid) = (match self.src { None => a.mid(market), Some(e) => a.venues.get(&(e, market)).and_then(|v| v.mid()) }) else { return json!({}) };
-        let base_bin = base_step(mid);
-        let bin = base_bin * GROUPS[self.group.min(GROUPS.len() - 1)];
-        depth::ex::hyperliquid::set_book_group(bin);
-        let (bids, asks) = match self.src {
-            None => {
-                let (b, k) = a.book_where(market, bin, 0.03, true, |e| scope.contains(&e));
-                (b.into_iter().take(n).collect::<Vec<_>>(), k.into_iter().take(n).collect::<Vec<_>>())
-            }
-            Some(e) => match a.venues.get(&(e, market)) {
-                Some(v) => (group(v.book.bids(), bin, false, e, n), group(v.book.asks(), bin, true, e, n)),
-                None => (vec![], vec![]),
-            },
-        };
-        let quote = self.quote;
-        let size = |l: &Level| if quote { l.qty * l.px } else { l.qty };
-        let f = |x: f64| if quote { fmt_big_book(x) } else { fmt_qty(x) };
-        let dp = step_dp(bin);
-        let side = |ls: &[Level]| {
-            let mut c = 0.0;
-            ls.iter().map(|l| {
-                c += size(l);
-                let tot = l.qty.max(1e-12);
-                json!({"px": l.px, "p": fmt_dp(l.px, dp), "s": f(size(l)), "q": size(l), "t": f(c), "c": c,
-                       "by": l.by.iter().map(|(e, q)| { let k = ex_color(*e); json!([format!("{e:?}"), q / tot, format!("#{:02x}{:02x}{:02x}", k.r(), k.g(), k.b())]) }).collect::<Vec<_>>()})
-            }).collect::<Vec<_>>()
-        };
-        let (b, k) = (side(&bids), side(&asks));
-        let spread = match (bids.first(), asks.first()) { (Some(b), Some(k)) => Some((k.px / b.px - 1.0) * 1e4), _ => None };
-        json!({"bids": b, "asks": k, "mid": fmt_px(mid), "spread_bp": spread, "clickable": self.src.map(|e| format!("{e:?}"))})
-    }
-
-    /// {trades: bool}, {quote: bool}, {src: venue|null}, {group: index}
-    pub fn native_set(&mut self, v: &serde_json::Value) {
-        if let Some(b) = v["trades"].as_bool() { self.trades = b; }
-        if let Some(b) = v["quote"].as_bool() { self.quote = b; }
-        if v.get("src").is_some() { self.src = v["src"].as_str().and_then(Exchange::parse); }
-        if let Some(g) = v["group"].as_u64() { self.group = (g as usize).min(GROUPS.len() - 1); }
-    }
-
     pub fn show(&mut self, ui: &mut Ui, a: &Agg, market: Market, scope: &HashSet<Exchange>, base: &str) {
         let market = if market == Market::Margin { Market::Spot } else { market };
         // a side panel shrinks to its content's width; hold the width the user gave it
         ui.set_min_width(ui.available_width());
-        // hosted: the native header sits over the top of this column
-        if native() { ui.add_space(NATIVE_HEADER); }
         let mid = match self.src { None => a.mid(market), Some(e) => a.venues.get(&(e, market)).and_then(|v| v.mid()) };
-        // hosted: tabs, unit, source and grouping are native controls (native_set)
-        if !native() {
-            if self.tabs(ui) { return; }
-            self.controls(ui, a, market, base, mid);
-        }
+        if self.tabs(ui) { return; }
+        self.controls(ui, a, market, base, mid);
         if self.trades {
             let r = ui.available_rect_before_wrap();
             ui.allocate_rect(r, Sense::hover());
@@ -524,7 +454,7 @@ impl BookView {
     pub fn wants_l3(&self) -> bool { !self.trades && self.page < 2 && matches!(self.src, None | Some(Exchange::Lighter | Exchange::Hyperliquid)) }
 
     /// Filter row of Book and Trades (26 px controls, 6 px apart): source (all venues or one),
-    /// price grouping (book only) and size unit, as the native header's `bookRight`.
+    /// price grouping (book only) and size unit.
     fn controls(&mut self, ui: &mut Ui, a: &Agg, market: Market, base: &str, mid: Option<f64>) {
         let sp = ui.spacing().item_spacing.y;
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());

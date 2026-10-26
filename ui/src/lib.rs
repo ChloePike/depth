@@ -71,21 +71,20 @@ fn strings(src: &'static str) -> HashMap<&'static str, &'static str> {
     src.lines().filter(|l| !l.trim_start().starts_with('#')).filter_map(|l| l.split_once('=')).map(|(k, v)| (k.trim(), v.trim())).filter(|(_, v)| !v.is_empty()).collect()
 }
 
-/// Native-panel strings ("English = translation", app/Resources/<lang>-*.txt), shared with the
-/// SwiftUI host so the egui ports of its panels read the same translations.
-macro_rules! native_strings {
+/// Panel strings ("English = translation", assets/i18n/panels/<lang>-*.txt), looked up by `l`.
+macro_rules! panel_strings {
     ($($l:literal),*) => { [$( ($l, concat!(
-        include_str!(concat!("../../app/Resources/", $l, "-account.txt")), "\n",
-        include_str!(concat!("../../app/Resources/", $l, "-order.txt")), "\n",
-        include_str!(concat!("../../app/Resources/", $l, "-panels.txt")), "\n",
-        include_str!(concat!("../../app/Resources/", $l, "-top.txt")))) ),*] };
+        include_str!(concat!("../../assets/i18n/panels/", $l, "-account.txt")), "\n",
+        include_str!(concat!("../../assets/i18n/panels/", $l, "-order.txt")), "\n",
+        include_str!(concat!("../../assets/i18n/panels/", $l, "-panels.txt")), "\n",
+        include_str!(concat!("../../assets/i18n/panels/", $l, "-top.txt")))) ),*] };
 }
-const NATIVE_FILES: [(&str, &str); 10] = native_strings!("zh-CN", "zh-TW", "ja", "ko", "es", "pt", "fr", "de", "ru", "vi");
+const PANEL_FILES: [(&str, &str); 10] = panel_strings!("zh-CN", "zh-TW", "ja", "ko", "es", "pt", "fr", "de", "ru", "vi");
 
-/// `en` (an English UI string of the native panels) in the current language.
+/// `en` (an English UI string of the panels) in the current language.
 pub fn l(en: &'static str) -> &'static str {
     static MAPS: OnceLock<HashMap<&'static str, HashMap<&'static str, &'static str>>> = OnceLock::new();
-    let m = MAPS.get_or_init(|| NATIVE_FILES.iter().map(|(code, src)| {
+    let m = MAPS.get_or_init(|| PANEL_FILES.iter().map(|(code, src)| {
         let mut out = HashMap::new();
         for (k, v) in src.lines().filter(|l| !l.starts_with('#')).filter_map(|l| l.split_once('=')).map(|(k, v)| (k.trim(), v.trim())).filter(|(_, v)| !v.is_empty()) {
             out.entry(k).or_insert(v);
@@ -95,8 +94,7 @@ pub fn l(en: &'static str) -> &'static str {
     m.get(lang_code()).and_then(|t| t.get(en)).copied().unwrap_or(en)
 }
 
-/// `l(fmt)` with printf-style placeholders (%@ %d %s %.Nf %g) filled from `args` in order, as the
-/// Swift panels' `String(format:)` does.
+/// `l(fmt)` with printf-style placeholders (%@ %d %s %.Nf %g) filled from `args` in order.
 pub fn lf(fmt: &'static str, args: &[String]) -> String {
     let src = l(fmt);
     let (mut out, mut it, mut chars) = (String::new(), args.iter(), src.chars().peekable());
@@ -336,7 +334,7 @@ pub struct App {
     unreadable: bool,
     /// settings.json.prev written this launch (`write_settings`)
     prev_kept: bool,
-    /// own window's position and size [x, y, w, h] (not hosted; kept while maximized / full screen)
+    /// own window's position and size [x, y, w, h] (kept while maximized / full screen)
     window: Option<[f32; 4]>,
     mode: Market,
     chart: chart::Chart,
@@ -351,17 +349,12 @@ pub struct App {
     shot_sent: bool,
     started: Instant,
     last_frame: Instant,
-    /// hosted inside the SwiftUI app: the host owns the window (no own title bar buttons,
-    /// drag, resize edges) and paces frames with its display link (no frame-cap sleep)
-    hosted: bool,
     /// order routing policy (Settings > Trading), persisted
     route: depth::route::Policy,
-    /// actions from the native panels, applied at the next frame
+    /// actions from the panels, applied at the next frame
     pending_base: Option<String>,
     pending_mode: Option<Market>,
     pending_restart: bool,
-    /// order book column width (points), so the native header above it lines up
-    book_w: f32,
     /// chart layout ("1", "2", "2v", "3", "4"), the active cell (the toolbar drives `chart`, shown
     /// there) and the other cells' charts with their slot
     pub(crate) layout: String,
@@ -373,7 +366,7 @@ pub struct App {
     log_seen: i64,
     /// account.fill_seq already sounded
     fill_seen: u64,
-    /// egui ports of the native panels: their state document (when built, stale) and the order panel
+    /// the panels' state document (when built, stale) and the order panel
     st: (std::sync::Arc<serde_json::Value>, Instant, bool),
     order: order::OrderPanel,
     /// trading hotkeys pressed this frame, run by the perp order panel
@@ -408,12 +401,7 @@ fn layout_cells(layout: &str, r: egui::Rect) -> Vec<egui::Rect> {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext) -> Self { Self::with_ctx(&cc.egui_ctx, false) }
-
-    /// Build the app on any egui context (eframe window, or the SwiftUI host's Metal view).
-    pub fn with_ctx(ctx: &egui::Context, hosted: bool) -> Self {
-        let cc = Cc { egui_ctx: ctx.clone() };
-        theme::set_native(hosted);
+    pub fn new(cc: &eframe::CreationContext) -> Self {
         // history of symbols not viewed for a month, old coin logos
         std::thread::spawn(|| depth::sys::prune_cache(30));
         theme::install(&cc.egui_ctx);
@@ -447,8 +435,7 @@ impl App {
         eng.off = st.off.unwrap_or_default().into_iter().collect();
         if eng.off.len() >= Exchange::ALL.len() { eng.off.clear(); }
         // the scanner first, so the picker's Binance stream rides on its connection from the start
-        // (not hosted: the SwiftUI / WinUI hosts have no Hunter page)
-        eng.set_hunter(prefs.hunter && !hosted, &cc.egui_ctx);
+        eng.set_hunter(prefs.hunter, &cc.egui_ctx);
         let mut hunter = st.hunter.unwrap_or_default();
         hunter.open |= env("T1_MODE").as_deref() == Some("hunter");
         hunter.sync(&eng.hunt);
@@ -460,17 +447,17 @@ impl App {
         // T1_ACC_TAB=<n>: open the account strip on tab n (screenshots)
         let mut picker = picker::Picker::default();
         picker.open = env("T1_PICK").is_some();
-        // T1_BOOK_PANE=<0..4>: book, trades, venues, quant, L3 (screenshots, as in the SwiftUI host)
+        // T1_BOOK_PANE=<0..4>: book, trades, venues, quant, L3 (screenshots)
         let mut book = st.book.unwrap_or_default();
-        match env("T1_BOOK_PANE").and_then(|s| s.parse::<u8>().ok()) { Some(1) => book.native_set(&serde_json::json!({"trades": true})), Some(p @ 2..=3) => book.page = p, _ => {} }
+        match env("T1_BOOK_PANE").and_then(|s| s.parse::<u8>().ok()) { Some(1) => book.trades = true, Some(p @ 2..=3) => book.page = p, _ => {} }
         if let Some(tf) = env("T1_TF").and_then(|s| s.parse().ok()) { chart.tf = tf; }
         let layout = env("T1_LAYOUT").or(st.layout).unwrap_or_else(|| "1".into());
         App {
             eng, prefs, settings: Default::default(), command: Default::default(), back: None, help: false, kbd: kbd::Kbd::start(), tray: None, pop: None, saved: (saved, Instant::now()), unreadable, prev_kept: false, window: st.window, mode, chart, book, opt: Default::default(), picker, trade, spot: Default::default(),
             rate: (Instant::now(), 0, 0.0),
             shot: env("T1_SHOT").map(|p| (p, env("T1_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(30.0))),
-            shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
-            route: st.route.clone().unwrap_or_default(), pending_base: None, pending_mode: None, pending_restart: false, book_w: 0.0,
+            shot_sent: false, started: Instant::now(), last_frame: Instant::now(),
+            route: st.route.clone().unwrap_or_default(), pending_base: None, pending_mode: None, pending_restart: false,
             layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(), fills_key: Default::default(), log_seen: now_ms(), fill_seen: 0,
             st: (Default::default(), Instant::now(), true), order: Default::default(), hot_trade: vec![], venue_toggle: None, coins_preloaded: false, order_panel: st.order_panel.unwrap_or(true), top: Default::default(), venue_pages: Default::default(),
             account: Default::default(), hunter,
@@ -480,18 +467,15 @@ impl App {
     fn header(&mut self, ui: &mut Ui, a: &Agg, st: &serde_json::Value, new_base: &mut Option<String>, new_mode: &mut Option<Market>) {
         // the header is the title bar: drag empty space to move, double-click to maximize
         let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
-        // own window only: the SwiftUI host's title bar handles dragging and zooming
-        if !self.hosted {
-            let bar = ui.interact(ui.max_rect(), egui::Id::new("titlebar"), egui::Sense::click_and_drag());
-            if bar.drag_started_by(egui::PointerButton::Primary) { ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag); }
-            if bar.double_clicked() { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized)); }
-        }
+        let bar = ui.interact(ui.max_rect(), egui::Id::new("titlebar"), egui::Sense::click_and_drag());
+        if bar.drag_started_by(egui::PointerButton::Primary) { ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag); }
+        if bar.double_clicked() { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized)); }
         // title bar, 46 px: lights, pair, market pills, headline price ... clock, panel toggle, settings
         ui.horizontal(|ui| {
             ui.set_height(46.0);
             ui.spacing_mut().item_spacing.x = 14.0;
-            // hosted: macOS draws the traffic lights over this space; Windows / Linux get their buttons on the right
-            if self.hosted { ui.add_space(56.0); } else if cfg!(target_os = "macos") { window_buttons(ui, maximized); }
+            // macOS: traffic lights on the left; Windows / Linux get their buttons on the right
+            if cfg!(target_os = "macos") { window_buttons(ui, maximized); }
             let tickers = self.eng.tickers.lock().unwrap().clone();
             if !self.coins_preloaded && !tickers.is_empty() {
                 let mut by_vol: Vec<_> = tickers.iter().map(|t| (t.quote_vol, t.base.clone())).collect();
@@ -513,9 +497,9 @@ impl App {
             self.top.price(ui, a.mid(book_market));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if !self.hosted && !cfg!(target_os = "macos") { window_controls_right(ui, maximized); }
+                if !cfg!(target_os = "macos") { window_controls_right(ui, maximized); }
                 if kit::icon_button(ui, 30.0, false, top::gear).on_hover_text(t("set.title")).clicked() { self.settings.open = true; }
-                // show / hide the order panel (the Swift toolbar's sidebar.trailing button); Perp and Spot
+                // show / hide the order panel; Perp and Spot
                 let tip = l("Show or hide the order panel (Option-Command-I)");
                 if matches!(self.mode, Market::Perp | Market::Spot) {
                     let on = self.order_panel;
@@ -543,7 +527,7 @@ impl App {
         let w = ui.ctx().content_rect().x_range();
         ui.painter().hline(w, ui.min_rect().bottom() + 0.5, egui::Stroke::new(1.0, line().gamma_multiply(0.7)));
     }
-    /// Keyboard shortcuts (Settings > Hotkeys; defaults are the SwiftUI menus' keys). Never while a
+    /// Keyboard shortcuts (Settings > Hotkeys). Never while a
     /// text field has focus or a dialog (settings, order confirmation, ...) is open.
     fn shortcuts(&mut self, ctx: &egui::Context) {
         use hotkeys::Act;
@@ -595,11 +579,11 @@ impl App {
         }
     }
 
-    /// The menu bar / tray item: created when the setting is on (not in screenshot runs or inside a
-    /// native host), fed the title and the position lines, and its clicks handled.
+    /// The menu bar / tray item: created when the setting is on (not in screenshot runs), fed the
+    /// title and the position lines, and its clicks handled.
     fn tray_tick(&mut self, ctx: &egui::Context, a: &depth::agg::Agg) {
         // screenshot runs leave the menu bar alone unless T1_TRAY is set (to check the item itself)
-        let want = self.prefs.tray && !self.hosted && (std::env::var_os("T1_SHOT").is_none() || std::env::var_os("T1_TRAY").is_some());
+        let want = self.prefs.tray && (std::env::var_os("T1_SHOT").is_none() || std::env::var_os("T1_TRAY").is_some());
         if !want { self.tray = None; return; }
         if self.tray.is_none() {
             self.tray = tray::Tray::new();
@@ -883,8 +867,6 @@ impl App {
     }
 }
 
-struct Cc { egui_ctx: egui::Context }
-
 impl eframe::App for App {
     /// the gutters between cards show the window clear color: the darkest base
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] { bg().to_normalized_gamma_f32() }
@@ -933,8 +915,8 @@ impl App {
         if ok { self.saved.0 = json; } else { eprintln!("settings: cannot write {}", p.display()); }
     }
 
-    /// The state document the SwiftUI host polls, for the egui ports of its panels: rebuilt at most
-    /// 4 times a second, or right after an op changed something.
+    /// The state document the panels read (`state_json`): rebuilt at most 4 times a second, or right
+    /// after an op changed something.
     fn state_doc(&mut self) -> std::sync::Arc<serde_json::Value> {
         if self.st.2 || self.st.1.elapsed() > Duration::from_millis(250) {
             self.st = (std::sync::Arc::new(serde_json::from_str(&self.state_json()).unwrap_or_default()), Instant::now(), false);
@@ -955,10 +937,7 @@ impl App {
         if let Some(p) = self.chart.price(a, self.mode) { px.insert(base, p); }
         self.chart.check_alerts(&px);
         // the egui window has no notification API of its own: the OS notification through sys::notify
-        // (the native hosts drain `fired` themselves and post them natively)
-        if !self.hosted {
-            for (title, body) in self.chart.fired.drain(..) { depth::sys::notify(&title, &body); }
-        }
+        for (title, body) in self.chart.fired.drain(..) { depth::sys::notify(&title, &body); }
     }
 
     /// Orders and triggers dragged on a chart, and prices put into the order panel from it.
@@ -971,13 +950,11 @@ impl App {
                 chart::ChartAct::Older(tf) => self.eng.ensure_older(tf as u32, ctx),
                 chart::ChartAct::Position { entry, stop, target, qty } => {
                     // the whole order into the perp panel: limit at the entry, the size, TP at the target, SL at the
-                    // stop (the native hosts' panel takes the entry price, as a book click). The last state document:
-                    // the agg lock is held here, a fresh one would take it again
+                    // stop. The last state document: the agg lock is held here, a fresh one would take it again
                     self.order_panel = true;
                     if self.mode != Market::Perp { self.pending_mode = Some(Market::Perp); }
                     let st = self.st.0.clone();
                     self.order.prefill_position(entry, stop, target, qty, &st);
-                    if self.hosted { self.trade.fill = Some((self.trade.ex, entry)); }
                 }
                 chart::ChartAct::Move(chart::LineAct::Order(ex, id), px) => {
                     let o = self.eng.account.lock().unwrap().orders.iter().find(|o| o.ex == ex && o.id == id).cloned();
@@ -1057,7 +1034,7 @@ impl App {
         }
     }
 
-    pub fn frame(&mut self, ui: &mut Ui) {
+    fn frame(&mut self, ui: &mut Ui) {
         set_light(ui.ctx().theme() == egui::Theme::Light);
         // Frame cap: macOS stops vsync-throttling occluded / off-space windows, and then every
         // repaint request renders immediately, piling up GPU command buffers (GBs within
@@ -1066,26 +1043,25 @@ impl App {
         let focused = ui.ctx().input(|i| i.viewport().focused.unwrap_or(true));
         let budget = Duration::from_micros(if focused { 8_333 } else { 33_333 });
         let since = self.last_frame.elapsed();
-        if since < budget && !self.hosted { std::thread::sleep(budget - since); }
+        if since < budget { std::thread::sleep(budget - since); }
         self.last_frame = Instant::now();
         let ctx = ui.ctx().clone();
         // live data does not request repaints itself: this timer is the chart / book refresh rate.
         // 30 Hz while focused (10 Hz read as a stuttering, late candle), 10 Hz in the background.
         // The Hunter page shows no chart or book: once a second (its clock), the scanner repaints on new rows
-        let hunting = self.hunter.open && !self.hosted;
+        let hunting = self.hunter.open;
         ctx.request_repaint_after(Duration::from_millis(if hunting { 1000 } else if focused { 33 } else { 100 }));
-        let scan = self.prefs.hunter && !self.hosted;
+        let scan = self.prefs.hunter;
         if self.eng.hunter_on() != scan { self.eng.set_hunter(scan, &ctx); }
         // T1_SPIN: repaint every frame (diagnostics: worst case of constant mouse movement)
         if std::env::var("T1_SPIN").is_ok() { ctx.request_repaint(); }
         self.screenshot(&ctx);
-        if !self.hosted {
-            let (outer, inner, max, full) = ui.ctx().input(|i| { let v = i.viewport(); (v.outer_rect, v.inner_rect, v.maximized, v.fullscreen) });
-            if let (Some(o), Some(r), false, false) = (outer, inner, max == Some(true), full == Some(true)) { self.window = Some([o.min.x, o.min.y, r.width(), r.height()]); }
-        }
+        let (outer, inner, max, full) = ui.ctx().input(|i| { let v = i.viewport(); (v.outer_rect, v.inner_rect, v.maximized, v.fullscreen) });
+        if let (Some(o), Some(r), false, false) = (outer, inner, max == Some(true), full == Some(true)) { self.window = Some([o.min.x, o.min.y, r.width(), r.height()]); }
         self.save_settings();
         self.kbd.set(self.kbd_state());
-        if !self.hosted { self.resize_edges(ui); self.shortcuts(&ctx); }
+        self.resize_edges(ui);
+        self.shortcuts(&ctx);
         let (mut new_base, mut new_mode, mut restart) = (None, None, false);
         // T1_CYCLE=<s>: switch base every <s> seconds (diagnostics for resubscription leaks)
         if let Some(every) = std::env::var("T1_CYCLE").ok().and_then(|s| s.parse::<u64>().ok()) {
@@ -1095,14 +1071,13 @@ impl App {
         }
         {
             // the header's stats come from the state document, built before the agg lock (it takes it itself)
-            let hdr_st = if self.hosted { Default::default() } else { self.state_doc() };
+            let hdr_st = self.state_doc();
             let agg = self.eng.agg.clone();
             let mut a = agg.lock().unwrap();
             let stats_arc = self.eng.stats.clone();
             let stats = stats_arc.lock().unwrap();
             // panels are rounded cards on the darker base: 8 px black gutters, a faint hairline edge
-            // (none hosted: the native window shows through transparent panels)
-            let edge_c = if theme::native() { Color32::TRANSPARENT } else { line().gamma_multiply(0.8) };
+            let edge_c = line().gamma_multiply(0.8);
             // terminal style: no gutters, the cards' own hairlines (overlapping by one pixel) separate them
             let gap: i8 = if theme::term() { 0 } else { 4 };
             let card = |m: i8| Frame::new().fill(panel()).corner_radius(kit::rad()).stroke(egui::Stroke::new(1.0, if theme::term() { line() } else { edge_c }))
@@ -1110,7 +1085,6 @@ impl App {
             // title bar + stats strip, status bar: on the base, 14 px sides, 4 px towards the cards
             let flat = |top: i8, bottom: i8| Frame::new().fill(bg()).inner_margin(Margin { left: 14, right: 14, top, bottom });
 
-            if !self.hosted {
             egui::Panel::top("hdr").show_separator_line(false).frame(flat(0, 4))
                 .show(ui, |ui| self.header(ui, &a, &hdr_st, &mut new_base, &mut new_mode));
             egui::Panel::bottom("status").show_separator_line(false).frame(flat(4, 0)).exact_size(30.0).show(ui, |ui| self.status(ui, &stats));
@@ -1163,21 +1137,17 @@ impl App {
             }
             self.account = ap;
             a = agg.lock().unwrap();
-            } else { drop(stats); }
-            // the book's rows are drawn here at display rate; hosted, its header (and the Venues / Quant
-            // pages) are native views laid over a fixed 300 pt column
             if self.mode != Market::Option && !hunting {
-                let panel = egui::Panel::right("book").show_separator_line(theme::native()).frame(card(8));
-                let panel = if self.hosted { panel.resizable(false).exact_size(300.0) } else { panel.resizable(true).default_size(320.0) };
-                let pane = if self.hosted { 0 } else { self.book.pane() };
+                let panel = egui::Panel::right("book").show_separator_line(false).frame(card(8)).resizable(true).default_size(320.0);
+                let pane = self.book.pane();
                 // the L3 page starts the exact order feeds (REST polls) only while someone looks at it
                 if self.mode == Market::Perp && self.book.wants_l3() { self.eng.wants_l3.store(true, std::sync::atomic::Ordering::Relaxed); }
-                let r = if pane == 2 || pane == 3 {
+                if pane == 2 || pane == 3 {
                     // the venue_share op takes the agg lock itself
                     drop(a);
                     let st = self.state_doc();
                     let mut vp = std::mem::take(&mut self.venue_pages);
-                    let r = panel.show(ui, |ui| {
+                    panel.show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         self.book.tabs(ui);
                         // the window picker row belongs to Venues only (Quant has no window)
@@ -1192,11 +1162,9 @@ impl App {
                     });
                     self.venue_pages = vp;
                     a = agg.lock().unwrap();
-                    r
                 } else {
-                    panel.show(ui, |ui| self.book.show(ui, &a, self.mode, &self.eng.venues().into_iter().collect(), &self.eng.base.clone()))
-                };
-                self.book_w = r.response.rect.width();
+                    panel.show(ui, |ui| self.book.show(ui, &a, self.mode, &self.eng.venues().into_iter().collect(), &self.eng.base.clone()));
+                }
                 if let Some(c) = self.book.clicked.take() { self.trade.fill = Some(c); }
             }
             // positions and resting orders of the traded symbol, drawn on the chart
@@ -1305,8 +1273,8 @@ impl App {
         if let Some(n) = std::env::var("T1_SETTINGS").ok().and_then(|s| s.parse().ok()) { if !self.shot_sent && self.started.elapsed().as_secs() < 2 { self.settings.open_tab(n); } }
         // T1_COMMAND=<text>: open the command bar with that text once (screenshots)
         if let Ok(t) = std::env::var("T1_COMMAND") { if !self.shot_sent && self.started.elapsed().as_secs() < 2 && !self.command.open { self.command.open_with(&t); } }
-        if !self.hosted { command::help(&ctx, &mut self.help, &hotkeys::complete(&self.prefs.hotkeys)); }
-        if !self.hosted && self.command.open {
+        command::help(&ctx, &mut self.help, &hotkeys::complete(&self.prefs.hotkeys));
+        if self.command.open {
             let tickers = self.eng.tickers.lock().unwrap().clone();
             let binds = hotkeys::complete(&self.prefs.hotkeys);
             for c in self.command.show(&ctx, &tickers, &binds).unwrap_or_default() {
@@ -1319,7 +1287,7 @@ impl App {
                 }
             }
         }
-        if !self.hosted && self.settings.open {
+        if self.settings.open {
             // ops take the agg lock themselves: nothing is held here
             let st = self.state_doc();
             let mut sv = std::mem::take(&mut self.settings);

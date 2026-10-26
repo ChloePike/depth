@@ -170,7 +170,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// Short machine-readable form for logs and the native UI: "market", "limit 123.4", "ioc 1",
+    /// Short machine-readable form for logs and the UI: "market", "limit 123.4", "ioc 1",
     /// "fok 1", "post 1", "bbo queue 5", "stop 110 mark", "stop 110 limit 111 last", "trail 1.2% from 95".
     pub fn label(&self) -> String {
         match *self {

@@ -1,6 +1,6 @@
-//! Order entry for the egui app: a port of the SwiftUI host's OrderPanel, OrderConfirm,
-//! LeverageSheet and OrderTpSl. It reads the same state document (`App::state_json`) and sends the
-//! same ops (`App::call`), so routing, validation and placement are identical in both hosts.
+//! Order entry: the order panel, its confirmation, the leverage sheet and TP/SL. It reads the state
+//! document (`App::state_json`) and sends ops (`App::call`), so routing, validation and placement
+//! all go through the engine.
 //! Prices always come from the trade venue's own book (`trade.bid/ask`), never the composite.
 use super::kit::{self, Look, Tone, H, H_LG, H_SM};
 use super::{fmt_dp, fmt_px, fmt_qty, l, lf, theme::*};
@@ -117,7 +117,7 @@ impl Default for OrderPanel {
     }
 }
 
-// ---- number input (same rules as the Swift OrderNum) ----
+// ---- number input ----
 
 /// "." decimal; commas only as thousands groups ("1,234.5"): a decimal comma ("0,5") is refused.
 pub fn parse(s: &str) -> Option<f64> {
@@ -402,7 +402,7 @@ impl OrderPanel {
         let tpsl_ok = caps["tpsl"] == true || smart;
         let bbo_levels: Vec<u64> = t["bbo_levels"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
 
-        // react to a new symbol, venue or book click (the Swift onChange handlers)
+        // react to a new symbol, venue or book click
         let click = st["book_click"].as_object().map(|c| (s(&c["ex"]).to_string(), c["px"].as_f64().unwrap_or(0.0)));
         if self.seen.0 != symbol {
             self.price = bid.map(|b| px_str(b, tick)).unwrap_or_default();
@@ -1595,7 +1595,7 @@ mod tests {
     }
 
     #[test]
-    fn numbers_parse_like_the_swift_panel() {
+    fn numbers_parse_like_the_panel() {
         assert_eq!(parse("1,234.5"), Some(1234.5));
         assert_eq!(parse("0,5"), None);
         assert_eq!(parse(" 83500 "), Some(83500.0));

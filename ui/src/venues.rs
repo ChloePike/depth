@@ -1,6 +1,5 @@
-//! Venues and Quant pages of the book column: a port of the SwiftUI host's BookPanel (VenueShare,
-//! QuantPanel). Venues polls the same `venue_share` op once a second; Quant reads the state
-//! document's "quant" object.
+//! Venues and Quant pages of the book column. Venues polls the `venue_share` op once a second;
+//! Quant reads the state document's "quant" object.
 use super::{book::{overline_at, seg_fit}, fmt_px, kit, l, lf, theme::*, top::big};
 use crate::order::Call;
 use depth::Exchange;

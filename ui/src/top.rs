@@ -1,6 +1,6 @@
-//! Header pieces for the egui app: a port of the SwiftUI host's TopBar (composite price with flash,
-//! the order venue's mark / index / funding countdown, 24h stats, open interest, cross-venue extras)
-//! and MarketClock (stock market sessions). Stats read the app's state document ("header").
+//! Header pieces: the composite price with flash, the order venue's mark / index / funding
+//! countdown, 24h stats, open interest, cross-venue extras and the stock market clock. Stats read
+//! the app's state document ("header").
 use super::{fmt_dp, fmt_px, kit, l, theme::*};
 use depth::Market;
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense, Ui};
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 const DAY: i64 = 86_400_000;
 
-/// 12.3K / 4.56M / 7.89B (the Swift `Fmt.big`).
+/// 12.3K / 4.56M / 7.89B.
 pub fn big(v: f64) -> String {
     let a = v.abs();
     if a >= 1e9 { format!("{:.2}B", v / 1e9) } else if a >= 1e6 { format!("{:.2}M", v / 1e6) } else if a >= 1e3 { format!("{:.1}K", v / 1e3) } else { format!("{v:.2}") }

@@ -79,7 +79,7 @@ impl Chart {
         });
     }
 
-    /// Sub-panes, overlays (with their inputs) and levels in one menu, grouped like the native one.
+    /// Sub-panes, overlays (with their inputs) and levels in one menu.
     fn indicators_menu(&mut self, ui: &mut Ui, market: Market) {
         let perp = market == Market::Perp;
         let n_on = self.panes.iter().filter(|(p, on)| *on && (!p.perp_only() || perp)).count()

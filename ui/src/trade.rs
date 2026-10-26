@@ -1,5 +1,5 @@
 //! Position insurance quotes (options hedge) for the order column, and the trade venue / book
-//! click the native-panel bridge reads. Order entry and the account strip live in order.rs and
+//! click the order panel reads. Order entry and the account strip live in order.rs and
 //! account.rs. Rule: the composite index never prices an order.
 use super::engine::Engine;
 use super::{fmt_px, fmt_qty, kit, t, theme::*};
