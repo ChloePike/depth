@@ -4,7 +4,7 @@
 //! Options are inverse: premiums are quoted in the underlying coin, so every price is emitted in USD
 //! as the coin price times the spot index carried by the same message (like OKX). Sizes are already
 //! base units (contract_size 1). Deribit IVs are percents, emitted as fractions. One connection
-//! carries `ticker.<instrument>.100ms` for every listed option (mark, IV, greeks, best bid / ask,
+//! carries `ticker.<instrument>.agg2` (about once a second) for every listed option (mark, IV, greeks, best bid / ask,
 //! open interest, per-expiry forward) and one `trades.option.<BASE>.100ms`.
 use crate::ws::{self, Frame, Spec};
 use crate::*;
@@ -51,7 +51,7 @@ async fn option_feed(e: Emit, base: String) {
             let mut chans = vec![format!("trades.option.{base}.100ms")];
             for o in &list {
                 let Some((s, info)) = option_info(o, &base) else { continue };
-                chans.push(format!("ticker.{s}.100ms"));
+                chans.push(format!("ticker.{s}.agg2"));
                 e.send(&s, 0, info);
             }
             chans.sort();
