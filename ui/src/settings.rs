@@ -639,7 +639,9 @@ fn appearance(ui: &mut Ui, st: &Value, call: &mut Call) {
         ui.horizontal(|ui| {
             ui.set_min_height(36.0);
             if kit::button(ui, l("Restore Default Appearance"), kit::Look::Secondary, kit::H, None, !p.default_look()).clicked() {
-                p = Prefs { tz_min: p.tz_min, confirm: p.confirm, fees: p.fees.clone(), risk: p.risk, demo: p.demo, demo_balance: p.demo_balance, ..Prefs::default() };
+                // only what default_look compares: a whole default Prefs also dropped the proxy, hotkeys and the rest
+                let d = Prefs::default();
+                (p.theme, p.accent, p.red_up, p.zoom, p.radius, p.terminal) = (d.theme, d.accent, d.red_up, d.zoom, d.radius, d.terminal);
             }
         });
     });
