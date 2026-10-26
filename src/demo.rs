@@ -25,6 +25,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub mod fill;
+mod live;
+pub use live::*;
 
 /// Maintenance margin rate of every position. ponytail: flat 0.5% (the first BTC tier on Bybit /
 /// Binance), no risk tiers; read the venue's tier table once positions past tier 1 matter.
@@ -119,6 +121,8 @@ pub struct Sim {
     pub coins: BTreeMap<(Exchange, String), (f64, f64)>,
     pub fills: Vec<Fill>,
     pub hist: Vec<HistOrder>,
+    /// finished orders that carried a client id: client id -> (order id, filled, status)
+    pub by_cid: HashMap<String, (String, f64, String)>,
     seen: HashSet<String>,
     /// recorded events the caller has not taken yet (persist, then push, in this order)
     pub pending: Vec<Ev>,
@@ -175,7 +179,7 @@ impl Sim {
         match &ev.kind {
             EvKind::Reset { balance } => {
                 self.cash = *balance;
-                self.pos.clear(); self.orders.clear(); self.tpsl.clear(); self.coins.clear(); self.fills.clear(); self.hist.clear();
+                self.pos.clear(); self.orders.clear(); self.tpsl.clear(); self.coins.clear(); self.fills.clear(); self.hist.clear(); self.by_cid.clear();
             }
             EvKind::Config { hedge, cross } => (self.hedge, self.cross) = (*hedge, *cross),
             EvKind::Leverage { ex, symbol, lev } => { self.levs.insert((*ex, symbol.clone()), *lev); }
@@ -274,6 +278,7 @@ impl Sim {
 
     fn done(&mut self, o: &DemoOrder, cancelled: bool, ts: i64) {
         let status = match (cancelled, o.filled > 0.0) { (false, _) => "Filled", (true, true) => "PartiallyFilledCanceled", (true, false) => "Cancelled" };
+        if let Some(c) = &o.req.client_id { self.by_cid.insert(c.clone(), (o.id.clone(), o.filled, status.into())); }
         self.hist.push(HistOrder { ex: o.ex, symbol: o.req.symbol.clone(), side: o.req.side(), kind: kind_name(&o.req.kind).into(), price: limit_price(&o.req.kind),
                                    avg: o.avg, qty: o.req.qty, filled: o.filled, status: status.into(), ts });
     }

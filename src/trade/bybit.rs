@@ -9,6 +9,7 @@ pub(super) fn bybit_url() -> &'static str { if testnet() { "https://api-testnet.
 pub fn sign(k: &Keys, ts: i64, recv: u32, payload: &str) -> String { hmac_hex(&k.secret, &format!("{ts}{}{recv}{payload}", k.key)) }
 
 pub(super) async fn bybit(k: &Keys, get: bool, path: &str, params: Value) -> Result<Value> {
+    super::no_demo(k)?;
     let ts = crate::now_ms();
     let recv = if get { RECV_READ } else { RECV_WRITE };
     let (payload, req) = if get {
@@ -333,6 +334,7 @@ fn bybit_order(o: &Value) -> OpenOrder {
 }
 
 pub async fn stream(k: Keys, tx: AccTx) {
+    if k.demo { return; }
     let ex = Exchange::Bybit;
     let url = if testnet() { "wss://stream-testnet.bybit.com/v5/private" } else { "wss://stream.bybit.com/v5/private" };
     loop {

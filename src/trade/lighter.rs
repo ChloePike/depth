@@ -73,7 +73,8 @@ fn scaled(s: &str, dp: u32) -> Result<i64> {
 
 // ---------------------------------------------------------------- keys, REST
 
-fn account(k: &Keys) -> Result<(i64, u8)> {
+pub(super) fn account(k: &Keys) -> Result<(i64, u8)> {
+    super::no_demo(k)?;
     let (a, i) = k.key.split_once(':').ok_or_else(|| anyhow!("lighter key must be \"<account_index>:<api_key_index>\""))?;
     Ok((a.trim().parse()?, i.trim().parse()?))
 }
@@ -319,6 +320,7 @@ pub async fn balance(k: &Keys) -> Result<Balance> {
 /// Private account stream: positions (public channel), orders (auth token), account stats and
 /// marks of every market, one connection. Resync once subscribed.
 pub async fn stream(k: Keys, tx: AccTx) {
+    if k.demo { return; }
     let ex = Exchange::Lighter;
     loop {
         let res: Result<bool> = async {

@@ -139,6 +139,7 @@ tr.confirm = 确认下单
 ins.title = 合约保险（期权对冲）
 ins.sim_qty = 模拟多单
 ins.loading = 正在加载期权报价…
+ins.demo = 模拟交易不模拟期权。
 ins.hint = 5 家期权所比价，按年化成本排序
 ins.venue = 交易所
 ins.exp = 到期

@@ -485,7 +485,7 @@ impl OrderPanel {
                 ui.label(RichText::new(l("Available")).font(prop(12.0)).color(mu()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    if has_key && kit::button(ui, "↔", Look::Link, 18.0, Some(18.0), true).on_hover_text(l("Move funds between accounts on this venue")).clicked() { self.open_transfer = Some(venue.clone()); }
+                    if has_key && t["demo"] != true && kit::button(ui, "↔", Look::Link, 18.0, Some(18.0), true).on_hover_text(l("Move funds between accounts on this venue")).clicked() { self.open_transfer = Some(venue.clone()); }
                     ui.label(RichText::new(f(&t["available"]).map(|a| format!("{} USDT", usd(a))).unwrap_or("–".into())).font(mono_m(12.0)).color(fg()));
                 });
             });
@@ -623,6 +623,7 @@ impl OrderPanel {
                     let _ = call(json!({"op": "leverage_max"}));
                 }
             }
+            if t["demo"] == true { kit::chip(ui, "DEMO", Tone::Warn).on_hover_text(l("Simulated account: no real order is sent")); }
             if t["verified"] == false { kit::chip(ui, l("Untested"), Tone::Warn).on_hover_text(l("Order placement on this venue is not yet verified on a live account: start with the minimum size.")); }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let name = if smart { format!("{} ▾", l("Smart")) } else { format!("{venue} ▾") };
@@ -1055,7 +1056,7 @@ impl OrderPanel {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(l("Account")).font(prop_s(14.0)).color(fg_strong()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if kit::button(ui, &format!("↔ {}", l("Transfer")), Look::Link, H_SM, None, true).on_hover_text(l("Move funds between this venue's accounts")).clicked() { self.open_transfer = Some(venue.to_string()); }
+                    if t["demo"] != true && kit::button(ui, &format!("↔ {}", l("Transfer")), Look::Link, H_SM, None, true).on_hover_text(l("Move funds between this venue's accounts")).clicked() { self.open_transfer = Some(venue.to_string()); }
                 });
             });
             // the account-level number that liquidates a unified account, with a risk gauge beside it
@@ -1207,6 +1208,7 @@ impl OrderPanel {
             ui.set_width(440.0);
             ui.spacing_mut().item_spacing.y = 8.0;
             dialog_title(ui, &format!("{base}USDT"), l("Perp"), Some((tk.title(), if tk.buy() { Tone::Up } else { Tone::Down })));
+            if st["demo"] == true { kit::note(ui, l("DEMO account: this order is simulated. No real order is sent."), WARN); }
             let legs = tk.plan["legs"].as_array().cloned().unwrap_or_default();
             caption(ui, &if legs.len() > 1 { format!("{} · {} {}", l("Route"), legs.len(), l("legs")) } else { l("Route").into() });
             egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
@@ -1264,7 +1266,7 @@ impl OrderPanel {
             if unverified { kit::note(ui, l("Order placement on this venue is not yet verified on a live account: start with the minimum size."), WARN); }
             kit::note(ui, l("Prices and sizes are rounded to the venue's tick and step."), dim());
             if let Some(e) = &tk.err { kit::note(ui, e, dn()); }
-            let (c, o) = dialog_buttons(ui, l("Cancel"), &format!("{} {}", l("Confirm"), tk.title()), col, true);
+            let (c, o) = dialog_buttons(ui, l("Cancel"), &format!("{} {}{}", l("Confirm"), tk.title(), if st["demo"] == true { " · DEMO" } else { "" }), col, true);
             if c || ui.input(|i| i.key_pressed(egui::Key::Escape)) { done = Some(false); }
             if o || (enter_ok && ui.input(|i| i.key_pressed(egui::Key::Enter))) { done = Some(true); }
         });
@@ -1288,6 +1290,7 @@ impl OrderPanel {
             dialog_title(ui, &a.title, "", None);
             ui.add(egui::Label::new(RichText::new(&a.message).font(prop(13.0)).color(fg())).wrap());
             if t["verified"] == false { kit::note(ui, l("This venue is untested: start with the minimum size."), WARN); }
+            if t["demo"] == true { kit::note(ui, l("DEMO account: this order is simulated. No real order is sent."), WARN); }
             let (c, o) = dialog_buttons(ui, l("Cancel"), l("Confirm"), accent(), true);
             if c { done = Some(false); }
             if o { done = Some(true); }

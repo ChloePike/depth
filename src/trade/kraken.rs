@@ -36,7 +36,8 @@ fn sign(secret: &str, msg: &str) -> Result<String> {
 /// Signed REST call. `path` is the part after /derivatives (e.g. "/api/v3/sendorder"), which is
 /// what Authent signs. GET calls here take no parameters (postData empty); POST parameters go
 /// form-encoded in the body and the exact body string is signed.
-async fn call(k: &Keys, post: bool, path: &str, params: &[(&str, String)]) -> Result<Value> {
+pub(super) async fn call(k: &Keys, post: bool, path: &str, params: &[(&str, String)]) -> Result<Value> {
+    super::no_demo(k)?;
     // ponytail: values are plain symbols / numbers / uuids, joined unescaped; percent-encode if free text is ever sent
     let body = params.iter().map(|(a, b)| format!("{a}={b}")).collect::<Vec<_>>().join("&");
     let nonce = crate::now_ms().to_string();
@@ -235,6 +236,7 @@ fn login_subs(k: &Keys, reply: &str) -> Vec<String> {
 /// One connection: subs[0] requests the challenge, `on_login` signs it and subscribes the private
 /// feeds; re-subscribing to heartbeat is the keepalive (as in the public perp connector).
 pub async fn stream(k: Keys, tx: AccTx) {
+    if k.demo { return; }
     let ex = Exchange::Kraken;
     loop {
         let mut auth_failed = false;

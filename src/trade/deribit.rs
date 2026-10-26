@@ -30,6 +30,7 @@ fn uri(method: &str, params: &[(&str, String)]) -> Result<String> {
 /// One JSON-RPC call; signed when `k` is given (private methods). Never retried: buy / sell / cancel are
 /// matching-engine calls.
 async fn deribit(k: Option<&Keys>, method: &str, params: &[(&str, String)]) -> Result<Value> {
+    if let Some(k) = k { super::no_demo(k)?; }
     let uri = uri(method, params)?;
     let url = format!("{}{uri}", url());
     ws::check_paused(&url)?;
@@ -283,6 +284,7 @@ fn on_frame(s: &mut Session, v: &Value, now: i64) -> Result<Vec<AccEvent>, (Stri
 /// ponytail: user.changes fires on own activity only, so a held option's mark / upnl moves with snapshots (connect,
 /// 5-minute reconcile, own orders); value it from the chain's live mark if that matters.
 pub async fn stream(k: Keys, tx: AccTx) {
+    if k.demo { return; }
     let ex = Exchange::Deribit;
     loop {
         // signed fresh for every connection (the venue accepts a timestamp for 60 s)
@@ -451,5 +453,12 @@ mod tests {
             json!({"jsonrpc": "2.0", "error": {"code": 10039, "message": "not_enough_funds_in_currency", "data": {"reason": "BTC"}}})).unwrap_err();
         assert_eq!(format!("{e:#}"), "deribit private/buy: not_enough_funds_in_currency (10039): BTC");
         assert_eq!(rpc_result("", "public/test", json!({"jsonrpc": "2.0", "result": {"version": "1"}})).unwrap()["version"], "1");
+    }
+
+    #[test]
+    fn demo_keys_never_sign() {
+        let k = Keys { key: "id".into(), secret: "s".into(), extra: None, demo: true };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        assert!(rt.block_on(deribit(Some(&k), "private/get_positions", &[])).unwrap_err().to_string().contains("demo"));
     }
 }

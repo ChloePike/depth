@@ -76,7 +76,8 @@ pub async fn can_trade(k: &Keys) -> Result<Option<bool>> {
     Ok(v[0]["perm"].as_str().map(|p| p.split(',').any(|x| x.trim() == "trade")))
 }
 
-async fn okx(k: &Keys, post: Option<Value>, path: &str) -> Result<Value> {
+pub(super) async fn okx(k: &Keys, post: Option<Value>, path: &str) -> Result<Value> {
+    super::no_demo(k)?;
     let url = format!("{REST}{path}");
     ws::check_paused(&url)?;
     let ts = iso(crate::now_ms());
@@ -272,6 +273,7 @@ fn login(k: &Keys, secs: i64) -> String {
 /// subscribed (the engine then takes a REST snapshot). Positions push every ~5s with markPx, so no
 /// separate mark feed is needed.
 pub async fn stream(k: Keys, tx: AccTx) {
+    if k.demo { return; }
     let ex = Exchange::Okx;
     loop {
         // fresh contract sizes every connection: the handler cannot await a reload
