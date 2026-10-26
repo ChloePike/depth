@@ -102,9 +102,10 @@ pub struct ChartLine { pub price: f64, pub ex: Option<Exchange>, pub tag: String
 #[derive(Clone, PartialEq, Debug)]
 pub enum LineAct { Order(Exchange, String), TpSl(Exchange, String), Preview(&'static str) }
 
-/// Requests from the chart to the app: move an order / trigger, or put a price into the order panel.
+/// Requests from the chart to the app: move an order / trigger, put a price into the order panel,
+/// or a position tool's whole order (entry, stop, target and the size risking its share of equity).
 #[derive(Clone, Debug)]
-pub enum ChartAct { Move(LineAct, f64), Cancel(LineAct), Fill(f64) }
+pub enum ChartAct { Move(LineAct, f64), Cancel(LineAct), Fill(f64), Position { entry: f64, stop: f64, target: f64, qty: Option<f64> } }
 
 /// One moving average line: period, color (0xRRGGBB), exponential instead of simple, shown.
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]

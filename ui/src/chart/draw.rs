@@ -295,9 +295,9 @@ impl Chart {
                     let risk = (d.a.1 - d.b.1).abs();
                     let rr = if risk > 0.0 { (d.c.1 - d.a.1).abs() / risk } else { 0.0 };
                     let long = d.c.1 > d.a.1;
-                    let size = match (equity, risk > 0.0) {
-                        (Some(eq), true) => { let usd = eq * risk_pct / 100.0; format!("{} {base} · {risk_pct}% = ${}", fmt_qty_chart(usd / risk), fmt_usd_short(usd)) }
-                        _ => format!("{risk_pct}%"),
+                    let size = match position_qty(equity, risk_pct, d.a.1, d.b.1) {
+                        Some(q) => format!("{} {base} · {risk_pct}% = ${}", fmt_qty_chart(q), fmt_usd_short(q * risk)),
+                        None => format!("{risk_pct}%"),
                     };
                     let tag = |yy: f64, txt: String, c: Color32, below: bool| {
                         let g = painter.layout_no_wrap(txt, mono(10.5), Color32::WHITE);
@@ -398,7 +398,10 @@ impl Chart {
                         if d.tool == Tool::Position {
                             menu_sep(ui);
                             ui.horizontal(|ui| { ui.label(t("pos.risk")); ui.add(egui::DragValue::new(&mut self.risk_pct).range(0.05..=100.0).speed(0.05).suffix("%")); });
-                            if self.trading && ui.button(t("pos.use")).clicked() { self.actions.push(ChartAct::Fill(d.a.1)); ui.close(); }
+                            if self.trading && ui.button(t("pos.use")).clicked() {
+                                self.actions.push(ChartAct::Position { entry: d.a.1, stop: d.b.1, target: d.c.1, qty: position_qty(self.equity, self.risk_pct, d.a.1, d.b.1) });
+                                ui.close();
+                            }
                         }
                         menu_sep(ui);
                         ui.checkbox(&mut d.locked, t("draw.lock"));
@@ -456,9 +459,25 @@ impl Chart {
     }
 }
 
+/// Size (base units) that loses `risk_pct` of `equity` between `entry` and `stop`; None without
+/// equity or a stop distance.
+pub(super) fn position_qty(equity: Option<f64>, risk_pct: f64, entry: f64, stop: f64) -> Option<f64> {
+    let risk = (entry - stop).abs();
+    equity.filter(|_| risk > 0.0).map(|eq| eq * risk_pct / 100.0 / risk)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn position_qty_matches_label() {
+        // 1 % of 10,000 is 100 USDT risked over a 5 USDT stop distance: 20 coins, either side
+        assert_eq!(position_qty(Some(10_000.0), 1.0, 100.0, 95.0), Some(20.0));
+        assert_eq!(position_qty(Some(10_000.0), 0.5, 100.0, 104.0), Some(12.5));
+        assert_eq!(position_qty(None, 1.0, 100.0, 95.0), None);
+        assert_eq!(position_qty(Some(10_000.0), 1.0, 100.0, 100.0), None);
+    }
 
     #[test]
     fn alerts_fire_once_on_crossing() {

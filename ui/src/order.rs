@@ -1041,6 +1041,20 @@ impl OrderPanel {
         self.last_pos = Some(s(&p["side"]).into());
     }
 
+    /// A chart position tool's order in the form: open tab, limit at the entry, the size floored to the
+    /// venue's step (kept as typed when unknown), TP at the target and SL at the stop where the venue
+    /// takes TP/SL, and Enter places that side (long when the target is above the entry).
+    pub(crate) fn prefill_position(&mut self, entry: f64, stop: f64, target: f64, qty: Option<f64>, st: &Value) {
+        let t = &st["trade"];
+        let (tick, ok) = (f(&t["tick"]), t["caps"]["tpsl"] == true || st["route"]["smart"] == true);
+        (self.close, self.kind, self.bbo_on, self.tif, self.pct) = (false, Kind::Limit, false, "gtc", 0.0);
+        self.price = px_str(entry, tick);
+        if let Some(q) = qty { (self.qty_usdt, self.qty) = (false, qty_str(q, f(&t["step"]))); }
+        (self.tpsl_on, self.trig_last, self.tp, self.sl) = (ok, false, px_str(target, tick), px_str(stop, tick));
+        self.last_pos = Some(if target > entry { "long" } else { "short" }.into());
+        self.error = (!ok).then(|| l("TP/SL is not available on this venue yet").into());
+    }
+
     fn results(&self, ui: &mut Ui, st: &Value) {
         let log: Vec<(i64, &str, bool)> = st["log"].as_array().map(|a| a.iter().map(|x| (x["ts"].as_i64().unwrap_or(0), s(&x["msg"]), x["ok"] == true)).collect()).unwrap_or_default();
         results(ui, self.sent_ms, &log);
@@ -1535,6 +1549,22 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn prefill_position_fills_the_form() {
+        let st = |tpsl: bool| json!({"trade": {"tick": 0.1, "step": 0.001, "caps": {"tpsl": tpsl}}, "route": {"smart": false}});
+        let mut p = OrderPanel { close: true, kind: Kind::Market, qty_usdt: true, ..Default::default() };
+        p.prefill_position(100.0, 95.0, 110.0, Some(1.23456), &st(true));
+        assert!(!p.close && p.kind == Kind::Limit && !p.qty_usdt && p.tpsl_on && p.error.is_none());
+        assert_eq!((p.price.as_str(), p.qty.as_str(), p.tp.as_str(), p.sl.as_str(), p.last_pos.as_deref()), ("100.0", "1.234", "110.0", "95.0", Some("long")));
+        // a short: target under the entry; no size known keeps the field
+        p.prefill_position(100.0, 105.0, 90.0, None, &st(true));
+        assert_eq!((p.qty.as_str(), p.tp.as_str(), p.sl.as_str(), p.last_pos.as_deref()), ("1.234", "90.0", "105.0", Some("short")));
+        // a venue without TP/SL: entry and size only, and it says so
+        p.prefill_position(100.0, 95.0, 110.0, Some(2.0), &st(false));
+        assert!(!p.tpsl_on && p.error.is_some());
+        assert_eq!(p.qty, "2.000");
+    }
+
     #[test]
     fn numbers_parse_like_the_swift_panel() {
         assert_eq!(parse("1,234.5"), Some(1234.5));

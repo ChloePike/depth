@@ -884,6 +884,16 @@ impl App {
         for act in acts {
             match act {
                 chart::ChartAct::Fill(px) => self.trade.fill = Some((self.trade.ex, px)),
+                chart::ChartAct::Position { entry, stop, target, qty } => {
+                    // the whole order into the perp panel: limit at the entry, the size, TP at the target, SL at the
+                    // stop (the native hosts' panel takes the entry price, as a book click). The last state document:
+                    // the agg lock is held here, a fresh one would take it again
+                    self.order_panel = true;
+                    if self.mode != Market::Perp { self.pending_mode = Some(Market::Perp); }
+                    let st = self.st.0.clone();
+                    self.order.prefill_position(entry, stop, target, qty, &st);
+                    if self.hosted { self.trade.fill = Some((self.trade.ex, entry)); }
+                }
                 chart::ChartAct::Move(chart::LineAct::Order(ex, id), px) => {
                     let o = self.eng.account.lock().unwrap().orders.iter().find(|o| o.ex == ex && o.id == id).cloned();
                     if let Some(o) = o { self.eng.replace_order(&o, px, ctx); }
