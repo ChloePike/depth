@@ -288,6 +288,11 @@ impl BookView {
             // cumulative depth: a soft side-tinted fill growing from the right
             let w = ((c / max) as f32 * (bar_r - bar_l)).max(2.0);
             painter.rect_filled(Rect::from_min_max(pos2(bar_r - w, r.top() + 2.0), pos2(bar_r, r.bottom() - 2.0)), 3, col.gamma_multiply(0.12));
+            // a level a taker trade just ate: lit across the row, fading out over FLASH
+            if let Some(t0) = flash.get(&(is_ask, (l.px / bin).round() as i64)) {
+                let f = 1.0 - t0.elapsed().as_secs_f32() / FLASH.as_secs_f32();
+                if f > 0.0 { painter.rect_filled(r.shrink2(vec2(2.0, 1.0)), 3, col.gamma_multiply(0.22 * f)); }
+            }
             // L3: a 4 px strip along the bottom of the row (the numbers stay clean): the level's
             // known orders from the right edge, front of the queue outermost, on the level-size
             // scale. Orders under 4 px merge into one segment; split estimates (unknown which
@@ -745,5 +750,22 @@ mod tests {
         a.trades.push_back(tick(4, 100.6, Side::Buy));
         v.hits(&a, Market::Perp, &scope, 100.0, 1.0, t2);
         assert_eq!(v.flash.get(&(true, 101)), Some(&t2));
+    }
+
+    #[test]
+    fn flash_key_is_the_rows_key() {
+        // bin 0.5: a buy at 100.25 eats the ask row 100.5, a sell at 100.25 the bid row 100.0; the
+        // rows look their flash up by (px / bin).round()
+        let mut a = Agg::default();
+        let tick = |ts, side| Tick { ts, ex: Exchange::Binance, market: Market::Perp, px: 100.25, qty: 1.0, side };
+        let mut v = BookView { src: Some(Exchange::Binance), ..Default::default() };
+        let scope: HashSet<Exchange> = [Exchange::Binance].into();
+        a.trades.push_back(tick(1, Side::Buy));
+        v.hits(&a, Market::Perp, &scope, 100.0, 0.5, Instant::now());
+        a.trades.push_back(tick(2, Side::Buy));
+        a.trades.push_back(tick(2, Side::Sell));
+        v.hits(&a, Market::Perp, &scope, 100.0, 0.5, Instant::now());
+        let row = |px: f64| (px / 0.5).round() as i64;
+        assert!(v.flash.contains_key(&(true, row(100.5))) && v.flash.contains_key(&(false, row(100.0))));
     }
 }
