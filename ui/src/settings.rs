@@ -58,11 +58,14 @@ pub struct Prefs {
     pub hunter: bool,
     /// Hunter alerts also as system notifications (the alert log on the page always gets them)
     pub hunter_notify: bool,
+    /// TP / SL typed as PnL % of the margin (ROE) instead of a price: the last choice of each (order panel, TP/SL sheet)
+    pub tp_roe: bool,
+    pub sl_roe: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into(), risk: Default::default(), demo: false, demo_balance: depth::demo::START_BALANCE, hunter: true, hunter_notify: false }
+        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into(), risk: Default::default(), demo: false, demo_balance: depth::demo::START_BALANCE, hunter: true, hunter_notify: false, tp_roe: false, sl_roe: false }
     }
 }
 

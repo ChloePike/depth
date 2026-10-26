@@ -37,11 +37,12 @@ fn title(pos: &str, close: bool) -> &'static str {
 /// A scaled / TWAP request waiting for confirmation.
 struct Algo { op: &'static str, args: Value, title: String, message: String }
 
-/// One staged TP/SL level of the position sheet; `pct` = amount is % of the position.
-struct Level { tp: bool, price: String, amount: String, pct: bool }
+/// One staged TP/SL level of the position sheet; `pct` = amount is % of the position, `roe` = price typed as ROE %.
+struct Level { tp: bool, price: String, amount: String, pct: bool, roe: bool }
 
 /// The TP/SL sheet of one position (whole position or staged levels); shared with the account strip.
-pub(crate) struct TpSlSheet { ex: String, symbol: String, side: String, partial: bool, tp: String, sl: String, last: bool, levels: Vec<Level>, err: Option<String> }
+/// `roe`: TP / SL typed as ROE % (None until the first frame reads the saved choice).
+pub(crate) struct TpSlSheet { ex: String, symbol: String, side: String, partial: bool, tp: String, sl: String, roe: Option<[bool; 2]>, last: bool, levels: Vec<Level>, err: Option<String> }
 
 pub struct OrderPanel {
     close: bool,
@@ -55,6 +56,8 @@ pub struct OrderPanel {
     tpsl_on: bool,
     tp: String,
     sl: String,
+    /// TP / SL typed as ROE % instead of a price (None until the first frame reads the saved choice)
+    roe: Option<[bool; 2]>,
     trig_last: bool,
     /// side of the last Buy / Sell click: Enter in a field repeats it
     last_pos: Option<String>,
@@ -108,7 +111,7 @@ impl Default for OrderPanel {
     fn default() -> Self {
         OrderPanel {
             close: false, kind: Kind::Limit, price: String::new(), qty: String::new(), pct: 0.0, bbo_on: false, bbo_queue: false, bbo_level: 1,
-            tpsl_on: false, tp: String::new(), sl: String::new(), trig_last: false, last_pos: None, error: None, ticket: None, algo: None, tif: "gtc",
+            tpsl_on: false, tp: String::new(), sl: String::new(), roe: None, trig_last: false, last_pos: None, error: None, ticket: None, algo: None, tif: "gtc",
             trigger: String::new(), trigger_last: false, stop_limit: false, callback: "1.0".into(), activation: String::new(),
             scaled_from: String::new(), scaled_to: String::new(), scaled_count: 5, scaled_skew: 0.0, scaled_post: true,
             twap_minutes: "15".into(), twap_slices: "10".into(), twap_slip: "10".into(), twap_limit: String::new(), twap_native: true, twap_random: false,
@@ -135,11 +138,66 @@ pub fn parse(s: &str) -> Option<f64> {
 
 fn decimals(step: Option<f64>) -> Option<usize> { step.filter(|s| *s > 0.0).map(|s| (-s.log10() - 1e-9).ceil().max(0.0) as usize) }
 
-/// price for an input box: tick decimals when the venue rules are known
-fn px_str(v: f64, tick: Option<f64>) -> String {
+/// price decimals: the tick's when the venue rules are known
+fn px_dp(v: f64, tick: Option<f64>) -> usize {
     let a = v.abs();
-    let d = decimals(tick).unwrap_or(if a >= 10_000.0 { 1 } else if a >= 100.0 { 2 } else if a >= 1.0 { 4 } else { 6 });
-    format!("{v:.d$}")
+    decimals(tick).unwrap_or(if a >= 10_000.0 { 1 } else if a >= 100.0 { 2 } else if a >= 1.0 { 4 } else { 6 })
+}
+
+/// price for an input box: tick decimals when the venue rules are known
+fn px_str(v: f64, tick: Option<f64>) -> String { let d = px_dp(v, tick); format!("{v:.d$}") }
+
+/// The trigger price where a position entered at `entry` with leverage `lev` makes (TP) or loses (SL)
+/// `roe` % of its margin (ROE = PnL / initial margin; the sign is ignored, so a loss reads "10" or "-10"):
+/// long entry × (1 ± roe / 100 / lev), short entry × (1 ∓ roe / 100 / lev). On the tick (else the
+/// px_str decimals) TP rounds away from the entry, SL towards it but never onto or across it.
+/// None when that is zero or below.
+fn roe_px(long: bool, tp: bool, entry: f64, lev: f64, roe: f64, tick: Option<f64>) -> Option<f64> {
+    if entry <= 0.0 || lev <= 0.0 || !roe.is_finite() { return None; }
+    // above the entry: long TP, short SL
+    let up = long == tp;
+    let raw = entry * (1.0 + if up { 1.0 } else { -1.0 } * roe.abs() / 100.0 / lev);
+    let t = tick.filter(|t| *t > 0.0).unwrap_or(10f64.powi(-(px_dp(raw, None) as i32)));
+    let (lo, hi) = (((raw / t) + 1e-9).floor() * t, ((raw / t) - 1e-9).ceil() * t);
+    let (away, toward) = if up { (hi, lo) } else { (lo, hi) };
+    let px = if tp || (if up { toward <= entry } else { toward >= entry }) { away } else { toward };
+    parse(&px_str(px, Some(t))).filter(|p| *p > 0.0)
+}
+
+/// ROE % (PnL / initial margin) of a `long` / short entered at `entry` with `lev` at the price `px`.
+fn roe_of(long: bool, entry: f64, lev: f64, px: f64) -> f64 { (px / entry - 1.0) * if long { 1.0 } else { -1.0 } * lev * 100.0 }
+
+/// A TP / SL field as a trigger price: the typed price, or the typed ROE % through `roe_px`
+/// (Some(None): no price above zero). None when empty.
+fn field_px(text: &str, roe: bool, long: bool, tp: bool, entry: f64, lev: f64, tick: Option<f64>) -> Option<Option<f64>> {
+    let v = parse(text)?;
+    Some(if roe { roe_px(long, tp, entry, lev, v, tick) } else { Some(v) })
+}
+
+/// The saved TP / SL units (Prefs tp_roe / sl_roe): true = ROE %.
+fn saved_roe(st: &Value) -> [bool; 2] { [st["prefs"]["tp_roe"] == true, st["prefs"]["sl_roe"] == true] }
+
+const ROE_ZERO: &str = "The PnL % gives a price of zero or below";
+
+/// The ⇄ beside a TP / SL price: switches it between USDT and ROE % (clearing what is typed) and
+/// remembers the choice (Prefs tp_roe / sl_roe).
+fn unit_toggle(ui: &mut Ui, roe: &mut bool, text: &mut String, tp: bool, call: &mut Call) {
+    if kit::button(ui, "⇄", Look::Secondary, H, Some(H), true).on_hover_text(l("Price in USDT, or PnL as % of the margin (ROE)")).clicked() {
+        *roe = !*roe;
+        text.clear();
+        let _ = call(json!({"op": "set_prefs", "prefs": {(if tp { "tp_roe" } else { "sl_roe" }): *roe}}));
+    }
+}
+
+/// A TP / SL field with its unit (USDT or ROE %) and the ⇄; true when Enter was pressed.
+fn tpsl_field(ui: &mut Ui, label: &str, text: &mut String, roe: &mut bool, tp: bool, id: &str, call: &mut Call) -> bool {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let unit = if *roe { format!("{}%", l("ROE")) } else { "USDT".into() };
+        let e = ui.allocate_ui(egui::vec2(ui.available_width() - H - 6.0, H), |ui| kit::field(ui, label, text, &unit, id, false).1).inner;
+        unit_toggle(ui, roe, text, tp, call);
+        e
+    }).inner
 }
 
 /// size floored to the venue's step (never rounds up past the max)
@@ -413,6 +471,7 @@ impl OrderPanel {
             if let Some((ex, px)) = &click { if *ex == venue { self.kind = Kind::Limit; self.bbo_on = false; self.price = px_str(*px, tick); } }
         }
         self.seen = (symbol.clone(), venue.clone(), click);
+        if self.roe.is_none() { self.roe = Some(saved_roe(st)); }
         if self.price.is_empty() { if let Some(b) = bid { self.price = px_str(b, tick); } }
         if !bbo_levels.contains(&self.bbo_level) { self.bbo_level = bbo_levels.first().copied().unwrap_or(1); }
 
@@ -435,18 +494,24 @@ impl OrderPanel {
         let away = |p: f64| mid.map(|m| format!("{:+.2}%", (p / m - 1.0) * 100.0)).unwrap_or_default();
         let sub = |p: f64| if qty_v > 0.0 { format!("{}@{} · {}", fmt_qty(qty_v), fmt_px(p), away(p)) } else { format!("@{} · {}", fmt_px(p), away(p)) };
         let mut pv = vec![];
-        let mut add = |field: &'static str, tag: &'static str, v: &str, col: Color32| if let Some(p) = parse(v).filter(|p| *p > 0.0) { pv.push((p, field, tag, sub(p), col)); };
+        let mut add = |field: &'static str, tag: &'static str, v: Option<f64>, col: Color32| if let Some(p) = v.filter(|p| *p > 0.0) { pv.push((p, field, tag, sub(p), col)); };
         match self.kind {
             // the price field is pre-filled with the bid: no line until a size is typed
-            Kind::Limit if !use_bbo && qty_v > 0.0 => add("price", l("Limit"), &self.price, accent()),
+            Kind::Limit if !use_bbo && qty_v > 0.0 => add("price", l("Limit"), parse(&self.price), accent()),
             Kind::Stop => {
-                add("trigger", l("Stop"), &self.trigger, accent());
-                if self.stop_limit { add("price", l("Limit"), &self.price, accent()); }
+                add("trigger", l("Stop"), parse(&self.trigger), accent());
+                if self.stop_limit { add("price", l("Limit"), parse(&self.price), accent()); }
             }
-            Kind::Scaled => { add("from", l("Scaled"), &self.scaled_from, accent()); add("to", l("Scaled"), &self.scaled_to, accent()); }
+            Kind::Scaled => { add("from", l("Scaled"), parse(&self.scaled_from), accent()); add("to", l("Scaled"), parse(&self.scaled_to), accent()); }
             _ => {}
         }
-        if self.tpsl_on && tpsl_ok && !self.close && matches!(self.kind, Kind::Limit | Kind::Market) { add("tp", "TP", &self.tp, up()); add("sl", "SL", &self.sl, dn()); }
+        if self.tpsl_on && tpsl_ok && !self.close && matches!(self.kind, Kind::Limit | Kind::Market) {
+            // a ROE % is a price only for one side: drawn for the side Enter repeats, none before
+            let (side, roe) = (self.last_pos.as_deref().map(|p| p == "long"), self.roe.unwrap_or_default());
+            let px = |tp: bool| self.tpsl_px(tp, side.unwrap_or(true), t, use_bbo).flatten().filter(|_| side.is_some() || !roe[usize::from(!tp)]);
+            add("tp", "TP", px(true), up());
+            add("sl", "SL", px(false), dn());
+        }
         self.preview = pv;
 
         let mut enter = false;
@@ -506,7 +571,7 @@ impl OrderPanel {
             ui.scope(|ui| {
                 if slider(ui, &mut self.pct, &pct) { self.qty = if self.pct > 0.0 { self.qty_text(max_qty * self.pct as f64, ref_px, step) } else { String::new() }; }
             }).response.on_hover_text(if self.close { l("Share of the position") } else { l("Share of available margin × leverage") });
-            if !self.close && matches!(self.kind, Kind::Limit | Kind::Market) && (tpsl_ok || self.tpsl_on) { enter |= self.tpsl_section(ui, tpsl_ok); }
+            if !self.close && matches!(self.kind, Kind::Limit | Kind::Market) && (tpsl_ok || self.tpsl_on) { enter |= self.tpsl_section(ui, tpsl_ok, t, use_bbo, qty_v, call); }
             self.algo_jobs(ui, st, call);
             // the two sides, with what each can open / close and the margin it costs
             let (l1, l2) = if self.close { (l("Close Short"), l("Close Long")) } else { (l("Open Long"), l("Open Short")) };
@@ -792,7 +857,7 @@ impl OrderPanel {
     }
 
     /// TP/SL switch and prices; where the venue has no TP/SL only the switch (to turn it off) and a note.
-    fn tpsl_section(&mut self, ui: &mut Ui, ok: bool) -> bool {
+    fn tpsl_section(&mut self, ui: &mut Ui, ok: bool, t: &Value, use_bbo: bool, qty: f64, call: &mut Call) -> bool {
         let mut enter = false;
         ui.horizontal(|ui| {
             ui.set_min_height(H_SM);
@@ -804,11 +869,52 @@ impl OrderPanel {
             row(ui, l("Trigger by"), |ui| {
                 ui.allocate_ui(egui::vec2(128.0, H_SM), |ui| kit::segments(ui, &mut self.trig_last, &[(false, l("Mark")), (true, l("Last"))], H_SM));
             });
-            enter |= kit::field(ui, l("Take profit"), &mut self.tp, "USDT", "tp", false).1;
-            enter |= kit::field(ui, l("Stop loss"), &mut self.sl, "USDT", "sl", false).1;
+            let u = self.roe.get_or_insert_default();
+            enter |= tpsl_field(ui, l("Take profit"), &mut self.tp, &mut u[0], true, "tp", call);
+            self.tpsl_hint(ui, true, t, use_bbo, qty);
+            let u = self.roe.get_or_insert_default();
+            enter |= tpsl_field(ui, l("Stop loss"), &mut self.sl, &mut u[1], false, "sl", call);
+            self.tpsl_hint(ui, false, t, use_bbo, qty);
             kit::note(ui, l("Applies to the whole position once the order fills."), mu());
         }
         enter
+    }
+
+    /// The price an order of this side enters at, for TP/SL in ROE %: the limit price, else the venue's
+    /// own touch it takes (market, BBO counterparty) or joins (BBO queue); never the composite.
+    fn entry(&self, long: bool, t: &Value, use_bbo: bool) -> Option<f64> {
+        if self.kind == Kind::Limit && !use_bbo { return parse(&self.price).filter(|p| *p > 0.0); }
+        f(&t[if (self.kind == Kind::Market || !self.bbo_queue) == long { "ask" } else { "bid" }]).filter(|p| *p > 0.0)
+    }
+
+    /// The TP (`tp`) or SL field as the trigger price of a `long` / short order: the typed price, or the
+    /// typed ROE % at this order's entry and the panel's leverage (Some(None): no price). None when empty.
+    fn tpsl_px(&self, tp: bool, long: bool, t: &Value, use_bbo: bool) -> Option<Option<f64>> {
+        let roe = self.roe.unwrap_or_default()[usize::from(!tp)];
+        let lev = f(&t["lev"]).unwrap_or(1.0).max(1.0);
+        // no entry yet: a % has no price (roe_px refuses entry 0)
+        field_px(if tp { &self.tp } else { &self.sl }, roe, long, tp, self.entry(long, t, use_bbo).unwrap_or(0.0), lev, f(&t["tick"]))
+    }
+
+    /// Under a TP / SL field, per side (long / short, the buttons' colours): the price a ROE % triggers
+    /// at, or the ROE of a typed price, and the PnL of the size there; "–" where it is no TP / SL of that side.
+    fn tpsl_hint(&self, ui: &mut Ui, tp: bool, t: &Value, use_bbo: bool, qty: f64) {
+        let roe = self.roe.unwrap_or_default()[usize::from(!tp)];
+        let lev = f(&t["lev"]).unwrap_or(1.0).max(1.0);
+        let side = |long: bool| {
+            let (px, e) = (self.tpsl_px(tp, long, t, use_bbo)??, self.entry(long, t, use_bbo)?);
+            let r = roe_of(long, e, lev, px);
+            (if tp { r > 0.0 } else { r < 0.0 }).then_some((px, e, r))
+        };
+        let (a, b) = (side(true), side(false));
+        if a.is_none() && b.is_none() { return; }
+        let txt = |x: Option<(f64, f64, f64)>, long: bool, pnl: bool| x.map_or("–".into(), |(px, e, r)| {
+            if pnl { format!("{} USDT", signed((px - e) * qty * if long { 1.0 } else { -1.0 })) } else if roe { fmt_px(px) } else { format!("{r:+.2}%") }
+        });
+        let mut rows = vec![(if roe { l("Trigger price") } else { l("ROE") }, txt(a, true, false), txt(b, false, false), "")];
+        if qty > 0.0 { rows.push((l("Est. PnL"), txt(a, true, true), txt(b, false, true), "")); }
+        side_facts(ui, &rows);
+        if !tp && [a, b].iter().flatten().any(|x| x.2 <= -100.0) { kit::note(ui, l("This stop loses the order's whole margin or more: an isolated position is liquidated before it triggers."), WARN); }
     }
 
     /// Running TWAP jobs (and finished ones for a minute) with progress and cancel.
@@ -1025,7 +1131,9 @@ impl OrderPanel {
     /// A preview line dragged on the chart: that field takes the new price.
     pub(crate) fn set_preview(&mut self, field: &str, px: f64) {
         let v = px_str(px, self.tick);
-        match field { "price" => self.price = v, "trigger" => self.trigger = v, "from" => self.scaled_from = v, "to" => self.scaled_to = v, "tp" => self.tp = v, "sl" => self.sl = v, _ => {} }
+        // a dragged TP / SL is a price: its field switches to USDT
+        match field { "price" => self.price = v, "trigger" => self.trigger = v, "from" => self.scaled_from = v, "to" => self.scaled_to = v,
+            "tp" => (self.tp, self.roe.get_or_insert_default()[0]) = (v, false), "sl" => (self.sl, self.roe.get_or_insert_default()[1]) = (v, false), _ => {} }
     }
 
     /// Limit close of a position in the form: close tab, limit at the venue's own touch on the
@@ -1047,7 +1155,7 @@ impl OrderPanel {
         (self.close, self.kind, self.bbo_on, self.tif, self.pct) = (false, Kind::Limit, false, "gtc", 0.0);
         self.price = px_str(entry, tick);
         if let Some(q) = qty { (self.qty_usdt, self.qty) = (false, qty_str(q, f(&t["step"]))); }
-        (self.tpsl_on, self.trig_last, self.tp, self.sl) = (ok, false, px_str(target, tick), px_str(stop, tick));
+        (self.tpsl_on, self.trig_last, self.tp, self.sl, self.roe) = (ok, false, px_str(target, tick), px_str(stop, tick), Some([false; 2]));
         self.last_pos = Some(if target > entry { "long" } else { "short" }.into());
         self.error = (!ok).then(|| l("TP/SL is not available on this venue yet").into());
     }
@@ -1192,8 +1300,11 @@ impl OrderPanel {
         // the section is only shown for limit / market: a switch left on under another kind is ignored
         if self.tpsl_on && !self.close && matches!(self.kind, Kind::Limit | Kind::Market) {
             if t["caps"]["tpsl"] != true && st["route"]["smart"] != true { self.error = Some(l("TP/SL is not available on this venue yet").into()); return; }
-            (tp, sl) = (parse(&self.tp), parse(&self.sl));
-            if tp.is_none() && sl.is_none() { self.error = Some(l("Enter a take-profit or stop-loss price, or turn TP/SL off").into()); return; }
+            // a ROE % becomes this side's price here: the check, the ticket and the confirmation see the price
+            let (a, b) = (self.tpsl_px(true, pos == "long", t, use_bbo), self.tpsl_px(false, pos == "long", t, use_bbo));
+            if a.is_none() && b.is_none() { self.error = Some(l("Enter a take-profit or stop-loss price, or turn TP/SL off").into()); return; }
+            if a == Some(None) || b == Some(None) { self.error = Some(l(ROE_ZERO).into()); return; }
+            (tp, sl) = (a.flatten(), b.flatten());
             // routing then uses only venues that take TP/SL
             args["tpsl"] = true.into();
             if let Some(e) = tpsl_check(pos == "long", ref_px, l("the order price"), tp, sl) { self.error = Some(e); return; }
@@ -1411,8 +1522,8 @@ impl OrderPanel {
 
 impl TpSlSheet {
     pub(crate) fn new(ex: &str, symbol: &str, side: &str) -> Self {
-        TpSlSheet { ex: ex.into(), symbol: symbol.into(), side: side.into(), partial: false, tp: String::new(), sl: String::new(), last: false,
-            levels: vec![Level { tp: true, price: String::new(), amount: "50".into(), pct: true }, Level { tp: false, price: String::new(), amount: "100".into(), pct: true }], err: None }
+        TpSlSheet { ex: ex.into(), symbol: symbol.into(), side: side.into(), partial: false, tp: String::new(), sl: String::new(), roe: None, last: false,
+            levels: vec![Level { tp: true, price: String::new(), amount: "50".into(), pct: true, roe: false }, Level { tp: false, price: String::new(), amount: "100".into(), pct: true, roe: false }], err: None }
     }
 }
 
@@ -1425,7 +1536,18 @@ pub(crate) fn tpsl_modal(sheet: &mut Option<TpSlSheet>, ui: &mut Ui, st: &Value,
         let sign = if long { 1.0 } else { -1.0 };
         let (qty, entry, mark) = (f(&p["qty"]).unwrap_or(0.0), f(&p["entry"]).unwrap_or(0.0), f(&p["mark"]).unwrap_or(0.0));
         let base = sh.symbol.trim_end_matches("USDT").to_string();
-        let step = if sh.symbol == s(&st["trade"]["symbol"]) { f(&st["trade"]["step"]) } else { None };
+        let here = sh.symbol == s(&st["trade"]["symbol"]);
+        let (step, tick) = if here { (f(&st["trade"]["step"]), f(&st["trade"]["tick"])) } else { (None, None) };
+        // ROE % works on the position's effective leverage (notional at entry / margin, the Positions
+        // table's ROE), else its set leverage, else 1x
+        let lev = f(&p["margin"]).filter(|m| *m > 0.0 && entry * qty > 0.0).map(|m| entry * qty / m).or(f(&p["lev"]).filter(|v| *v > 0.0)).unwrap_or(1.0);
+        let liq = f(&p["liq"]).filter(|x| *x > 0.0);
+        let px_of = |text: &str, roe: bool, tp: bool| field_px(text, roe, long, tp, entry, lev, tick);
+        if sh.roe.is_none() {
+            let u = saved_roe(st);
+            for lv in &mut sh.levels { lv.roe = u[usize::from(!lv.tp)]; }
+            sh.roe = Some(u);
+        }
         let qty_of = |lv: &Level| parse(&lv.amount).filter(|a| *a > 0.0).and_then(|a| parse(&qty_str(if lv.pct { qty * a.min(100.0) / 100.0 } else { a }, step)));
         let existing: Vec<Value> = st["tpsl"].as_array().map(|a| a.iter().filter(|x| s(&x["ex"]) == sh.ex && s(&x["symbol"]) == sh.symbol && s(&x["pos"]) == sh.side).cloned().collect()).unwrap_or_default();
         let (mut done, mut apply, mut cancel) = (false, false, None);
@@ -1443,17 +1565,23 @@ pub(crate) fn tpsl_modal(sheet: &mut Option<TpSlSheet>, ui: &mut Ui, st: &Value,
             row(ui, l("Trigger by"), |ui| {
                 ui.allocate_ui(egui::vec2(128.0, H_SM), |ui| kit::segments(ui, &mut sh.last, &[(false, l("Mark")), (true, l("Last"))], H_SM));
             });
-            let pnl = |ui: &mut Ui, px: Option<f64>, q: f64| {
-                if let Some(px) = px.filter(|v| *v > 0.0) {
+            // under a price: the PnL of `q` there, with the price a ROE % triggers at or the ROE of a typed price
+            let hint = |ui: &mut Ui, label: &str, px: Option<Option<f64>>, roe: bool, tp: bool, q: f64| match px {
+                Some(Some(px)) if px > 0.0 => {
                     let v = (px - entry) * q * sign;
-                    kit::kv(ui, l("Est. PnL"), format!("{} USDT ({:+.2}%)", signed(v), (px / entry.max(1e-12) - 1.0) * sign * 100.0), if v >= 0.0 { up() } else { dn() });
+                    let other = if roe { format!("@ {}", fmt_px(px)) } else { format!("· {} {:+.2}%", l("ROE"), roe_of(long, entry, lev, px)) };
+                    kit::kv(ui, label, format!("{} USDT {other}", signed(v)), if v >= 0.0 { up() } else { dn() });
+                    if !tp && liq.is_some_and(|lq| if long { px <= lq } else { px >= lq }) { kit::note(ui, l("This stop is past the liquidation price: the position is liquidated before it triggers."), WARN); }
                 }
+                Some(_) if roe => kit::note(ui, l(ROE_ZERO), dn()),
+                _ => {}
             };
             if !sh.partial {
-                apply |= kit::field(ui, l("Take profit"), &mut sh.tp, "USDT", "stp", false).1;
-                pnl(ui, parse(&sh.tp), qty);
-                apply |= kit::field(ui, l("Stop loss"), &mut sh.sl, "USDT", "ssl", false).1;
-                pnl(ui, parse(&sh.sl), qty);
+                let u = sh.roe.get_or_insert_default();
+                apply |= tpsl_field(ui, l("Take profit"), &mut sh.tp, &mut u[0], true, "stp", call);
+                hint(ui, l("Est. PnL"), px_of(&sh.tp, u[0], true), u[0], true, qty);
+                apply |= tpsl_field(ui, l("Stop loss"), &mut sh.sl, &mut u[1], false, "ssl", call);
+                hint(ui, l("Est. PnL"), px_of(&sh.sl, u[1], false), u[1], false, qty);
                 kit::note(ui, l("Closes the whole position at market when triggered, including size added later."), mu());
             } else {
                 let mut remove = None;
@@ -1463,7 +1591,8 @@ pub(crate) fn tpsl_modal(sheet: &mut Option<TpSlSheet>, ui: &mut Ui, st: &Value,
                         if pill(ui, l("TP"), lv.tp).clicked() { lv.tp = true; }
                         if pill(ui, l("SL"), !lv.tp).clicked() { lv.tp = false; }
                         ui.add_space(4.0);
-                        ui.allocate_ui(egui::vec2(170.0, 32.0), |ui| kit::field(ui, l("Price"), &mut lv.price, "", ("lvp", i), false));
+                        ui.allocate_ui(egui::vec2(140.0, 32.0), |ui| kit::field(ui, l("Price"), &mut lv.price, &if lv.roe { format!("{}%", l("ROE")) } else { String::new() }, ("lvp", i), false));
+                        unit_toggle(ui, &mut lv.roe, &mut lv.price, lv.tp, call);
                         ui.allocate_ui(egui::vec2(92.0, 32.0), |ui| kit::field(ui, l("Size"), &mut lv.amount, "", ("lva", i), false));
                         if pill(ui, "%", lv.pct).clicked() && !lv.pct { lv.pct = true; lv.amount.clear(); }
                         if pill(ui, &base, !lv.pct).on_hover_text(l("Size as % of the position, or in base units")).clicked() && lv.pct { lv.pct = false; lv.amount.clear(); }
@@ -1471,15 +1600,14 @@ pub(crate) fn tpsl_modal(sheet: &mut Option<TpSlSheet>, ui: &mut Ui, st: &Value,
                             if close_x(ui, H_SM).clicked() { remove = Some(i); }
                         });
                     });
-                    if let (Some(px), Some(q)) = (parse(&lv.price), qty_of(lv)) {
-                        kit::kv(ui, &format!("{} {base}", fmt_qty(q)), format!("{} USDT", signed((px - entry) * q * sign)), if (px - entry) * sign >= 0.0 { up() } else { dn() });
-                    }
+                    if let Some(q) = qty_of(lv) { hint(ui, &format!("{} {base}", fmt_qty(q)), px_of(&lv.price, lv.roe, lv.tp), lv.roe, lv.tp, q); }
                 }
                 if let Some(i) = remove { sh.levels.remove(i); }
                 if sh.levels.len() < 10 {
+                    let u = saved_roe(st);
                     ui.horizontal(|ui| {
-                        if kit::button(ui, &format!("+ {}", l("Take-profit level")), Look::Secondary, H, None, true).clicked() { sh.levels.push(Level { tp: true, price: String::new(), amount: String::new(), pct: true }); }
-                        if kit::button(ui, &format!("+ {}", l("Stop-loss level")), Look::Secondary, H, None, true).clicked() { sh.levels.push(Level { tp: false, price: String::new(), amount: String::new(), pct: true }); }
+                        if kit::button(ui, &format!("+ {}", l("Take-profit level")), Look::Secondary, H, None, true).clicked() { sh.levels.push(Level { tp: true, price: String::new(), amount: String::new(), pct: true, roe: u[0] }); }
+                        if kit::button(ui, &format!("+ {}", l("Stop-loss level")), Look::Secondary, H, None, true).clicked() { sh.levels.push(Level { tp: false, price: String::new(), amount: String::new(), pct: true, roe: u[1] }); }
                     });
                 }
                 kit::note(ui, l("Each level closes its size when triggered. Take-profit levels and stop levels each add up to at most the position."), mu());
@@ -1516,8 +1644,11 @@ pub(crate) fn tpsl_modal(sheet: &mut Option<TpSlSheet>, ui: &mut Ui, st: &Value,
             let base_args = json!({"op": "set_tpsl", "ex": sh.ex, "symbol": sh.symbol, "pos": sh.side, "trigger": if sh.last { "last" } else { "mark" }});
             let mut calls = vec![];
             if !sh.partial {
-                let (tp, sl) = (parse(&sh.tp), parse(&sh.sl));
-                if tp.is_none() && sl.is_none() { sh.err = Some(l("Enter a take-profit or stop-loss price").into()); return; }
+                let u = sh.roe.unwrap_or_default();
+                let (a, b) = (px_of(&sh.tp, u[0], true), px_of(&sh.sl, u[1], false));
+                if a.is_none() && b.is_none() { sh.err = Some(l("Enter a take-profit or stop-loss price").into()); return; }
+                if a == Some(None) || b == Some(None) { sh.err = Some(l(ROE_ZERO).into()); return; }
+                let (tp, sl) = (a.flatten(), b.flatten());
                 if let Some(e) = tpsl_check(long, rf, ref_name, tp, sl) { sh.err = Some(e); return; }
                 let mut a = base_args.clone();
                 if let Some(v) = tp { a["tp"] = v.into(); }
@@ -1528,7 +1659,8 @@ pub(crate) fn tpsl_modal(sheet: &mut Option<TpSlSheet>, ui: &mut Ui, st: &Value,
                 let (mut st_tp, mut st_sl) = (0.0, 0.0);
                 for (i, lv) in sh.levels.iter().enumerate() {
                     let tag = format!("{} {}: ", l("Level"), i + 1);
-                    let Some(px) = parse(&lv.price) else { sh.err = Some(tag + l("enter a price")); return };
+                    let Some(px) = px_of(&lv.price, lv.roe, lv.tp) else { sh.err = Some(tag + l("enter a price")); return };
+                    let Some(px) = px else { sh.err = Some(tag + l(ROE_ZERO)); return };
                     let Some(q) = qty_of(lv).filter(|q| *q > 0.0) else { sh.err = Some(tag + l("size is zero after rounding")); return };
                     if let Some(e) = tpsl_check(long, rf, ref_name, lv.tp.then_some(px), (!lv.tp).then_some(px)) { sh.err = Some(tag + &e); return; }
                     if lv.tp { st_tp += q } else { st_sl += q }
@@ -1592,6 +1724,42 @@ mod tests {
         p.prefill_position(100.0, 95.0, 110.0, Some(2.0), &st(false));
         assert!(!p.tpsl_on && p.error.is_some());
         assert_eq!(p.qty, "2.000");
+    }
+
+    #[test]
+    fn roe_converts_to_a_price() {
+        let t = Some(0.1);
+        // 10 % of the margin at 1x is a 10 % move, at 20x 0.5 %; a loss reads "10" or "-10"
+        assert_eq!(roe_px(true, true, 100.0, 1.0, 10.0, t), Some(110.0));
+        assert_eq!(roe_px(true, false, 100.0, 1.0, 10.0, t), Some(90.0));
+        assert_eq!(roe_px(false, true, 100.0, 1.0, 10.0, t), Some(90.0));
+        assert_eq!(roe_px(false, false, 100.0, 1.0, -10.0, t), Some(110.0));
+        assert_eq!(roe_px(true, true, 100.0, 20.0, 10.0, t), Some(100.5));
+        assert_eq!(roe_px(true, false, 100.0, 20.0, -10.0, t), Some(99.5));
+        assert_eq!(roe_px(false, true, 100.0, 20.0, 10.0, t), Some(99.5));
+        assert_eq!(roe_px(false, false, 100.0, 20.0, 10.0, t), Some(100.5));
+        // 103.33 / 96.67 on a 0.1 tick: TP away from the entry, SL towards it
+        assert_eq!(roe_px(true, true, 100.0, 3.0, 10.0, t), Some(103.4));
+        assert_eq!(roe_px(true, false, 100.0, 3.0, 10.0, t), Some(96.7));
+        assert_eq!(roe_px(false, true, 100.0, 3.0, 10.0, t), Some(96.6));
+        assert_eq!(roe_px(false, false, 100.0, 3.0, 10.0, t), Some(103.3));
+        // an SL inside one tick of the entry is not rounded onto it
+        assert_eq!(roe_px(true, false, 100.0, 20.0, 1.0, Some(1.0)), Some(99.0));
+        assert_eq!(roe_px(false, false, 100.0, 20.0, 1.0, Some(1.0)), Some(101.0));
+        // no tick known: the px_str decimals (2 at 100)
+        assert_eq!(roe_px(true, true, 100.0, 3.0, 10.0, None), Some(103.34));
+        // at or past zero is no price
+        assert_eq!(roe_px(true, false, 100.0, 1.0, 100.0, t), None);
+        assert_eq!(roe_px(true, false, 100.0, 1.0, 150.0, t), None);
+        assert_eq!(roe_px(false, true, 100.0, 1.0, 100.0, t), None);
+        assert_eq!(roe_px(false, true, 100.0, 1.0, 50.0, t), Some(50.0));
+        assert_eq!(roe_px(true, true, 0.0, 10.0, 10.0, t), None);
+        // and back: the ROE of a price, a field in either unit
+        assert!((roe_of(true, 100.0, 20.0, 100.5) - 10.0).abs() < 1e-9 && (roe_of(false, 100.0, 20.0, 100.5) + 10.0).abs() < 1e-9);
+        assert_eq!(field_px("10", true, true, true, 100.0, 20.0, t), Some(Some(100.5)));
+        assert_eq!(field_px("101", false, true, true, 100.0, 20.0, t), Some(Some(101.0)));
+        assert_eq!(field_px("200", true, true, false, 100.0, 1.0, t), Some(None));
+        assert_eq!(field_px("", true, true, true, 100.0, 1.0, t), None);
     }
 
     #[test]

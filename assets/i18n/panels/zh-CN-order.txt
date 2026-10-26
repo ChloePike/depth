@@ -247,3 +247,8 @@ No answer from the venue for a leg: it may be live. It is looked up by its clien
 Retry remainder (%@ %@) = 重试剩余部分（%@ %@）
 Routes the part that failed again on fresh books, through the preview and the confirmation = 按最新盘口重新路由失败的部分，仍需预览和确认
 Accepted = 已接受
+ROE = 收益率
+Price in USDT, or PnL as % of the margin (ROE) = 按 USDT 价格，或按占保证金的盈亏百分比（收益率）
+The PnL % gives a price of zero or below = 该收益率对应的价格为零或以下
+This stop loses the order's whole margin or more: an isolated position is liquidated before it triggers. = 此止损亏损达到或超过本单全部保证金：逐仓仓位会在触发前被强平。
+This stop is past the liquidation price: the position is liquidated before it triggers. = 此止损价超过强平价：仓位会在触发前被强平。
