@@ -352,14 +352,14 @@ pub async fn stream(k: Keys, tx: AccTx) {
             .sub(json!({"op": "subscribe", "req_id": "opt", "args": ["position.option"]}).to_string())
             .sub(json!({"op": "subscribe", "req_id": "spot", "args": ["order.spot"]}).to_string())
             .ping(std::time::Duration::from_secs(20), r#"{"op":"ping"}"#);
-        let mut auth_failed = false;
+        let (mut auth_failed, mut up) = (false, false);
         let r = ws::once(&spec, |f| {
             let ws::Frame::Text(s) = f else { return true };
             let Ok(v) = serde_json::from_str::<Value>(s) else { return true };
             let send = |e: AccEvent| { let _ = tx.send((ex, e)); };
             match (v["op"].as_str(), v["topic"].as_str()) {
                 (Some("auth"), _) if v["success"] == false => { eprintln!("[bybit account] auth failed: {}", v["ret_msg"]); auth_failed = true; return false; }
-                (Some("subscribe"), _) if v["success"] == true && v["req_id"] != "opt" && v["req_id"] != "spot" => send(AccEvent::Resync),
+                (Some("subscribe"), _) if v["success"] == true && v["req_id"] != "opt" && v["req_id"] != "spot" => { up = true; send(AccEvent::Resync) }
                 (_, Some("order.spot")) => send(AccEvent::SpotDirty),
                 (_, Some("position.option")) => for p in v["data"].as_array().into_iter().flatten().filter_map(bybit_opt_pos) { send(AccEvent::OptPos(p)); },
                 (_, Some("position.linear")) => for p in v["data"].as_array().into_iter().flatten() {
@@ -374,7 +374,10 @@ pub async fn stream(k: Keys, tx: AccTx) {
                     let open = matches!(o["orderStatus"].as_str(), Some("New" | "PartiallyFilled" | "Untriggered"));
                     send(if open { AccEvent::Order(bybit_order(o)) } else { AccEvent::OrderDone { id: o["orderId"].as_str().unwrap_or_default().into() } });
                 },
-                (_, Some("execution.linear")) => for f in v["data"].as_array().into_iter().flatten().filter_map(bybit_fill) { send(AccEvent::Fill(f)); },
+                (_, Some("execution.linear")) => for f in v["data"].as_array().into_iter().flatten() {
+                    if let Some(l) = bybit_liquidation(f) { send(l); }
+                    if let Some(f) = bybit_fill(f) { send(AccEvent::Fill(f)); }
+                },
                 (_, Some("wallet")) => for w in v["data"].as_array().into_iter().flatten().filter(|w| w["accountType"] == "UNIFIED") {
                     send(AccEvent::Wallet(balance_of(w)));
                 },
@@ -383,8 +386,18 @@ pub async fn stream(k: Keys, tx: AccTx) {
             true
         }).await;
         if let Err(e) = r { eprintln!("[bybit account] {e:#}"); }
+        // once per lost session (a reconnect that never subscribes sends nothing)
+        if up { let _ = tx.send((ex, AccEvent::Down)); }
         tokio::time::sleep(std::time::Duration::from_secs(if auth_failed { 60 } else { 2 })).await;
     }
+}
+
+/// One of our positions closed by the venue: a liquidation (BustTrade) or auto-deleveraging (AdlTrade)
+/// execution, one event per execution. `side` is the position's (the execution closes it: the opposite side).
+fn bybit_liquidation(f: &Value) -> Option<AccEvent> {
+    if !matches!(f["execType"].as_str(), Some("BustTrade" | "AdlTrade")) { return None; }
+    Some(AccEvent::Liquidated { symbol: f["symbol"].as_str()?.into(), side: if f["side"] == "Sell" { Side::Buy } else { Side::Sell },
+        qty: crate::opt_num(&f["execQty"]).unwrap_or(0.0), price: crate::opt_num(&f["execPrice"]).unwrap_or(0.0) })
 }
 
 /// One Bybit execution (REST list or `execution.linear` push); funding / settlement rows are not fills.
@@ -609,6 +622,25 @@ mod tests {
         assert_eq!(ids(true), ["trail"]);
         // the resting-order call failed: its plain rows go one by one too
         assert_eq!(ids(false), ["trail", "filled"]);
+    }
+
+    #[test]
+    fn liquidation_executions() {
+        // execution.linear push row (docs fields) of a liquidated long: not a fill, one Liquidated for the long
+        let bust = json!({"category": "linear", "symbol": "BTCUSDT", "execFee": "0.3", "execId": "7e2ae69c", "execPrice": "84000.5", "execQty": "0.25",
+            "execType": "BustTrade", "execValue": "21000", "isMaker": false, "orderId": "1b4e", "orderLinkId": "", "orderPrice": "84000.5", "orderQty": "0.25",
+            "orderType": "Market", "side": "Sell", "execTime": "1672364174443", "closedSize": "0.25", "execPnl": "-900"});
+        assert!(bybit_fill(&bust).is_none());
+        assert!(matches!(bybit_liquidation(&bust), Some(AccEvent::Liquidated { ref symbol, side: Side::Buy, qty, price }) if symbol == "BTCUSDT" && qty == 0.25 && price == 84000.5));
+        // auto-deleveraged short (the closing execution buys)
+        let adl = json!({"symbol": "ETHUSDT", "execType": "AdlTrade", "side": "Buy", "execQty": "1", "execPrice": "2500"});
+        assert!(matches!(bybit_liquidation(&adl), Some(AccEvent::Liquidated { side: Side::Sell, .. })));
+        // ordinary trades and funding rows are not liquidations
+        for t in ["Trade", "Funding"] {
+            let mut r = bust.clone();
+            r["execType"] = t.into();
+            assert!(bybit_liquidation(&r).is_none());
+        }
     }
 
     #[test]

@@ -716,9 +716,10 @@ pub enum AccEvent {
     /// margin account totals pushed by the venue; `equity` / `available` always replace, the Option
     /// fields keep the last value when None (a push that does not carry them)
     Wallet(Balance),
-    /// the private stream is down (emitted by streams later; the engine only logs it for now)
+    /// a session that had subscribed dropped (Bybit, Binance: once per lost session; the next one sends Resync)
     Down,
-    /// one of our positions was liquidated by the venue (emitted later; the engine only logs it for now)
+    /// one of our positions was liquidated or auto-deleveraged by the venue (Bybit, Binance: one per execution);
+    /// `side` is the position's side (Buy = a long was closed)
     Liquidated { symbol: String, side: Side, qty: f64, price: f64 },
     /// balances changed but the push has no account totals (Binance): refetch the balance
     BalanceDirty,

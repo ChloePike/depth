@@ -354,12 +354,14 @@ pub async fn stream(k: Keys, tx: AccTx) {
         }
     }));
     loop {
+        let mut up = false;
         let res: Result<()> = async {
             let pm = binance_pm(&k).await?;
             let key = listen_key(&k, pm, reqwest::Method::POST).await?;
             // Portfolio Margin: /pm/ws/<key>; USD-M: the routed /private endpoint (unrouted /ws
             // URLs only carry public data since the 2026 split)
             let url = if pm { format!("{}/pm/ws/{key}", binance_ws()) } else { format!("{}/private/ws?listenKey={key}", binance_ws()) };
+            up = true;
             let _ = tx.send((ex, AccEvent::Resync));
             let k2 = k.clone();
             let keepalive = async move {
@@ -396,6 +398,7 @@ pub async fn stream(k: Keys, tx: AccTx) {
                                 price: n(&o["L"]), qty: n(&o["l"]), fee: n(&o["n"]), realized: crate::opt_num(&o["rp"]), ts: o["T"].as_i64().unwrap_or(0),
                             }));
                         }
+                        if let Some(l) = binance_liquidation(o) { send(l); }
                         if matches!(o["X"].as_str(), Some("NEW" | "PARTIALLY_FILLED")) {
                             send(AccEvent::Order(OpenOrder {
                                 ex, symbol: o["s"].as_str().unwrap_or_default().into(), id, side: if o["S"] == "SELL" { Side::Sell } else { Side::Buy },
@@ -422,9 +425,25 @@ pub async fn stream(k: Keys, tx: AccTx) {
             tokio::select! { r = session => r, _ = keepalive => Ok(()) }
         }.await;
         if let Err(e) = res { eprintln!("[binance account] {e:#}"); }
+        // once per session that announced itself with Resync (a failing listenKey sends nothing)
+        if up { let _ = tx.send((ex, AccEvent::Down)); }
         // a paused host (rate limit) fails fast: wait long enough not to spin
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
+}
+
+/// One of our positions closed by the venue: an ORDER_TRADE_UPDATE execution (TRADE, or CALCULATED,
+/// Binance's liquidation execution) of a liquidation or ADL order: type / original type LIQUIDATION,
+/// or the venue's client ids "autoclose-..." / "adl_autoclose". One event per execution; `side` is the
+/// position's (hedge: positionSide; one-way: the opposite of the closing order's side).
+fn binance_liquidation(o: &Value) -> Option<AccEvent> {
+    let c = o["c"].as_str().unwrap_or_default();
+    let liq = o["o"] == "LIQUIDATION" || o["ot"] == "LIQUIDATION" || c.starts_with("autoclose-") || c.starts_with("adl_autoclose");
+    if !liq || !matches!(o["x"].as_str(), Some("TRADE" | "CALCULATED")) { return None; }
+    let px = |f: &str| crate::opt_num(&o[f]).filter(|x| *x > 0.0);
+    Some(AccEvent::Liquidated { symbol: o["s"].as_str()?.into(),
+        side: match o["ps"].as_str() { Some("LONG") => Side::Buy, Some("SHORT") => Side::Sell, _ => if o["S"] == "SELL" { Side::Buy } else { Side::Sell } },
+        qty: px("l").or(px("z")).unwrap_or(0.0), price: px("L").or(px("ap")).unwrap_or(0.0) })
 }
 
 pub async fn fills_window(k: &Keys, symbol: &str, base: &str, path: &str, t0: i64, t1: i64, out: &mut Vec<Fill>) -> Result<()> {
@@ -639,6 +658,26 @@ mod tests {
         assert_eq!((get(&w, "side").as_deref(), get(&w, "reduceOnly").as_deref(), get(&w, "positionSide")), (Some("BUY"), Some("true"), None));
         assert_eq!(native_twap(Exchange::Bybit), None);
         assert_eq!(native_twap(Exchange::Binance), Some((5, 1440)));
+    }
+
+    #[test]
+    fn liquidation_updates() {
+        // ORDER_TRADE_UPDATE `o` of a one-way long's liquidation fill (docs field set): the fill arm takes it (x TRADE) and it is a Liquidated for the long
+        let o: Value = serde_json::from_str(r#"{"s":"BTCUSDT","c":"autoclose-1596107620040000020","S":"SELL","o":"LIQUIDATION","f":"IOC","q":"0.014","p":"9910","ap":"9910.5",
+            "sp":"0","x":"TRADE","X":"FILLED","i":8886774,"l":"0.014","z":"0.014","L":"9910.5","N":"USDT","n":"0.5","T":1568879465650,"t":1863,"b":"0","a":"0",
+            "m":false,"R":false,"wt":"CONTRACT_PRICE","ot":"LIQUIDATION","ps":"BOTH","cp":false,"rp":"-120.5","pP":false,"si":0,"ss":0}"#).unwrap();
+        assert_eq!(o["x"], "TRADE");
+        assert!(matches!(binance_liquidation(&o), Some(AccEvent::Liquidated { ref symbol, side: Side::Buy, qty, price }) if symbol == "BTCUSDT" && qty == 0.014 && price == 9910.5));
+        // ADL of a hedge short reported as CALCULATED with only cumulative / average figures
+        let adl = json!({"s": "ETHUSDT", "c": "adl_autoclose", "S": "BUY", "o": "LIMIT", "ot": "LIMIT", "x": "CALCULATED", "X": "FILLED", "l": "0", "z": "2", "L": "0", "ap": "2500", "ps": "SHORT"});
+        assert!(matches!(binance_liquidation(&adl), Some(AccEvent::Liquidated { side: Side::Sell, qty, price, .. }) if qty == 2.0 && price == 2500.0));
+        // our own orders, and a liquidation order that is only acknowledged, are not liquidations
+        let mut own = o.clone();
+        for (k, v) in [("c", "t1m19a2"), ("o", "MARKET"), ("ot", "MARKET")] { own[k] = v.into(); }
+        assert!(binance_liquidation(&own).is_none());
+        let mut ack = o.clone();
+        ack["x"] = "NEW".into();
+        assert!(binance_liquidation(&ack).is_none());
     }
 
     #[test]
