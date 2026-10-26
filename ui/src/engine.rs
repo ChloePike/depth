@@ -319,7 +319,8 @@ fn wait_touch(a: &mut Account, ex: Exchange, ev: &trade::AccEvent, now: i64) -> 
     let mut out = vec![];
     for w in a.tpsl_wait.iter_mut().filter(|w| w.ex == ex) {
         match ev {
-            E::Order(o) if o.client_id.as_deref() == Some(w.client_id.as_str()) || w.order_id.as_deref() == Some(o.id.as_str()) => {
+            // venue ids are unique per symbol only (Binance)
+            E::Order(o) if o.symbol == w.symbol && (o.client_id.as_deref() == Some(w.client_id.as_str()) || w.order_id.as_deref() == Some(o.id.as_str())) => {
                 w.order_id = Some(o.id.clone());
                 if o.filled > 0.0 { w.filled_ms.get_or_insert(now); }
             }
@@ -360,7 +361,7 @@ fn rearm(a: &mut Account, ex: Exchange, now: i64) -> Vec<WaitAct> {
     let orders = &a.orders;
     for w in a.tpsl_wait.iter_mut().filter(|w| w.ex == ex) {
         w.armed = true;
-        let resting = orders.iter().find(|o| o.ex == ex && (w.order_id.as_deref() == Some(o.id.as_str()) || o.client_id.as_deref() == Some(w.client_id.as_str())));
+        let resting = orders.iter().find(|o| o.ex == ex && o.symbol == w.symbol && (w.order_id.as_deref() == Some(o.id.as_str()) || o.client_id.as_deref() == Some(w.client_id.as_str())));
         if let Some(o) = resting {
             w.order_id = Some(o.id.clone());
             if o.filled > 0.0 { w.filled_ms.get_or_insert(now); }
