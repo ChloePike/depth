@@ -1115,9 +1115,9 @@ impl App {
         if let Ok(t) = std::env::var("T1_COMMAND") { if !self.shot_sent && self.started.elapsed().as_secs() < 2 && !self.command.open { self.command.open_with(&t); } }
         if !self.hosted { command::help(&ctx, &mut self.help, &hotkeys::complete(&self.prefs.hotkeys)); }
         if !self.hosted && self.command.open {
-            let bases: Vec<String> = self.eng.tickers.lock().unwrap().iter().map(|t| t.base.clone()).collect();
+            let tickers = self.eng.tickers.lock().unwrap().clone();
             let binds = hotkeys::complete(&self.prefs.hotkeys);
-            for c in self.command.show(&ctx, &bases, &binds).unwrap_or_default() {
+            for c in self.command.show(&ctx, &tickers, &binds).unwrap_or_default() {
                 match c {
                     command::Cmd::Base(b) => if b != self.eng.base { self.pending_base = Some(b) },
                     command::Cmd::Mode(m) => if m != self.mode { self.pending_mode = Some(m) },
