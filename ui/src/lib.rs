@@ -859,14 +859,10 @@ impl App {
         let mut px = self.eng.watched.lock().unwrap().clone();
         if let Some(p) = self.chart.price(a, self.mode) { px.insert(base, p); }
         self.chart.check_alerts(&px);
-        // the egui window has no notification API of its own: macOS notifications through osascript
-        // (the SwiftUI host drains `fired` itself and posts them natively)
-        if !self.hosted && cfg!(target_os = "macos") {
-            for (title, body) in self.chart.fired.drain(..) {
-                let q = |s: &str| s.replace('\\', "").replace('"', "'");
-                let script = format!("display notification \"{}\" with title \"Depth\" subtitle \"{}\"", q(&body), q(&title));
-                if let Ok(mut c) = std::process::Command::new("osascript").arg("-e").arg(script).spawn() { std::thread::spawn(move || { let _ = c.wait(); }); }
-            }
+        // the egui window has no notification API of its own: the OS notification through sys::notify
+        // (the native hosts drain `fired` themselves and post them natively)
+        if !self.hosted {
+            for (title, body) in self.chart.fired.drain(..) { depth::sys::notify(&title, &body); }
         }
     }
 

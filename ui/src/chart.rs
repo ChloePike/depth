@@ -763,21 +763,21 @@ pub fn sounds() -> Vec<(String, String)> {
 
 fn sound_name(id: &str) -> String { sounds().into_iter().find(|(k, _)| k == id).map_or_else(|| id.to_string(), |(_, n)| n) }
 
-/// Plays an alert sound without blocking.
-/// ponytail: macOS only (afplay); Windows / Linux stay silent until a host plays it natively.
-pub fn play_sound(id: &str) {
-    if !cfg!(target_os = "macos") { return; }
-    let path = if let Some(n) = id.strip_prefix("sys:") {
-        Some(std::path::PathBuf::from(format!("/System/Library/Sounds/{n}.aiff")))
+/// The file behind a sound id: a macOS system sound, or a bundled one written once to the cache
+/// folder (the players need a file). None for "none", an unknown id, a system sound off macOS.
+fn sound_path(id: &str) -> Option<std::path::PathBuf> {
+    if let Some(n) = id.strip_prefix("sys:") {
+        cfg!(target_os = "macos").then(|| std::path::PathBuf::from(format!("/System/Library/Sounds/{n}.aiff")))
     } else if let Some((k, _, wav)) = id.strip_prefix("depth:").and_then(|n| OWN_SOUNDS.iter().find(|(k, _, _)| *k == n)) {
-        // written once to the cache folder: afplay needs a file
         depth::sys::cache_dir().map(|d| d.join("sounds").join(format!("{k}.wav"))).filter(|p| p.exists() || {
             p.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::write(p, wav).is_ok()
         })
-    } else { None };
-    if let Some(p) = path {
-        if let Ok(mut c) = std::process::Command::new("afplay").arg(p).spawn() { std::thread::spawn(move || { let _ = c.wait(); }); }
-    }
+    } else { None }
+}
+
+/// Plays an alert sound without blocking (any OS, through `sys::play_sound_file`).
+pub fn play_sound(id: &str) {
+    if let Some(p) = sound_path(id) { depth::sys::play_sound_file(&p); }
 }
 
 /// Sound picker as a submenu (keeps the right-click menu open); choosing one plays it.
@@ -806,5 +806,13 @@ mod tests {
         // non-finite inputs are ignored
         let (lo, hi) = padded_range([f64::NAN, 5.0, f64::INFINITY].into_iter(), 0.0, false);
         assert!(lo.is_finite() && hi.is_finite() && lo < 5.0 && hi > 5.0);
+    }
+
+    #[test]
+    fn sound_ids_resolve_to_files() {
+        assert!(sound_path("depth:bell").is_some_and(|p| p.ends_with("sounds/bell.wav")));
+        assert!(sound_path("none").is_none() && sound_path("depth:nope").is_none());
+        // the system sounds exist on macOS only
+        assert_eq!(sound_path("sys:Glass").is_some(), cfg!(target_os = "macos"));
     }
 }
