@@ -25,6 +25,8 @@ pub fn cache_dir() -> Option<PathBuf> {
 
 /// Crash logs. macOS ~/Library/Logs/Depth, elsewhere a Logs folder next to the cache.
 pub fn log_dir() -> Option<PathBuf> {
+    // T1_LOG_DIR: cargo test / cargo run write here (.cargo/config.toml), never into the installed app's logs
+    if let Some(d) = env("T1_LOG_DIR") { return Some(d); }
     migrate();
     if cfg!(target_os = "macos") { env("HOME").map(|h| h.join("Library/Logs/Depth")) }
     else { cache_dir().map(|d| d.join("Logs")) }

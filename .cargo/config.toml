@@ -1,0 +1,3 @@
+# Test and dev runs log under target/, never into ~/Library/Logs/Depth (the installed app's trade.log)
+[env]
+T1_LOG_DIR = { value = "target/logs", relative = true }
