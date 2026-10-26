@@ -267,3 +267,9 @@ Move order? = 修改挂单价格？
 Move = 改价
 Fill sound = 成交提示音
 Type a new price, Enter to move the order = 输入新价格，回车改单
+# Linux wording of the egui settings (the Windows ones are in zh-CN-panels.txt)
+Stored in the system keyring (libsecret, service "depth"), never written to a file. = 保存在系统密钥环（libsecret，服务名 depth），不会写入任何文件。
+The key is deleted from the system keyring and the venue disconnects from your account. = 将从系统密钥环删除该 key，并断开与该交易所账户的连接。
+System keyring (depth) = 系统密钥环（depth）
+Show in file manager = 在文件管理器中显示
+Local multi-exchange trading terminal. Runs entirely on this computer: no relay, no server. = 本地多交易所交易终端，完全运行在这台电脑上：没有中转，没有服务器。

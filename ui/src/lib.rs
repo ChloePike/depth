@@ -433,8 +433,8 @@ impl App {
         ui.horizontal(|ui| {
             ui.set_height(46.0);
             ui.spacing_mut().item_spacing.x = 14.0;
-            // hosted: macOS draws the traffic lights over this space
-            if self.hosted { ui.add_space(56.0); } else { window_buttons(ui, maximized); }
+            // hosted: macOS draws the traffic lights over this space; Windows / Linux get their buttons on the right
+            if self.hosted { ui.add_space(56.0); } else if cfg!(target_os = "macos") { window_buttons(ui, maximized); }
             let tickers = self.eng.tickers.lock().unwrap().clone();
             if let Some(b) = self.picker.show(ui, &self.eng.base, &tickers) { if b != self.eng.base { *new_base = Some(b); } }
             let names: Vec<&str> = MODES.iter().map(|(_, k)| t(k)).collect();
@@ -444,6 +444,7 @@ impl App {
             self.top.price(ui, a.mid(book_market));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
+                if !self.hosted && !cfg!(target_os = "macos") { window_controls_right(ui, maximized); }
                 if kit::icon_button(ui, 30.0, false, top::gear).on_hover_text(t("set.title")).clicked() { self.settings.open = true; }
                 // show / hide the order panel (the Swift toolbar's sidebar.trailing button); Perp and Spot
                 let tip = l("Show or hide the order panel (Option-Command-I)");
@@ -1256,6 +1257,35 @@ fn window_buttons(ui: &mut Ui, maximized: bool) {
                 1 => { ui.painter().line_segment([center - egui::vec2(d + 0.5, 0.0), center + egui::vec2(d + 0.5, 0.0)], s); }
                 _ => { ui.painter().line_segment([center - egui::vec2(d, -d), center + egui::vec2(d, -d)], s); ui.painter().line_segment([center + egui::vec2(-d, -d), center + egui::vec2(-d, d)], s); }
             }
+        }
+        if resp.clicked() { ui.ctx().send_viewport_cmd(cmd); }
+    }
+}
+
+/// Windows / Linux minimize, maximize (restore when maximized) and close, flush with the window's
+/// top right corner (the window has no native title bar). Reserves their width in the header's
+/// right-to-left row so the items there stop short of them.
+fn window_controls_right(ui: &mut Ui, maximized: bool) {
+    let win = ui.ctx().content_rect();
+    ui.add_space((3.0 * 46.0 - (win.right() - ui.max_rect().right())).max(0.0));
+    let cmds = [egui::ViewportCommand::Minimized(true), egui::ViewportCommand::Maximized(!maximized), egui::ViewportCommand::Close];
+    for (i, cmd) in cmds.into_iter().enumerate() {
+        let r = egui::Rect::from_min_size(egui::pos2(win.right() - 46.0 * (3 - i) as f32, win.top()), egui::vec2(46.0, 30.0));
+        let resp = ui.interact(r, ui.id().with(("winctl", i)), egui::Sense::click());
+        let red = i == 2 && resp.hovered();
+        if resp.hovered() { ui.painter().rect_filled(r, 0, if red { Color32::from_rgb(0xe8, 0x11, 0x23) } else { hl() }); }
+        let (c, s, p) = (r.center(), egui::Stroke::new(1.0, if red { Color32::WHITE } else { fg() }), ui.painter());
+        match i {
+            0 => { p.hline(c.x - 5.0..=c.x + 5.0, c.y, s); }
+            1 if maximized => {
+                p.rect_stroke(egui::Rect::from_min_size(c + egui::vec2(-5.0, -2.0), egui::vec2(7.0, 7.0)), 0, s, egui::StrokeKind::Inside);
+                p.line_segment([c + egui::vec2(-2.0, -2.0), c + egui::vec2(-2.0, -5.0)], s);
+                p.line_segment([c + egui::vec2(-2.0, -5.0), c + egui::vec2(5.0, -5.0)], s);
+                p.line_segment([c + egui::vec2(5.0, -5.0), c + egui::vec2(5.0, 2.0)], s);
+                p.line_segment([c + egui::vec2(5.0, 2.0), c + egui::vec2(2.0, 2.0)], s);
+            }
+            1 => { p.rect_stroke(egui::Rect::from_center_size(c, egui::vec2(10.0, 10.0)), 0, s, egui::StrokeKind::Inside); }
+            _ => { p.line_segment([c - egui::vec2(5.0, 5.0), c + egui::vec2(5.0, 5.0)], s); p.line_segment([c + egui::vec2(-5.0, 5.0), c + egui::vec2(5.0, -5.0)], s); }
         }
         if resp.clicked() { ui.ctx().send_viewport_cmd(cmd); }
     }
