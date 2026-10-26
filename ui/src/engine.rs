@@ -482,15 +482,16 @@ fn check_perms(rt: &tokio::runtime::Runtime, account: &Arc<Mutex<Account>>, ex: 
     });
 }
 
-/// The day's PnL over the keyed venues: equity now minus each venue's equity at the start of the
+/// The day's PnL over the keyed tradable venues: equity now minus each venue's equity at the start of the
 /// local day (`off`: UTC offset of the display time zone, ms). A venue seen first today, or first
-/// after midnight, takes its equity now as the baseline. None before any balance.
+/// after midnight, takes its equity now as the baseline. None before any balance. Deribit (options
+/// only, coin collateral valued in USD) does not count: a coin move is not trading PnL.
 /// ponytail: equity-based, so funding, fees and transfers made outside Depth count as PnL
 pub(crate) fn day_pnl(a: &mut Account, now: i64, off: i64) -> Option<f64> {
     let day = (now + off).div_euclid(86_400_000);
     if a.day_start.0 != day { a.day_start = (day, HashMap::new()); }
     let (keys, base) = (&a.keys, &mut a.day_start.1);
-    a.balances.iter().filter(|(e, _)| keys.contains_key(e)).fold(None, |s, (e, b)| Some(s.unwrap_or(0.0) + b.equity - *base.entry(*e).or_insert(b.equity)))
+    a.balances.iter().filter(|(e, _)| keys.contains_key(e) && trade::TRADABLE.contains(e)).fold(None, |s, (e, b)| Some(s.unwrap_or(0.0) + b.equity - *base.entry(*e).or_insert(b.equity)))
 }
 
 /// A transfer Depth made into or out of a venue's margin account moves that venue's day baseline
@@ -2441,6 +2442,12 @@ mod tests {
         // a venue without keys does not count
         a.balances.insert(Exchange::Okx, trade::Balance { equity: 5.0, ..Default::default() });
         assert_eq!(day_pnl(&mut a, 11 * day, 8 * 3_600_000), Some(0.0));
+        // nor does keyed Deribit, whose coin collateral moves with the coin
+        a.keys.insert(Exchange::Deribit, Keys { key: "k".into(), secret: "s".into(), extra: None, demo: false });
+        a.balances.insert(Exchange::Deribit, trade::Balance { equity: 5000.0, ..Default::default() });
+        day_pnl(&mut a, 11 * day + 1, 8 * 3_600_000);
+        a.balances.insert(Exchange::Deribit, trade::Balance { equity: 4000.0, ..Default::default() });
+        assert_eq!(day_pnl(&mut a, 11 * day + 2, 8 * 3_600_000), Some(0.0));
     }
 
     #[test]
