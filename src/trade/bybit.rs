@@ -273,7 +273,7 @@ pub async fn stream(k: Keys, tx: AccTx) {
             .sub(json!({"op": "auth", "args": [k.key, expires, sig]}).to_string())
             .sub(json!({"op": "subscribe", "args": ["position.linear", "order.linear", "execution.linear", "wallet"]}).to_string())
             // its own request: an account without options must not fail the main subscription
-            .sub(json!({"op": "subscribe", "req_id": "opt", "args": ["position.option"]}).to_string())
+            .sub(json!({"op": "subscribe", "req_id": "opt", "args": ["position.option", "order.option"]}).to_string())
             .sub(json!({"op": "subscribe", "req_id": "spot", "args": ["order.spot"]}).to_string())
             .ping(std::time::Duration::from_secs(20), r#"{"op":"ping"}"#);
         let mut auth_failed = false;
@@ -286,6 +286,9 @@ pub async fn stream(k: Keys, tx: AccTx) {
                 (Some("subscribe"), _) if v["success"] == true && v["req_id"] != "opt" && v["req_id"] != "spot" => send(AccEvent::Resync),
                 (_, Some("order.spot")) => send(AccEvent::SpotDirty),
                 (_, Some("position.option")) => for p in v["data"].as_array().into_iter().flatten().filter_map(bybit_opt_pos) { send(AccEvent::OptPos(p)); },
+                (_, Some("order.option")) => for o in v["data"].as_array().into_iter().flatten() {
+                    send(AccEvent::OptOrder { o: bybit_order(o), open: matches!(o["orderStatus"].as_str(), Some("New" | "PartiallyFilled")) });
+                },
                 (_, Some("position.linear")) => for p in v["data"].as_array().into_iter().flatten() {
                     send(AccEvent::Position { p: bybit_position(p), one_way: p["positionIdx"].as_i64() == Some(0) });
                 },

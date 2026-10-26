@@ -736,6 +736,7 @@ pub async fn stream(ex: Exchange, k: Keys, tx: AccTx) {
         Exchange::Kraken => kraken::stream(k, tx).await,
         Exchange::Hyperliquid => hyperliquid::stream(k, tx).await,
         Exchange::Lighter => lighter::stream(k, tx).await,
+        Exchange::Deribit => deribit::stream(k, tx).await,
         _ => {}
     }
 }

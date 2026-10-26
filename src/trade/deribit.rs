@@ -207,6 +207,101 @@ pub async fn balance(k: &Keys) -> Result<Balance> {
     fold(&rows, |c| px.get(c).copied().filter(|x| *x > 0.0)).ok_or_else(|| anyhow!("deribit: no index price for the account's coins"))
 }
 
+// ---------------------------------------------------------------- private stream
+
+fn ws_url() -> &'static str { if testnet() { "wss://test.deribit.com/ws/api/v2" } else { "wss://www.deribit.com/ws/api/v2" } }
+
+/// Channels of the one private/subscribe (3,000 credits a call, burst 10: never one call per channel): own
+/// option orders / trades / positions, account totals per currency, and the BTC / ETH indexes that value them.
+const CHANNELS: [&str; 4] = ["user.changes.option.any.raw", "user.portfolio.any", "deribit_price_index.btc_usd", "deribit_price_index.eth_usd"];
+
+/// public/auth with client_signature: only the signature goes on the wire, never the secret. The connection stays
+/// authorized afterwards.
+fn auth_msg(k: &Keys, ts: i64, nonce: &str) -> String {
+    json!({"jsonrpc": "2.0", "id": 1, "method": "public/auth", "params": {"grant_type": "client_signature", "client_id": k.key,
+        "timestamp": ts, "nonce": nonce, "data": "", "signature": sign(&k.secret, ts, nonce, "")}}).to_string()
+}
+
+/// The subscription, sent only once the auth reply grants a token.
+fn after_auth(reply: &str) -> Vec<String> {
+    let ok = serde_json::from_str::<Value>(reply).is_ok_and(|v| v["id"] == 1 && v["result"]["access_token"].is_string());
+    if !ok { return vec![]; }
+    vec![json!({"jsonrpc": "2.0", "id": 2, "method": "private/subscribe", "params": {"channels": CHANNELS}}).to_string()]
+}
+
+/// Per-connection state: token lifetime (authorized at, lifetime ms) and the last portfolio row / index per currency.
+#[derive(Default)]
+struct Session { auth: Option<(i64, i64)>, portfolio: std::collections::HashMap<String, Value>, index: std::collections::HashMap<String, f64> }
+
+/// One frame -> account events. Err((reason, seconds to wait)) ends the session: auth refused, subscription refused,
+/// too_many_requests (the venue drops the session anyway) or the token past 80% of its life (reconnecting
+/// re-authenticates and takes a fresh snapshot).
+fn on_frame(s: &mut Session, v: &Value, now: i64) -> Result<Vec<AccEvent>, (String, u64)> {
+    let e = &v["error"];
+    if e.is_object() {
+        let why = format!("{} ({})", e["message"].as_str().unwrap_or("error"), e["code"]);
+        if e["code"] == 10028 { return Err((format!("rate limited: {why}"), 60)); }
+        if v["id"] == 1 || v["id"] == 2 { return Err((format!("{}: {why}", if v["id"] == 1 { "auth refused" } else { "subscribe refused" }), 60)); }
+        eprintln!("[deribit account] {why}");
+        return Ok(vec![]);
+    }
+    if let Some((at, life)) = s.auth { if now - at > life * 4 / 5 { return Err(("token near expiry, re-authenticating".into(), 0)); } }
+    let mut out = vec![];
+    match v["id"].as_i64() {
+        Some(1) => {
+            s.auth = crate::opt_num(&v["result"]["expires_in"]).map(|x| (now, (x * 1000.0) as i64));
+            eprintln!("[deribit account] authenticated, scope {}", v["result"]["scope"].as_str().unwrap_or("?"));
+        }
+        Some(2) => out.push(AccEvent::Resync),
+        _ => {}
+    }
+    let (ch, d) = (v["params"]["channel"].as_str().unwrap_or_default(), &v["params"]["data"]);
+    if ch.starts_with("user.changes.") {
+        for o in d["orders"].as_array().into_iter().flatten() { out.push(AccEvent::OptOrder { o: order(o), open: o["order_state"] == "open" }); }
+        for t in d["trades"].as_array().into_iter().flatten() {
+            out.push(AccEvent::Fill(Fill { ex: Exchange::Deribit, id: t["trade_id"].as_str().unwrap_or_default().into(), symbol: t["instrument_name"].as_str().unwrap_or_default().into(),
+                side: if t["direction"] == "sell" { Side::Sell } else { Side::Buy }, price: z(&t["price"]), qty: z(&t["amount"]), fee: z(&t["fee"]),
+                realized: crate::opt_num(&t["profit_loss"]), ts: z(&t["timestamp"]) as i64 }));
+        }
+        out.extend(d["positions"].as_array().into_iter().flatten().filter_map(opt_pos).map(AccEvent::OptPos));
+    } else if ch.starts_with("user.portfolio.") {
+        s.portfolio.insert(d["currency"].as_str().unwrap_or_default().to_uppercase(), d.clone());
+        // no total until the indexes of the coins held have arrived
+        let idx = &s.index;
+        if let Some(b) = fold(s.portfolio.values(), |c| idx.get(c).copied()) { out.push(AccEvent::Wallet(b)); }
+    } else if ch.starts_with("deribit_price_index.") {
+        let c = d["index_name"].as_str().unwrap_or_default().trim_end_matches("_usd").to_uppercase();
+        if let Some(px) = crate::opt_num(&d["price"]).filter(|p| *p > 0.0) { s.index.insert(c, px); }
+    }
+    Ok(out)
+}
+
+/// Option orders, fills, positions and account totals pushed over the authenticated WebSocket; REST only takes the
+/// snapshot on each (re)connect (Resync). Keepalive is public/test every 20 s: its reply comes back through the
+/// handler, so the 60 s idle timeout notices a dead socket. No public/set_heartbeat (its test_request needs an
+/// answer this loop cannot send) and no cancel_on_disconnect (resting GTC option orders must survive a restart).
+/// ponytail: user.changes fires on own activity only, so a held option's mark / upnl moves with snapshots (connect,
+/// 5-minute reconcile, own orders); value it from the chain's live mark if that matters.
+pub async fn stream(k: Keys, tx: AccTx) {
+    let ex = Exchange::Deribit;
+    loop {
+        // signed fresh for every connection (the venue accepts a timestamp for 60 s)
+        let spec = ws::Spec::new("deribit account", ws_url()).sub(auth_msg(&k, crate::now_ms(), &nonce())).on_login(after_auth)
+            .ping(std::time::Duration::from_secs(20), r#"{"jsonrpc":"2.0","id":0,"method":"public/test"}"#);
+        let (mut s, mut wait) = (Session::default(), 2);
+        let r = ws::once(&spec, |f| {
+            let ws::Frame::Text(t) = f else { return true };
+            let Ok(v) = serde_json::from_str::<Value>(t) else { return true };
+            match on_frame(&mut s, &v, crate::now_ms()) {
+                Ok(evs) => { for e in evs { let _ = tx.send((ex, e)); } true }
+                Err((why, w)) => { eprintln!("[deribit account] {why}"); wait = w; false }
+            }
+        }).await;
+        if let Err(e) = r { eprintln!("[deribit account] {e:#}"); }
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,6 +400,49 @@ mod tests {
         let x = [json!({"currency": "BTC", "equity": 0.5, "total_equity_usd": 50000.0, "total_margin_balance_usd": 49000.0, "total_initial_margin_usd": 9000.0, "total_maintenance_margin_usd": 4900.0})];
         let b = fold(&x, |_| None).unwrap();
         assert_eq!((b.equity, b.available, b.maint_margin, b.adj_equity, b.mm_rate), (50000.0, 40000.0, Some(4900.0), Some(49000.0), Some(0.1)));
+    }
+
+    #[test]
+    fn stream_frames_become_account_events() {
+        let mut s = Session::default();
+        let f = |s: &mut Session, t: &str, now: i64| on_frame(s, &serde_json::from_str(t).unwrap(), now);
+        // auth: refused -> no subscription and a 60 s wait; granted -> exactly one subscribe with every channel
+        let refused = r#"{"jsonrpc":"2.0","id":1,"error":{"code":13004,"message":"invalid_credentials"}}"#;
+        assert!(after_auth(refused).is_empty());
+        assert_eq!(f(&mut s, refused, 0).unwrap_err().1, 60);
+        let granted = r#"{"jsonrpc":"2.0","id":1,"result":{"access_token":"x","expires_in":100,"refresh_token":"y","scope":"connection mainaccount account:read trade:read_write","token_type":"bearer"}}"#;
+        let sub = after_auth(granted);
+        assert_eq!(sub.len(), 1);
+        let v: Value = serde_json::from_str(&sub[0]).unwrap();
+        assert_eq!((v["method"].as_str(), v["params"]["channels"].as_array().map(|c| c.len())), (Some("private/subscribe"), Some(CHANNELS.len())));
+        assert!(f(&mut s, granted, 1_000).unwrap().is_empty());
+        // subscribe ack -> snapshot
+        assert!(matches!(f(&mut s, r#"{"jsonrpc":"2.0","id":2,"result":["user.changes.option.any.raw","user.portfolio.any"]}"#, 2_000).unwrap()[..], [AccEvent::Resync]));
+        // one notification: an order resting, one filled, its trade, the position (size sign ignored)
+        let ch = r#"{"jsonrpc":"2.0","method":"subscription","params":{"channel":"user.changes.option.any.raw","data":{"instrument_name":"BTC-6NOV26-60000-P",
+            "orders":[{"order_id":"BTC-1","instrument_name":"BTC-6NOV26-60000-P","order_state":"open","direction":"buy","price":0.0125,"amount":0.5,"filled_amount":0.0,"order_type":"limit","time_in_force":"good_til_cancelled","post_only":false,"reduce_only":false,"creation_timestamp":1},
+                      {"order_id":"BTC-2","instrument_name":"BTC-6NOV26-60000-P","order_state":"filled","direction":"sell","price":0.012,"amount":0.5,"filled_amount":0.5,"order_type":"limit","time_in_force":"immediate_or_cancel","creation_timestamp":2}],
+            "trades":[{"trade_id":"77","order_id":"BTC-2","instrument_name":"BTC-6NOV26-60000-P","direction":"sell","price":0.012,"amount":0.5,"fee":0.00015,"fee_currency":"BTC","timestamp":3,"index_price":80000.0}],
+            "positions":[{"instrument_name":"BTC-6NOV26-60000-P","kind":"option","direction":"sell","size":-0.5,"average_price_usd":960.0,"mark_price":0.012,"index_price":80000.0,"floating_profit_loss_usd":0.0,"delta":0.1}]}}}"#;
+        let ev = f(&mut s, ch, 3_000).unwrap();
+        assert_eq!(ev.len(), 4);
+        assert!(matches!(&ev[0], AccEvent::OptOrder { o, open: true } if o.id == "BTC-1" && o.price == 0.0125));
+        assert!(matches!(&ev[1], AccEvent::OptOrder { o, open: false } if o.id == "BTC-2"));
+        assert!(matches!(&ev[2], AccEvent::Fill(x) if x.id == "77" && x.side == Side::Sell && x.qty == 0.5 && x.price == 0.012 && x.ts == 3));
+        assert!(matches!(&ev[3], AccEvent::OptPos(p) if p.qty == 0.5 && p.side == Side::Sell && p.delta == 0.1));
+        // portfolio: no total before the BTC index arrives, then USD totals
+        let pf = r#"{"jsonrpc":"2.0","method":"subscription","params":{"channel":"user.portfolio.btc","data":{"currency":"BTC","equity":0.5,"available_funds":0.4,"maintenance_margin":0.05,"margin_balance":0.5,"margin_model":"segregated_sm"}}}"#;
+        assert!(f(&mut s, pf, 4_000).unwrap().is_empty());
+        assert!(f(&mut s, r#"{"jsonrpc":"2.0","method":"subscription","params":{"channel":"deribit_price_index.btc_usd","data":{"index_name":"btc_usd","price":80000.0,"timestamp":5}}}"#, 5_000).unwrap().is_empty());
+        assert!(matches!(&f(&mut s, pf, 6_000).unwrap()[..], [AccEvent::Wallet(b)] if b.equity == 40000.0 && b.available == 32000.0));
+        // keepalive replies pass; past 80% of the token's 100 s the session ends to re-authenticate
+        assert!(f(&mut s, r#"{"jsonrpc":"2.0","id":0,"result":{"version":"1.2.26"}}"#, 81_000).unwrap().is_empty());
+        assert_eq!(f(&mut s, r#"{"jsonrpc":"2.0","id":0,"result":{"version":"1.2.26"}}"#, 81_001).unwrap_err().1, 0);
+        // too_many_requests anywhere ends the session for a minute
+        assert_eq!(on_frame(&mut Session::default(), &json!({"id": 0, "error": {"code": 10028, "message": "too_many_requests"}}), 0).unwrap_err().1, 60);
+        // the auth message carries the signature, never the secret
+        let a = auth_msg(&Keys { key: "id".into(), secret: "AMANDASECRECT".into(), extra: None, demo: false }, 1576074319000, "1iqt2wls");
+        assert!(a.contains("56590594f97921b09b18f166befe0d1319b198bbcdad7ca73382de2f88fe9aa1") && !a.contains("AMANDASECRECT"));
     }
 
     #[test]
