@@ -28,6 +28,8 @@ const STALE_MS: i64 = 120_000;
 pub const WINDOWS: [i64; 3] = [5 * MIN, 15 * MIN, 60 * MIN];
 /// a price more than this far off a coin's median is another asset under the same name
 const ODD: f64 = 0.30;
+/// a market trading less than this a day (USD) is left out of gaps: its last trade is not a price
+const GAP_MIN_VOL: f64 = 100_000.0;
 /// the leading venue is looked for on 15 min moves at least this large (fraction)
 const LEAD_MIN: f64 = 0.01;
 /// one alert per coin per this long
@@ -202,9 +204,11 @@ fn row(base: &str, vs: &[Venue], liq: Option<&VecDeque<(i64, f64)>>, now: i64) -
 }
 
 /// Largest gap at one moment (the oldest of the venues' newest samples, the others interpolated
-/// there), perp vs perp and spot vs perp; spot vs spot is not a perp question.
+/// there), perp vs perp and spot vs perp; spot vs spot is not a perp question. Markets under
+/// GAP_MIN_VOL a day are left out.
 /// ponytail: USDC (Hyperliquid) and USDT prices are compared as equal, a few bp of quote basis.
 fn gap(vs: &[(&Venue, Sample)]) -> Option<Gap> {
+    let vs: Vec<&(&Venue, Sample)> = vs.iter().filter(|x| x.0.qvol >= GAP_MIN_VOL).collect();
     let t0 = vs.iter().map(|x| x.1.ts).min()?;
     let px: Vec<(Exchange, bool, f64)> = vs.iter().filter_map(|(v, _)| Some((v.ex, v.spot, at(&v.s, t0)?.px))).collect();
     let mut best: Option<Gap> = None;
@@ -524,10 +528,12 @@ mod tests {
     #[test]
     fn another_asset_under_the_same_name_is_left_out() {
         let mut s = Scan::default();
-        s.ingest(0, vec![t(E::Binance, false, "TWIN", 1.0, 1.0, 0.0), t(E::Bybit, false, "TWIN", 1.01, 1.0, 0.0), t(E::Gate, false, "TWIN", 7.0, 1.0, 0.0)]);
+        s.ingest(0, vec![t(E::Binance, false, "TWIN", 1.0, 1e6, 0.0), t(E::Bybit, false, "TWIN", 1.01, 1e6, 0.0), t(E::Gate, false, "TWIN", 7.0, 1e6, 0.0),
+            // a dead spot market's last trade is no price
+            t(E::Okx, true, "TWIN", 1.05, 10.0, 0.0)]);
         let r = &s.rows(0)[0];
         assert_eq!((r.odd.clone(), r.venues.clone()), (vec![(E::Gate, false)], vec![E::Binance, E::Bybit]));
-        assert!((r.gap.unwrap().bp - 100.0).abs() < 1e-6);
+        assert!((r.gap.unwrap().bp - 100.0).abs() < 1e-6, "{:?}", r.gap);
         // two venues far apart: both flagged, both kept, no gap
         let mut s = Scan::default();
         s.ingest(0, vec![t(E::Binance, false, "TWO", 1.0, 1.0, 0.0), t(E::Gate, false, "TWO", 7.0, 1.0, 0.0)]);

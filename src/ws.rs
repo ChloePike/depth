@@ -289,6 +289,12 @@ pub async fn get_json(url: &str) -> Result<serde_json::Value> {
     send_json(url, &format!("GET {url}"), || http().get(url)).await
 }
 
+/// get_json for big payloads (Gate's all-contract list is 1.4 MB uncompressed, slow through a
+/// proxy): `secs` instead of the client's 10 s.
+pub async fn get_json_slow(url: &str, secs: u64) -> Result<serde_json::Value> {
+    send_json(url, &format!("GET {url}"), || http().get(url).timeout(Duration::from_secs(secs))).await
+}
+
 pub async fn post_json(url: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
     send_json(url, &format!("POST {url}"), || http().post(url).json(body)).await
 }

@@ -260,6 +260,7 @@ impl App {
                 if old != (self.prefs.proxy, self.prefs.proxy_url.clone()) {
                     self.pending_restart = true;
                     self.eng.restart_streams();
+                    self.eng.restart_hunter(ctx);
                 }
             }
             // the daily loss stop counts from now
