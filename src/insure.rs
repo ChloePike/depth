@@ -174,4 +174,15 @@ mod tests {
         assert!((q[0].max_loss - 11.5).abs() < 1e-9);
         assert!((q[0].breakeven - 98.5).abs() < 1e-9);
     }
+
+    #[test]
+    fn floor_and_max_loss_follow_the_mark_given() {
+        let mut chains = HashMap::new();
+        chains.insert(Exchange::Bybit, chain(&[("BY-P95", 95.0, false, 2.0, 5.0)]));
+        let q = |mark| quotes(&chains, |_| 1.0, &Position { side: Side::Buy, qty: 2.0, entry: 100.0, mark }, &Filter::default(), 0).remove(0);
+        let (a, b) = (q(100.0), q(99.8));
+        assert!((a.floor_dist - 0.05).abs() < 1e-9 && (b.floor_dist - (1.0 - 95.0 / 99.8)).abs() < 1e-9);
+        // max loss = (mark - strike) * qty + premium 4
+        assert!((a.max_loss - 14.0).abs() < 1e-9 && (b.max_loss - 13.6).abs() < 1e-9);
+    }
 }

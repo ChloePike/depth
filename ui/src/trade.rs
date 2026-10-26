@@ -26,18 +26,28 @@ impl Default for TradeView {
     fn default() -> Self { TradeView { ex: Exchange::Bybit, fill: None, ins_qty: "1".into(), ins_open: false, ins_pos: None, ins_pick: None } }
 }
 
+/// The position's own mark and entry on its venue, in USDT like the option asks (USD / USDC
+/// venues converted as their books are).
+fn pos_px(p: &Position, a: &Agg) -> (f64, f64) {
+    let k = a.usdt(p.ex, Market::Perp);
+    (p.mark * k, p.entry * k)
+}
+
 impl TradeView {
     /// Cheapest option protection across option venues for the open position on this base
     /// (or a hypothetical long of `ins_qty` when there is none).
     fn insurance(&mut self, ui: &mut Ui, a: &Agg, eng: &Engine, base: &str, pos: Option<Position>) {
-        let mark = a.mid(Market::Perp).unwrap_or(0.0);
+        // the floor and max loss are measured from the position's own mark on its venue; the composite
+        // only stands in when there is no position (or the venue reports no mark yet)
+        let comp = a.mid(Market::Perp).unwrap_or(0.0);
         let ip = match &pos {
-            Some(p) => InsPos { side: p.side, qty: p.qty, entry: p.entry, mark },
+            Some(p) => { let (m, e) = pos_px(p, a); InsPos { side: p.side, qty: p.qty, entry: e, mark: if m > 0.0 { m } else { comp } } }
             None => {
                 kit::field(ui, t("ins.sim_qty"), &mut self.ins_qty, base, "ins_qty", false);
-                InsPos { side: Side::Buy, qty: self.ins_qty.parse().unwrap_or(0.0), entry: mark, mark }
+                InsPos { side: Side::Buy, qty: self.ins_qty.parse().unwrap_or(0.0), entry: comp, mark: comp }
             }
         };
+        let mark = ip.mark;
         if a.chains.is_empty() {
             kit::note(ui, t("ins.loading"), mu());
             eng.wants_options.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -50,7 +60,8 @@ impl TradeView {
         let mut best = insure::best_per_contract(&all);
         best.retain(|q| q.floor_dist >= 0.02);
         best.sort_by(|x, y| x.cost_apr.total_cmp(&y.cost_apr));
-        kit::note(ui, &format!("{} {} {}  ·  {}", if ip.side == Side::Buy { t("tr.long_s") } else { t("tr.short_s") }, fmt_qty(ip.qty), base, t("ins.hint")), mu());
+        let marked = pos.as_ref().filter(|p| p.mark > 0.0).map(|p| format!("  ·  {:?} {} {}", p.ex, t("acc.mark"), fmt_px(mark))).unwrap_or_default();
+        kit::note(ui, &format!("{} {} {}{marked}  ·  {}", if ip.side == Side::Buy { t("tr.long_s") } else { t("tr.short_s") }, fmt_qty(ip.qty), base, t("ins.hint")), mu());
         // protection already held on any venue: listed, and only the uncovered rest is bought
         let held: Vec<trade::OptPos> = if pos.is_some() {
             eng.account.lock().unwrap().opts.iter().filter(|o| o.base == base && o.call != (ip.side == Side::Buy) && o.side == Side::Buy).cloned().collect()
@@ -174,5 +185,21 @@ impl TradeView {
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.ins_open = !self.ins_open; }
             if self.ins_open { self.insurance(ui, a, eng, base, pos); }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn position_prices_are_in_usdt_of_its_venue() {
+        let mut a = Agg::default();
+        a.set_fx("USDT", 1.0);
+        a.set_fx("USDC", 0.998);
+        let pos = |ex| Position { ex, symbol: "BTCUSDT".into(), side: Side::Buy, qty: 1.0, entry: 100.0, mark: 100.0, liq: None, upnl: 0.0, lev: 1.0, margin: 0.0, cross: None };
+        let (m, e) = pos_px(&pos(Exchange::Hyperliquid), &a);
+        assert!((m - 99.8).abs() < 1e-9 && (e - 99.8).abs() < 1e-9);
+        assert_eq!(pos_px(&pos(Exchange::Bybit), &a), (100.0, 100.0));
     }
 }
