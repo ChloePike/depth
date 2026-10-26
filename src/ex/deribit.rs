@@ -20,11 +20,14 @@ const PING: &str = r#"{"jsonrpc":"2.0","id":0,"method":"public/test"}"#;
 /// channels per (un)subscribe request (a request costs 3000 credits of a 50000 pool, so a full chain is 4 requests)
 const CHUNK: usize = 250;
 
+/// Whether Deribit streams anything for this market and coin (the UI shows it idle, not down, when not).
+/// ponytail: coin-settled BTC / ETH options only; the *_USDC linear options repeat the same
+/// strikes (the chain is keyed by strike), perps and dated futures come in later batches
+pub fn streams(market: Market, base: &str) -> bool { market == Market::Option && matches!(base.to_uppercase().as_str(), "BTC" | "ETH") }
+
 pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
     let base = sub.base.to_uppercase();
-    // ponytail: coin-settled BTC / ETH options only; the *_USDC linear options repeat the same
-    // strikes (the chain is keyed by strike), perps and dated futures come in later batches
-    if sub.market != Market::Option || !matches!(base.as_str(), "BTC" | "ETH") { return vec![]; }
+    if !streams(sub.market, &base) { return vec![]; }
     vec![tokio::spawn(option_feed(Emit { ex: Exchange::Deribit, market: Market::Option, tx }, base))]
 }
 
@@ -203,6 +206,12 @@ mod tests {
             on_option(e, &mut HashMap::new(), Frame::Text("not json"));
         });
         assert!(m.is_empty());
+    }
+
+    #[test]
+    fn streams_btc_and_eth_options_only() {
+        assert!(streams(Market::Option, "btc") && streams(Market::Option, "ETH"));
+        assert!(!streams(Market::Perp, "BTC") && !streams(Market::Option, "SOL"));
     }
 
     #[test]
