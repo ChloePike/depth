@@ -1,7 +1,7 @@
 //! Bridge for the native (SwiftUI) panels: one JSON state snapshot the host polls, and JSON
 //! actions it sends. egui keeps drawing the chart, book and option chain; everything else
 //! (title bar, order entry, account tables, settings, status bar) is SwiftUI.
-use super::App;
+use super::{l, App};
 use eframe::egui;
 use serde_json::{json, Value};
 use std::time::Instant;
@@ -67,7 +67,10 @@ impl App {
         drop(st);
         drop(a);
 
-        let acc = self.eng.account.lock().unwrap();
+        let mut acc = self.eng.account.lock().unwrap();
+        let day = super::engine::day_pnl(&mut acc, nowms, super::local_offset_ms());
+        let risk = json!({"limits": acc.limits, "day_pnl": day,
+            "blocked": acc.limits.daily_loss_usdt > 0.0 && day.is_some_and(|d| d <= -acc.limits.daily_loss_usdt)});
         let has_key = acc.keys.contains_key(&ex);
         let key = (ex, symbol.clone());
         let mode = acc.modes.get(&key).copied().flatten();
@@ -203,6 +206,7 @@ impl App {
             "chart": chart, "book": book, "fired": fired, "signals": signals, "quant": quant,
             "book_click": self.trade.fill.map(|(e, px)| json!({"ex": ex_name(e), "px": px})),
             "tradable": trade::TRADABLE.iter().map(|e| ex_name(*e)).collect::<Vec<_>>(),
+            "risk": risk,
         }).to_string()
     }
 
@@ -235,6 +239,7 @@ impl App {
                 let old = (self.prefs.proxy, self.prefs.proxy_url.clone());
                 self.prefs = super::settings::merge_prefs(&self.prefs, &v["prefs"])?;
                 self.prefs.apply(ctx);
+                self.eng.account.lock().unwrap().limits = self.prefs.risk;
                 // every stream reconnects through the new route now; private ones re-snapshot
                 if old != (self.prefs.proxy, self.prefs.proxy_url.clone()) {
                     self.pending_restart = true;
@@ -242,6 +247,8 @@ impl App {
                     for (e, k) in keys { self.eng.set_keys(e, Some(k)); }
                 }
             }
+            // the daily loss stop counts from now
+            "risk_reset" => self.eng.account.lock().unwrap().day_start.1.clear(),
             "set_route" => { self.route = serde_json::from_value(v["route"].clone()).map_err(|e| e.to_string())?; }
             "tickers" => {
                 let t = self.eng.tickers.lock().unwrap();
@@ -485,7 +492,10 @@ impl App {
         for e in trade::TRADABLE { let (t, m) = super::settings::fee(e); policy.fees.insert(e, (t, m)); }
         // staleness is judged on local receive time of the last book/BBO (v.ts follows every event, incl. polled
         // long/short rows stamped minutes back)
-        route::plan(req, &venues, &snap, &policy, now_ms(), now_ms() as u64).map_err(|e| format!("{e:#}"))
+        let plan = route::plan(req, &venues, &snap, &policy, now_ms(), now_ms() as u64).map_err(|e| format!("{e:#}"))?;
+        // risk limits, so the preview shows the block before anything is confirmed
+        super::engine::check_plan(&mut self.eng.account.lock().unwrap(), &plan.legs).map_err(|e| format!("{} {e}", l("Risk limit:")))?;
+        Ok(plan)
     }
 }
 

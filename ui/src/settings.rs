@@ -668,7 +668,7 @@ fn trading(ui: &mut Ui, st: &Value, call: &mut Call) {
             });
         });
     });
-    section(ui, l("Risk limits"), l("0 turns a limit off. Checked before every perp order Depth sends (order panel, hotkeys, chart, scaled, TWAP) and shown in the order preview; closes are never blocked. The price band compares a limit price with the venue's own mark price. The position limit counts the symbol on every venue, both sides."), |ui| {
+    section(ui, l("Risk limits"), l("0 turns a limit off. Checked before every perp order Depth sends (order panel, hotkeys, chart, scaled, TWAP) and shown in the order preview; closes are never blocked. The price band compares a limit price with the venue's own mark price. The position limit counts the symbol on every venue, both sides. The day's PnL is the change in equity since local midnight, so funding and transfers made outside Depth count."), |ui| {
         number(ui, l("Maximum order value"), &mut p.risk.max_order_usdt, 0, "USDT");
         row_sep(ui);
         number(ui, l("Price band around the mark"), &mut p.risk.band_bps, 0, "bp");
@@ -676,6 +676,13 @@ fn trading(ui: &mut Ui, st: &Value, call: &mut Call) {
         number(ui, l("Maximum position per symbol"), &mut p.risk.max_pos_usdt, 0, "USDT");
         row_sep(ui);
         number(ui, l("Daily loss stop"), &mut p.risk.daily_loss_usdt, 0, "USDT");
+        row_sep(ui);
+        row(ui, l("PnL today (equity since local midnight)"), |ui| {
+            if kit::button(ui, l("Reset"), kit::Look::Secondary, kit::H_SM, None, true).on_hover_text(l("Count the day from now")).clicked() { let _ = call(json!({"op": "risk_reset"})); }
+            let d = st["risk"]["day_pnl"].as_f64();
+            let col = if st["risk"]["blocked"] == true { dn() } else { fg() };
+            ui.label(RichText::new(d.map_or("–".into(), |d| format!("{d:+.2} USDT"))).font(mono_m(12.5)).color(col));
+        });
     });
     section(ui, l("Fees (your tier)"), l("Taker / maker in percent per fill. Used for fee estimates and routing; enter your VIP tier's rates."), |ui| {
         for (i, k) in tradable.iter().enumerate() {

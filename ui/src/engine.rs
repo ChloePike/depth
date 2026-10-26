@@ -78,6 +78,11 @@ pub struct Account {
     /// auto top-up rules per venue (persisted in settings.json) and the last time one fired
     pub auto: HashMap<Exchange, AutoTopUp>,
     auto_last: HashMap<Exchange, i64>,
+    /// pre-trade risk limits (Settings > Trading), copied from the prefs
+    pub limits: depth::risk::Limits,
+    /// each keyed venue's equity at the start of the local day (day number in the display time
+    /// zone): the daily loss stop's baseline, persisted in settings.json
+    pub day_start: (i64, HashMap<Exchange, f64>),
 }
 
 /// Keep the margin account's available balance topped up: when it drops below `min` USD, move
@@ -133,7 +138,79 @@ fn check_perms(rt: &tokio::runtime::Runtime, account: &Arc<Mutex<Account>>, ex: 
     });
 }
 
+/// The day's PnL over the keyed venues: equity now minus each venue's equity at the start of the
+/// local day (`off`: UTC offset of the display time zone, ms). A venue seen first today, or first
+/// after midnight, takes its equity now as the baseline. None before any balance.
+/// ponytail: equity-based, so funding, fees and transfers made outside Depth count as PnL
+pub(crate) fn day_pnl(a: &mut Account, now: i64, off: i64) -> Option<f64> {
+    let day = (now + off).div_euclid(86_400_000);
+    if a.day_start.0 != day { a.day_start = (day, HashMap::new()); }
+    let (keys, base) = (&a.keys, &mut a.day_start.1);
+    a.balances.iter().filter(|(e, _)| keys.contains_key(e)).fold(None, |s, (e, b)| Some(s.unwrap_or(0.0) + b.equity - *base.entry(*e).or_insert(b.equity)))
+}
+
+/// A transfer Depth made into or out of a venue's margin account moves that venue's day baseline
+/// with it, so it counts as neither profit nor loss.
+/// ponytail: stablecoins only (amount = USD); a coin moved in as collateral still shows as PnL
+fn shift_day(a: &mut Account, ex: Exchange, from: &str, to: &str, coin: &str, amount: f64) {
+    if !matches!(coin, "USDT" | "USDC" | "USD") { return; }
+    let m = |id: &str| if trade::MARGIN_IDS.contains(&id) { 1.0 } else { 0.0 };
+    if let Some(b) = a.day_start.1.get_mut(&ex) { *b += amount * (m(to) - m(from)); }
+}
+
+/// The risk check's view of an order on `ex`: the venue's own price (`ref_px`, the touch or mid the
+/// order was priced from, else the mark of a position held there; never the composite index),
+/// everything held in the symbol on every venue at its mark, both sides, and the day's PnL; with the
+/// part of a one-way order that closes the opposite position first.
+/// ponytail: held positions and this guard count USD / USDC 1:1 with USDT (a few bp off); the route
+/// preview (`check_plan`) values each leg at the live rate
+pub(crate) fn risk_ctx(a: &mut Account, ex: Exchange, req: &OrderReq, ref_px: f64, now: i64, off: i64) -> (depth::risk::Ctx, f64) {
+    let sym = |p: &&Position| p.symbol == req.symbol;
+    let mark = Some(ref_px).filter(|x| *x > 0.0).or_else(|| a.positions.iter().filter(sym).find(|p| p.ex == ex && p.mark > 0.0).map(|p| p.mark));
+    let held_usdt = a.positions.iter().filter(sym).map(|p| p.qty * p.mark).sum();
+    let one_way = a.modes.get(&(ex, req.symbol.clone())).copied().flatten() == Some(Mode::OneWay);
+    let reduces = if one_way && !req.close { a.positions.iter().filter(sym).filter(|p| p.ex == ex && p.side != req.pos).map(|p| p.qty).sum() } else { 0.0 };
+    (depth::risk::Ctx { mark, fx: 1.0, held_usdt, day_pnl: day_pnl(a, now, off) }, reduces)
+}
+
+/// The engine's risk guard, which every perp order passes (`place_logged`, and the algos before they
+/// start): Err with the reason when the order breaks a limit; it is then never sent.
+fn risk_gate(a: &mut Account, ex: Exchange, req: &OrderReq, ref_px: f64) -> Result<(), String> {
+    let lim = a.limits;
+    let (c, r) = risk_ctx(a, ex, req, ref_px, now_ms(), crate::local_offset_ms());
+    depth::risk::check(req, r, &c, &lim)
+}
+
+/// Risk limits for a routed order before it is shown or sent: the price band per leg against its
+/// venue's own touch, the order and position limits for the legs together (one order, however split).
+pub(crate) fn check_plan(a: &mut Account, legs: &[depth::route::Leg]) -> Result<(), String> {
+    let (lim, now, off) = (a.limits, now_ms(), crate::local_offset_ms());
+    let band = depth::risk::Limits { band_bps: lim.band_bps, ..Default::default() };
+    let (mut usdt, mut qty, mut red) = (0.0, 0.0, 0.0);
+    for l in legs {
+        let (c, r) = risk_ctx(a, l.ex, &l.req, l.ref_px, now, off);
+        depth::risk::check(&l.req, r, &depth::risk::Ctx { fx: l.fx, ..c }, &band).map_err(|e| format!("{:?}: {e}", l.ex))?;
+        (usdt, qty, red) = (usdt + l.est_px * l.fx * l.req.qty, qty + l.req.qty, red + r);
+    }
+    let Some(l0) = legs.first().filter(|_| qty > 0.0) else { return Ok(()) };
+    let (c, _) = risk_ctx(a, l0.ex, &l0.req, 0.0, now, off);
+    let whole = OrderReq { qty, kind: trade::Kind::Market, ..l0.req.clone() };
+    depth::risk::check(&whole, red, &depth::risk::Ctx { mark: Some(usdt / qty), fx: 1.0, ..c }, &depth::risk::Limits { band_bps: 0.0, ..lim })
+}
+
+/// The venue's own perp mid for `symbol` while it is the base on screen (`base`) and its book is
+/// fresh; 0 otherwise.
+fn venue_mid(agg: &Arc<Mutex<Agg>>, base: &str, ex: Exchange, symbol: &str) -> f64 {
+    if symbol != trade::symbol(base) { return 0.0; }
+    let a = agg.lock().unwrap();
+    a.venues.get(&(ex, Market::Perp)).filter(|v| now_ms() - v.fresh < 5_000).and_then(|v| v.mid()).unwrap_or(0.0)
+}
+
 async fn place_logged(account: &Arc<Mutex<Account>>, ex: Exchange, req: &OrderReq, ref_px: f64) -> Option<String> {
+    let what = format!("{ex:?} {} {} {} {} {}", req.symbol, if req.close { "close" } else { "open" }, if req.pos == depth::Side::Buy { "long" } else { "short" }, req.qty, req.kind.label());
+    // never sent past a risk limit (a separate statement: the guard's lock ends before the note's)
+    let gate = risk_gate(&mut account.lock().unwrap(), ex, req, ref_px);
+    if let Err(e) = gate { account.lock().unwrap().note(format!("FAIL {what}: risk limit: {e}"), false); return None; }
     let k = account.lock().unwrap().keys.get(&ex).cloned()?;
     let key = (ex, req.symbol.clone());
     let cached = account.lock().unwrap().rules.get(&key).copied();
@@ -154,7 +231,6 @@ async fn place_logged(account: &Arc<Mutex<Account>>, ex: Exchange, req: &OrderRe
     };
     let rtt = t0.elapsed().as_secs_f64() * 1e3;
     let mut a = account.lock().unwrap();
-    let what = format!("{ex:?} {} {} {} {} {}", req.symbol, if req.close { "close" } else { "open" }, if req.pos == depth::Side::Buy { "long" } else { "short" }, req.qty, req.kind.label());
     match res {
         Ok(id) => {
             let r = a.order_rtt.entry(ex).or_insert(rtt);
@@ -937,11 +1013,18 @@ impl Engine {
         let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return Err("not connected".into()) };
         let count = legs.len();
         let tif = if post_only { trade::Tif::PostOnly } else { trade::Tif::Gtc };
+        // the ladder as one order against the limits, and every price against the band, before any is sent
+        let mid = venue_mid(&self.agg, &self.base, ex, &base.symbol);
+        {
+            let mut a = account.lock().unwrap();
+            risk_gate(&mut a, ex, &OrderReq { kind: trade::Kind::Market, ..base.clone() }, mid)?;
+            for (px, q) in &legs { risk_gate(&mut a, ex, &OrderReq { kind: trade::Kind::Limit { price: *px, tif }, qty: *q, client_id: None, ..base.clone() }, mid)?; }
+        }
         rt.spawn(async move {
             // one after another: venues rate-limit bursts of new orders per second
             for (px, q) in legs {
                 let req = OrderReq { kind: trade::Kind::Limit { price: px, tif }, qty: q, client_id: None, ..base.clone() };
-                place_logged(&account, ex, &req, px).await;
+                place_logged(&account, ex, &req, if mid > 0.0 { mid } else { px }).await;
                 tokio::time::sleep(Duration::from_millis(150)).await;
             }
             ctx.request_repaint();
@@ -962,6 +1045,8 @@ impl Engine {
         let sizes = depth::algo::twap_slices(base.qty, slices, rules.step);
         if sizes.is_empty() || sizes.iter().any(|q| *q < rules.min_qty) { return Err(format!("each slice must be at least {} (try fewer slices)", rules.min_qty)); }
         let (Some(rt), account, agg, ctx) = (self.acct_rt.as_ref(), self.account.clone(), self.agg.clone(), ctx.clone()) else { return Err("not connected".into()) };
+        // the whole TWAP as one order against the limits (each slice is checked again when sent)
+        risk_gate(&mut account.lock().unwrap(), ex, &base, venue_mid(&agg, &self.base, ex, &base.symbol))?;
         let id = depth::now_ms() as u64;
         let gap = Duration::from_secs_f64(minutes * 60.0 / sizes.len() as f64);
         let buy = base.side() == depth::Side::Buy;
@@ -987,7 +1072,7 @@ impl Engine {
                 };
                 set_status(&account, id, "running");
                 let req = OrderReq { kind: trade::Kind::Limit { price: px, tif: trade::Tif::Ioc }, qty: sizes[i], client_id: None, ..base.clone() };
-                place_logged(&account, ex, &req, px).await;
+                place_logged(&account, ex, &req, bbo.map_or(px, |(b, k)| (b + k) / 2.0)).await;
                 {
                     let mut a = account.lock().unwrap();
                     if let Some(j) = a.algos.iter_mut().find(|j| j.id == id) { j.done = i + 1; j.sent += sizes[i]; }
@@ -1006,6 +1091,7 @@ impl Engine {
     /// Venue-run TWAP: placed once, then the venue slices it (keeps running with the app closed).
     pub fn start_native_twap(&self, ex: Exchange, base: OrderReq, minutes: u32, limit: Option<f64>, randomize: bool, ref_px: f64, ctx: &eframe::egui::Context) -> Result<u64, String> {
         let (Some(rt), account, ctx) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone()) else { return Err("not connected".into()) };
+        risk_gate(&mut account.lock().unwrap(), ex, &base, ref_px)?;
         let id = depth::now_ms() as u64;
         let now = depth::now_ms();
         account.lock().unwrap().algos.push(AlgoJob {
@@ -1137,7 +1223,7 @@ impl Engine {
     /// ponytail: OKX / Bitget / Gate / Kraken / Hyperliquid have amend endpoints too; wire them once
     /// those venues are verified on a real account.
     pub fn replace_order(&self, o: &OpenOrder, price: f64, ctx: &eframe::egui::Context) {
-        let (Some(rt), account, ctx, o) = (self.rt.as_ref(), self.account.clone(), ctx.clone(), o.clone()) else { return };
+        let (Some(rt), account, ctx, o, agg, base) = (self.rt.as_ref(), self.account.clone(), ctx.clone(), o.clone(), self.agg.clone(), self.base.clone()) else { return };
         let opp = |s: depth::Side| if s == depth::Side::Buy { depth::Side::Sell } else { depth::Side::Buy };
         let req = OrderReq {
             symbol: o.symbol.clone(), close: o.reduce_only, kind: trade::Kind::Limit { price, tif: trade::Tif::Gtc }, qty: o.qty - o.filled, client_id: None, attach: None,
@@ -1146,6 +1232,10 @@ impl Engine {
         };
         rt.spawn(async move {
             let Some(k) = account.lock().unwrap().keys.get(&o.ex).cloned() else { return };
+            // the new price against the risk band too (in the task: the caller may hold the agg lock)
+            let mid = venue_mid(&agg, &base, o.ex, &o.symbol);
+            let gate = risk_gate(&mut account.lock().unwrap(), o.ex, &req, mid);
+            if let Err(e) = gate { account.lock().unwrap().note(format!("FAIL move {:?} {} {} -> {price}: risk limit: {e}", o.ex, o.symbol, o.id), false); ctx.request_repaint(); return; }
             if trade::can_amend(o.ex) {
                 let cached = account.lock().unwrap().rules.get(&(o.ex, o.symbol.clone())).copied();
                 let res = async {
@@ -1159,7 +1249,7 @@ impl Engine {
                 return;
             }
             match trade::cancel(o.ex, &k, &o.symbol, &o.id).await {
-                Ok(()) => { place_logged(&account, o.ex, &req, price).await; }
+                Ok(()) => { place_logged(&account, o.ex, &req, if mid > 0.0 { mid } else { price }).await; }
                 Err(e) => account.lock().unwrap().note(format!("FAIL move {:?} {} {}: cancel: {e:#}", o.ex, o.symbol, o.id), false),
             }
             ctx.request_repaint();
@@ -1349,7 +1439,7 @@ impl Engine {
             {
                 let mut a = account.lock().unwrap();
                 match r {
-                    Ok(lines) => for l in lines { a.note(format!("OK {l}"), true); },
+                    Ok(lines) => { for l in lines { a.note(format!("OK {l}"), true); } shift_day(&mut a, ex, &from, &to, &coin, amount); }
                     Err(e) => a.note(format!("FAIL transfer {ex:?} {from} -> {to} {amount} {coin}: {e:#}"), false),
                 }
                 a.transferring = false;
@@ -1506,7 +1596,7 @@ fn spawn_top_up(account: &Arc<Mutex<Account>>, ex: Exchange, need: f64, ctx: &ef
             let r = trade::transfer(ex, &k, src, &margin, "USDT", amt, c.product.as_deref()).await;
             let mut a = account.lock().unwrap();
             match r {
-                Ok(lines) => { for l in lines { a.note(format!("AUTO {l}"), true); } left -= amt; }
+                Ok(lines) => { for l in lines { a.note(format!("AUTO {l}"), true); } shift_day(&mut a, ex, src, &margin, "USDT", amt); left -= amt; }
                 Err(e) => a.note(format!("AUTO FAIL {ex:?} {src} -> {margin} {amt:.2} USDT: {e:#}"), false),
             }
         }
@@ -1706,6 +1796,53 @@ mod tests {
         assert_eq!(a.orders[0].filled, 0.5);
         apply(&mut a, ex, E::OrderDone { id: "7".into() });
         assert!(a.orders.is_empty());
+    }
+
+    #[test]
+    fn day_pnl_rolls_at_local_midnight_and_shifts_on_transfer() {
+        let mut a = Account::default();
+        let ex = Exchange::Bybit;
+        a.keys.insert(ex, Keys { key: "k".into(), secret: "s".into(), extra: None, demo: false });
+        let day = 86_400_000;
+        let eq = |a: &mut Account, e: f64| a.balances.insert(ex, trade::Balance { equity: e, ..Default::default() });
+        assert_eq!(day_pnl(&mut a, 10 * day, 0), None);
+        eq(&mut a, 1000.0);
+        assert_eq!(day_pnl(&mut a, 10 * day + 1, 0), Some(0.0));
+        eq(&mut a, 900.0);
+        assert_eq!(day_pnl(&mut a, 10 * day + 2, 0), Some(-100.0));
+        // 200 USDT moved in from the funding account is not profit
+        eq(&mut a, 1100.0);
+        shift_day(&mut a, ex, "FUND", "UNIFIED", "USDT", 200.0);
+        assert_eq!(day_pnl(&mut a, 10 * day + 3, 0), Some(-100.0));
+        // UTC+8: local midnight comes 8 h before UTC midnight, then a new baseline
+        assert_eq!(day_pnl(&mut a, 11 * day - 8 * 3_600_000 - 1, 8 * 3_600_000), Some(-100.0));
+        assert_eq!(day_pnl(&mut a, 11 * day - 8 * 3_600_000, 8 * 3_600_000), Some(0.0));
+        // a venue without keys does not count
+        a.balances.insert(Exchange::Okx, trade::Balance { equity: 5.0, ..Default::default() });
+        assert_eq!(day_pnl(&mut a, 11 * day, 8 * 3_600_000), Some(0.0));
+    }
+
+    #[test]
+    fn place_guard_blocks_before_send() {
+        let mut a = Account::default();
+        let ex = Exchange::Binance;
+        a.limits = depth::risk::Limits { max_order_usdt: 150.0, band_bps: 100.0, ..Default::default() };
+        a.positions.push(Position { mark: 100.0, ..pos(Side::Buy, 1.0) });
+        a.modes.insert((ex, "BTCUSDT".into()), Some(Mode::OneWay));
+        let o = |kind, qty| OrderReq { symbol: "BTCUSDT".into(), pos: Side::Sell, close: false, kind, qty, client_id: None, attach: None };
+        // a one-way sell of 2 against the long closes 1 first: 100 USDT new exposure passes
+        let (c, r) = risk_ctx(&mut a, ex, &o(trade::Kind::Market, 2.0), 0.0, 0, 0);
+        assert_eq!((c.mark, c.held_usdt, r), (Some(100.0), 100.0, 1.0));
+        assert!(risk_gate(&mut a, ex, &o(trade::Kind::Market, 2.0), 100.0).is_ok());
+        assert!(risk_gate(&mut a, ex, &o(trade::Kind::Market, 3.0), 100.0).unwrap_err().contains("above the 150"));
+        // the band is judged on the venue price the order was priced from
+        let lim = |p| trade::Kind::Limit { price: p, tif: trade::Tif::Gtc };
+        assert!(risk_gate(&mut a, ex, &o(lim(102.0), 0.1), 100.0).is_err());
+        assert!(risk_gate(&mut a, ex, &o(lim(102.0), 0.1), 101.5).is_ok());
+        // a hedge account reduces nothing; a close is never stopped
+        a.modes.insert((ex, "BTCUSDT".into()), Some(Mode::Hedge));
+        assert!(risk_gate(&mut a, ex, &o(trade::Kind::Market, 2.0), 100.0).is_err());
+        assert!(risk_gate(&mut a, ex, &OrderReq { close: true, ..o(trade::Kind::Market, 50.0) }, 100.0).is_ok());
     }
 
     #[test]

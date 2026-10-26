@@ -566,6 +566,7 @@ impl OrderPanel {
             }
             ui.spacing_mut().item_spacing.y = 6.0;
             if read_only { kit::note(ui, l("This API key is read-only: trading is disabled. Allow trading for the key on the exchange to place orders."), WARN); }
+            if st["risk"]["blocked"] == true && !self.close { kit::note(ui, l("Daily loss stop reached: only closes until local midnight (Settings > Trading)."), dn()); }
             if let Some(p) = go { self.submit(p, st, ref_px, use_bbo, typed_price, call); }
             self.summary(ui, t, &base, qty_v * ref_px, use_bbo, has_key, qty_v);
             if let Some(e) = &self.error { kit::note(ui, e, dn()); }
