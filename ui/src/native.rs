@@ -248,7 +248,7 @@ impl App {
             }
             "preview" | "place" => {
                 let req = self.order_req(v)?;
-                let plan = self.plan(&req)?;
+                let plan = self.plan_at(&req, None, v["tpsl"] == true)?;
                 if v["op"] == "place" {
                     // the user confirmed a previewed plan: refuse if the venues or sizes moved since
                     if let Some(exp) = v["expect"].as_array() {
@@ -433,8 +433,9 @@ impl App {
         Ok(OrderReq { symbol: trade::symbol(&self.eng.base), pos, close: v["close"].as_bool().unwrap_or(false), kind, qty, client_id: None, attach: None })
     }
 
-    /// Route through the planner (fixed venue = one leg) from local books and account state.
-    fn plan(&self, req: &OrderReq) -> Result<route::RoutePlan, String> {
+    /// Route through the planner (fixed venue = one leg) from local books and account state;
+    /// `fixed` pins one venue whatever the routing policy, `tpsl` keeps to venues that take TP/SL.
+    pub(crate) fn plan_at(&self, req: &OrderReq, fixed: Option<Exchange>, tpsl: bool) -> Result<route::RoutePlan, String> {
         let a = self.eng.agg.lock().unwrap();
         let st = self.eng.stats.lock().unwrap();
         let venues: Vec<route::VenueSnap> = trade::TRADABLE.iter().filter_map(|&e| {
@@ -454,17 +455,23 @@ impl App {
             if let Some(err) = acc.errors.get(&e) { snap.unavailable.insert(e, err.clone()); }
         }
         for e in trade::TRADABLE { if !acc.keys.contains_key(&e) { snap.unavailable.insert(e, "no API key".into()); } }
+        for (e, why) in tpsl_excluded(&trade::TRADABLE, tpsl) { snap.unavailable.entry(e).or_insert(why); }
         snap.positions = acc.positions.iter().filter(|p| &p.symbol == sym).cloned().collect();
         drop(acc);
         let mut policy = self.route.clone();
         // conditional and trailing orders wait on one venue: never split or routed elsewhere
         if matches!(req.kind, Kind::Stop { .. } | Kind::Trailing { .. }) { policy.smart = false; }
-        if !policy.smart { policy.fixed = self.trade.ex; }
+        if let Some(e) = fixed { (policy.smart, policy.fixed) = (false, e); } else if !policy.smart { policy.fixed = self.trade.ex; }
         for e in trade::TRADABLE { let (t, m) = super::settings::fee(e); policy.fees.insert(e, (t, m)); }
         // staleness is judged on local receive time of the last book/BBO (v.ts follows every event, incl. polled
         // long/short rows stamped minutes back)
         route::plan(req, &venues, &snap, &policy, now_ms(), now_ms() as u64).map_err(|e| format!("{e:#}"))
     }
+}
+
+/// Venues an order with TP/SL must not be routed to: those without TP/SL support.
+fn tpsl_excluded(venues: &[Exchange], tpsl: bool) -> Vec<(Exchange, String)> {
+    venues.iter().filter(|e| tpsl && !trade::caps(**e).tpsl).map(|e| (*e, "no TP/SL on this venue".to_string())).collect()
 }
 
 fn plan_json(p: &route::RoutePlan) -> Value {
@@ -477,4 +484,17 @@ fn plan_json(p: &route::RoutePlan) -> Value {
         "excluded": p.excluded.iter().map(|(e, r)| json!({"ex": ex_name(*e), "reason": r})).collect::<Vec<_>>(),
         "clamped_from": p.clamped_from, "total_qty": p.total_qty, "vwap": p.vwap, "fees": p.fees,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tpsl_orders_skip_venues_without_tpsl() {
+        assert!(tpsl_excluded(&trade::TRADABLE, false).is_empty());
+        let out: Vec<Exchange> = tpsl_excluded(&trade::TRADABLE, true).into_iter().map(|x| x.0).collect();
+        assert!(!out.contains(&Exchange::Bybit) && !out.contains(&Exchange::Binance), "{out:?}");
+        for e in [Exchange::Okx, Exchange::Bitget, Exchange::Gate, Exchange::Kraken, Exchange::Hyperliquid, Exchange::Lighter] { assert!(out.contains(&e), "{e:?}"); }
+    }
 }

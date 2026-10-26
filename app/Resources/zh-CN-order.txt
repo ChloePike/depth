@@ -237,3 +237,4 @@ Liq. = 强平
 Close this position at market? = 市价平掉这个仓位？
 Close this position at market = 市价平掉这个仓位
 Fill the form with a limit close of the whole position at the touch = 在盘口价填入整个仓位的限价平仓单
+TP/SL is not available on this venue yet = 该交易所暂不支持止盈止损

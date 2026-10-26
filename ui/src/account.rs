@@ -105,6 +105,8 @@ fn base_of(symbol: &str) -> &str { let s = symbol.split('-').next().unwrap_or(sy
 fn held_protection(opts: &[Value], base: &str, long: bool) -> f64 {
     opts.iter().filter(|o| s(&o["base"]) == base && o["call"] == !long && s(&o["side"]) == "long").map(|o| f(&o["qty"])).sum()
 }
+/// The position's venue takes TP/SL (trade::caps).
+fn has_tpsl(p: &Value) -> bool { Exchange::parse(s(&p["ex"])).is_some_and(|e| depth::trade::caps(e).tpsl) }
 fn pos_key(p: &Value) -> String { format!("{}|{}|{}", s(&p["ex"]), s(&p["symbol"]), s(&p["side"])) }
 fn row_key(v: &Value) -> String { format!("{}|{}", s(&v["ex"]), s(&v["id"])) }
 fn side_name(side: &str) -> &'static str {
@@ -697,6 +699,10 @@ impl AccountPanel {
                         if m.clicked() && q > 0.0 { acts.push(Act::Confirm(PosAct::Market(p.clone(), q))); }
                         if lm.clicked() && q > 0.0 { if let Some(x) = parse(&px_t).filter(|x| *x > 0.0) { acts.push(Act::Confirm(PosAct::Limit(p.clone(), x, q))); } }
                     }
+                    8 if !has_tpsl(p) => {
+                        let tr = txt(ui, r, "—", mono(12.5), dim(), true);
+                        ui.interact(tr.expand(4.0), ui.id().with(("notpsl", &key)), egui::Sense::hover()).on_hover_text(l("TP/SL is not available on this venue yet"));
+                    }
                     8 => {
                         if icon_btn(ui, egui::pos2(r.right() - 10.0, r.center().y), 1).on_hover_text(l("Whole-position or staged TP/SL")).clicked() { acts.push(Act::TpSl(p.clone())); }
                         let tr = Rect::from_min_max(r.min, egui::pos2(r.right() - 26.0, r.max.y));
@@ -775,7 +781,7 @@ impl AccountPanel {
                 let p = ps[0];
                 if menu_item(ui, l("Close at Market…")) { acts.push(Act::Confirm(PosAct::Market(p.clone(), f(&p["qty"])))); }
                 if menu_item(ui, l("Limit Close in Order Panel")) { acts.push(Act::Prefill(p.clone())); }
-                if menu_item(ui, l("TP/SL…")) { acts.push(Act::TpSl(p.clone())); }
+                if has_tpsl(p) && menu_item(ui, l("TP/SL…")) { acts.push(Act::TpSl(p.clone())); }
                 if menu_item(ui, &format!("{}…", super::t("ins.btn"))) { acts.push(Act::Insure(p.clone())); }
                 if menu_item(ui, l("Share PnL…")) { acts.push(Act::Share(p.clone())); }
                 ui.separator();

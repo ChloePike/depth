@@ -401,6 +401,8 @@ impl OrderPanel {
         let read_only = t["read_only"] == true && !smart;
         let can_trade = (has_key && !read_only) || smart;
         let caps = &t["caps"];
+        // TP/SL only where the venue has it (smart routing then skips the venues without)
+        let tpsl_ok = caps["tpsl"] == true || smart;
         let bbo_levels: Vec<u64> = t["bbo_levels"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
 
         // react to a new symbol, venue or book click (the Swift onChange handlers)
@@ -448,7 +450,7 @@ impl OrderPanel {
             Kind::Scaled => { add("from", l("Scaled"), &self.scaled_from, accent()); add("to", l("Scaled"), &self.scaled_to, accent()); }
             _ => {}
         }
-        if self.tpsl_on && !self.close && matches!(self.kind, Kind::Limit | Kind::Market) { add("tp", "TP", &self.tp, up()); add("sl", "SL", &self.sl, dn()); }
+        if self.tpsl_on && tpsl_ok && !self.close && matches!(self.kind, Kind::Limit | Kind::Market) { add("tp", "TP", &self.tp, up()); add("sl", "SL", &self.sl, dn()); }
         self.preview = pv;
 
         let mut enter = false;
@@ -508,7 +510,7 @@ impl OrderPanel {
             ui.scope(|ui| {
                 if slider(ui, &mut self.pct, &pct) { self.qty = if self.pct > 0.0 { self.qty_text(max_qty * self.pct as f64, ref_px, step) } else { String::new() }; }
             }).response.on_hover_text(if self.close { l("Share of the position") } else { l("Share of available margin × leverage") });
-            if !self.close && matches!(self.kind, Kind::Limit | Kind::Market) { enter |= self.tpsl_section(ui); }
+            if !self.close && matches!(self.kind, Kind::Limit | Kind::Market) && (tpsl_ok || self.tpsl_on) { enter |= self.tpsl_section(ui, tpsl_ok); }
             self.algo_jobs(ui, st, call);
             // the two sides, with what each can open / close and the margin it costs
             let (l1, l2) = if self.close { (l("Close Short"), l("Close Long")) } else { (l("Open Long"), l("Open Short")) };
@@ -792,14 +794,16 @@ impl OrderPanel {
         enter
     }
 
-    fn tpsl_section(&mut self, ui: &mut Ui) -> bool {
+    /// TP/SL switch and prices; where the venue has no TP/SL only the switch (to turn it off) and a note.
+    fn tpsl_section(&mut self, ui: &mut Ui, ok: bool) -> bool {
         let mut enter = false;
         ui.horizontal(|ui| {
             ui.set_min_height(H_SM);
             ui.label(RichText::new(l("TP / SL")).font(prop_m(12.5)).color(fg()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { kit::switch(ui, &mut self.tpsl_on); });
         }).response.on_hover_text(l("Attach a take-profit / stop-loss to the position this order opens"));
-        if self.tpsl_on {
+        if self.tpsl_on && !ok { kit::note(ui, l("TP/SL is not available on this venue yet"), WARN); }
+        if self.tpsl_on && ok {
             row(ui, l("Trigger by"), |ui| {
                 ui.allocate_ui(egui::vec2(128.0, H_SM), |ui| kit::segments(ui, &mut self.trig_last, &[(false, l("Mark")), (true, l("Last"))], H_SM));
             });
@@ -1144,8 +1148,11 @@ impl OrderPanel {
         let (mut tp, mut sl) = (None, None);
         // the section is only shown for limit / market: a switch left on under another kind is ignored
         if self.tpsl_on && !self.close && matches!(self.kind, Kind::Limit | Kind::Market) {
+            if t["caps"]["tpsl"] != true && st["route"]["smart"] != true { self.error = Some(l("TP/SL is not available on this venue yet").into()); return; }
             (tp, sl) = (parse(&self.tp), parse(&self.sl));
             if tp.is_none() && sl.is_none() { self.error = Some(l("Enter a take-profit or stop-loss price, or turn TP/SL off").into()); return; }
+            // routing then uses only venues that take TP/SL
+            args["tpsl"] = true.into();
             if let Some(e) = tpsl_check(pos == "long", ref_px, l("the order price"), tp, sl) { self.error = Some(e); return; }
         }
         let mut req = args.clone();
