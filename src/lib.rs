@@ -9,6 +9,7 @@ pub mod algoscan;
 pub mod ex;
 pub mod insure;
 pub mod quant;
+pub mod risk;
 pub mod route;
 pub mod sys;
 pub mod trade;

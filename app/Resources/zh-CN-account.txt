@@ -276,3 +276,9 @@ Local multi-exchange trading terminal. Runs entirely on this computer: no relay,
 Sent at market, or as an IOC limit at the slippage cap (Settings > Trading) when the book is thin; what does not fill stays open. = 以市价发出；盘口太薄时改为滑点上限处的 IOC 限价单（设置 > 交易），未成交部分仍保留持仓。
 One market order of twice the size: the venue closes the position and opens the other side in the same fill. = 一笔两倍数量的市价单：交易所在同一笔成交中平掉此仓位并开出反向仓位。
 Two market orders, the open only after the close was accepted; if the second fails you are left flat. = 两笔市价单，平仓被接受后才发开仓单；如果第二笔失败，你会处于空仓状态。
+Risk limits = 风控限额
+0 turns a limit off. Checked before every perp order Depth sends (order panel, hotkeys, chart, scaled, TWAP) and shown in the order preview; closes are never blocked. The price band compares a limit price with the venue's own mark price. The position limit counts the symbol on every venue, both sides. = 填 0 即关闭该限额。Depth 发出的每笔永续订单（下单面板、快捷键、图表、分批、TWAP）发送前都会检查，并在订单预览中显示；平仓从不被拦截。价格带用限价与该交易所自己的标记价比较。持仓限额按该币种在所有交易所、多空两边合计。
+Maximum order value = 单笔订单最大价值
+Price band around the mark = 标记价附近的价格带
+Maximum position per symbol = 单币种最大持仓
+Daily loss stop = 每日亏损止损

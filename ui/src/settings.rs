@@ -48,11 +48,13 @@ pub struct Prefs {
     pub terminal: bool,
     /// sound of a fill on any venue (chart::sounds id; "none" = silent)
     pub fill_sound: String,
+    /// pre-trade risk limits, every one off (0) by default
+    pub risk: depth::risk::Limits,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into() }
+        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into(), risk: Default::default() }
     }
 }
 
@@ -595,7 +597,7 @@ fn appearance(ui: &mut Ui, st: &Value, call: &mut Call) {
         ui.horizontal(|ui| {
             ui.set_min_height(36.0);
             if kit::button(ui, l("Restore Default Appearance"), kit::Look::Secondary, kit::H, None, !p.default_look()).clicked() {
-                p = Prefs { tz_min: p.tz_min, confirm: p.confirm, fees: p.fees.clone(), ..Prefs::default() };
+                p = Prefs { tz_min: p.tz_min, confirm: p.confirm, fees: p.fees.clone(), risk: p.risk, ..Prefs::default() };
             }
         });
     });
@@ -665,6 +667,15 @@ fn trading(ui: &mut Ui, st: &Value, call: &mut Call) {
                 }
             });
         });
+    });
+    section(ui, l("Risk limits"), l("0 turns a limit off. Checked before every perp order Depth sends (order panel, hotkeys, chart, scaled, TWAP) and shown in the order preview; closes are never blocked. The price band compares a limit price with the venue's own mark price. The position limit counts the symbol on every venue, both sides."), |ui| {
+        number(ui, l("Maximum order value"), &mut p.risk.max_order_usdt, 0, "USDT");
+        row_sep(ui);
+        number(ui, l("Price band around the mark"), &mut p.risk.band_bps, 0, "bp");
+        row_sep(ui);
+        number(ui, l("Maximum position per symbol"), &mut p.risk.max_pos_usdt, 0, "USDT");
+        row_sep(ui);
+        number(ui, l("Daily loss stop"), &mut p.risk.daily_loss_usdt, 0, "USDT");
     });
     section(ui, l("Fees (your tier)"), l("Taker / maker in percent per fill. Used for fee estimates and routing; enter your VIP tier's rates."), |ui| {
         for (i, k) in tradable.iter().enumerate() {
