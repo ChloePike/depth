@@ -17,6 +17,7 @@ use sha2::Sha256;
 pub mod binance;
 pub mod bitget;
 pub mod bybit;
+pub mod deribit;
 pub mod gate;
 pub mod hyperliquid;
 pub mod kraken;
@@ -28,7 +29,8 @@ pub use binance::{is_pm, pm_account};
 use binance::{binance_at, binance_pm, binance_url, papi_url};
 use bybit::{bybit, bybit_url};
 
-pub const TRADABLE: [Exchange; 8] = KEY_VENUES;
+/// Perp order-entry venues (order form, routing, chart trading).
+pub const TRADABLE: [Exchange; 8] = [Exchange::Bybit, Exchange::Binance, Exchange::Okx, Exchange::Bitget, Exchange::Gate, Exchange::Kraken, Exchange::Hyperliquid, Exchange::Lighter];
 
 /// Venues whose trading has run against a real account. The others are implemented and
 /// unit-tested only: the order confirmation warns until they are verified.
@@ -59,8 +61,8 @@ fn needs_extra(ex: Exchange) -> bool { matches!(ex, Exchange::Okx | Exchange::Bi
 
 pub fn testnet() -> bool { std::env::var("T1_TESTNET").is_ok() }
 
-/// Venues whose keys can be configured (Settings > API Keys).
-pub const KEY_VENUES: [Exchange; 8] = [Exchange::Bybit, Exchange::Binance, Exchange::Okx, Exchange::Bitget, Exchange::Gate, Exchange::Kraken, Exchange::Hyperliquid, Exchange::Lighter];
+/// Venues whose keys can be configured (Settings > API Keys): the perp venues plus Deribit (options only).
+pub const KEY_VENUES: [Exchange; 9] = [Exchange::Bybit, Exchange::Binance, Exchange::Okx, Exchange::Bitget, Exchange::Gate, Exchange::Kraken, Exchange::Hyperliquid, Exchange::Lighter, Exchange::Deribit];
 
 fn kc_account(ex: Exchange, what: &str) -> String { format!("{}-{what}{}", venue(ex), if testnet() { "-testnet" } else { "" }) }
 
@@ -100,6 +102,7 @@ pub fn key_fields(ex: Exchange) -> (&'static str, &'static str, Option<&'static 
         Exchange::Okx | Exchange::Bitget => ("API key", "Secret", Some("Passphrase")),
         Exchange::Hyperliquid => ("Account address (0x...)", "API wallet private key", None),
         Exchange::Lighter => ("Account index:API key index", "API key private key", None),
+        Exchange::Deribit => ("Client ID", "Client secret", None),
         _ => ("API key", "Secret", None),
     }
 }
@@ -260,6 +263,9 @@ const RECV_WRITE: u32 = 5_000;
 // ---------------------------------------------------------------- venue-neutral API
 
 fn n(v: &Value) -> f64 { crate::num(v) }
+
+/// A number the venue may leave out: 0 when absent.
+fn z(v: &Value) -> f64 { crate::opt_num(v).unwrap_or(0.0) }
 
 /// A venue's client order id field: None when absent or empty.
 fn opt_id(v: &Value) -> Option<String> { v.as_str().filter(|s| !s.is_empty()).map(String::from) }
@@ -446,16 +452,20 @@ pub async fn place(ex: Exchange, k: &Keys, req: &OrderReq, r: &Rules, ref_px: f6
 
 // ---------------------------------------------------------------- options (position insurance)
 
-/// Venues where protection options can be bought. ponytail: Bybit only; Binance / OKX / Gate
-/// option order entry goes here behind the same two functions.
-pub const OPTION_VENUES: &[Exchange] = &[Exchange::Bybit];
+/// Venues where options can be ordered (chain ticket, protection). ponytail: Bybit and Deribit; Binance /
+/// OKX / Gate option order entry goes here behind the same functions.
+pub const OPTION_VENUES: &[Exchange] = &[Exchange::Bybit, Exchange::Deribit];
 
 /// A protection buy priced off the venue's real ask side: one IOC limit at the worst level the
 /// size needs, so it fills at once or not at all past that price.
 #[derive(Clone, Debug)]
 pub struct OptBuy { pub ex: Exchange, pub symbol: String, pub qty: f64, pub limit: f64, pub tick: f64, pub step: f64,
     /// size the book holds up to `limit` (< qty when the asks run out), its average price and cost (venue quote)
-    pub fill: f64, pub avg: f64, pub cost: f64 }
+    pub fill: f64, pub avg: f64, pub cost: f64,
+    /// USD per unit of the venue quote at plan time: 1 for USDT (Bybit), the book's index for a coin-quoted
+    /// (inverse) Deribit option. An inverse option pays max(K - S, 0) / S coin per coin at expiry, worth exactly
+    /// the USD intrinsic, so only the premium needs converting.
+    pub usd: f64 }
 
 /// Walk `asks` (best first) for `qty`: (limit = last level touched, filled qty, average price).
 pub fn sweep(asks: &[(f64, f64)], qty: f64) -> Option<(f64, f64, f64)> {
@@ -477,6 +487,7 @@ pub fn ceil_step(qty: f64, step: f64, min: f64) -> f64 { ((qty / step - 1e-9).ce
 pub async fn option_rules(ex: Exchange, symbol: &str) -> Result<Rules> {
     match ex {
         Exchange::Bybit => bybit::option_rules(symbol).await,
+        Exchange::Deribit => deribit::option_rules(symbol).await,
         _ => bail!("{ex:?}: option orders not supported yet"),
     }
 }
@@ -484,20 +495,43 @@ pub async fn option_rules(ex: Exchange, symbol: &str) -> Result<Rules> {
 pub async fn option_plan(ex: Exchange, symbol: &str, qty: f64) -> Result<OptBuy> {
     match ex {
         Exchange::Bybit => bybit::option_plan(symbol, qty).await,
+        Exchange::Deribit => deribit::option_plan(symbol, qty).await,
         _ => bail!("{ex:?}: option orders not supported yet"),
     }
 }
 
-/// A held option (bought protection). Symbol parts are parsed from the venue symbol
-/// (Bybit: BASE-DDMMMYY-STRIKE-P|C[-USDT]); prices in the venue quote.
+/// A held option (bought protection). Symbol parts are parsed from the venue symbol (`opt_parts`).
+/// avg / mark / upnl: USDT on Bybit, USD on Deribit (average_price_usd, mark x index, floating_profit_loss_usd).
 #[derive(Clone, Debug, PartialEq)]
 pub struct OptPos { pub ex: Exchange, pub symbol: String, pub base: String, pub expiry: String, pub strike: f64, pub call: bool,
-    pub side: Side, pub qty: f64, pub avg: f64, pub mark: f64, pub upnl: f64 }
+    pub side: Side, pub qty: f64, pub avg: f64, pub mark: f64, pub upnl: f64,
+    /// position greeks as the venue reports them (0 where it does not)
+    pub delta: f64, pub gamma: f64, pub vega: f64, pub theta: f64 }
+
+/// (base, expiry, strike, call) from an option symbol: Bybit BASE-DDMMMYY-STRIKE-P|C[-USDT], Deribit
+/// BASE-DDMMMYY-STRIKE-C|P and the linear BASE_USDC-DDMMMYY-STRIKE-C|P.
+pub fn opt_parts(s: &str) -> Option<(String, String, f64, bool)> {
+    let p: Vec<&str> = s.split('-').collect();
+    if p.len() < 4 { return None; }
+    Some((p[0].trim_end_matches("_USDC").into(), p[1].into(), p[2].parse().ok()?, p[3] == "C"))
+}
+
+/// Currency an option is priced in and its premium paid in: Deribit's inverse options in their coin,
+/// its linear ones in USDC, Bybit's in USDT.
+pub fn option_quote(ex: Exchange, symbol: &str) -> &'static str {
+    match (ex, symbol.split('-').next()) {
+        (Exchange::Deribit, Some("BTC")) => "BTC",
+        (Exchange::Deribit, Some("ETH")) => "ETH",
+        (Exchange::Deribit, _) => "USDC",
+        _ => "USDT",
+    }
+}
 
 /// Open option positions on a venue (empty where option trading is not built).
 pub async fn option_positions(ex: Exchange, k: &Keys) -> Result<Vec<OptPos>> {
     match ex {
         Exchange::Bybit => bybit::option_positions(k).await,
+        Exchange::Deribit => deribit::option_positions(k).await,
         _ => Ok(vec![]),
     }
 }
@@ -513,10 +547,13 @@ pub async fn buy_option(k: &Keys, p: &OptBuy) -> Result<String> {
 pub async fn option_order(k: &Keys, ex: Exchange, symbol: &str, side: Side, qty: f64, price: f64, tif: Tif, reduce_only: bool, r: &Rules) -> Result<String> {
     let q = fmt_step(qty, r.step, true);
     if q.parse::<f64>().unwrap_or(0.0) < r.min_qty.max(1e-12) { bail!("size {qty} below minimum {}", r.min_qty); }
-    let px = fmt_step(price, r.tick, false);
+    // Deribit's tick grows above a price (0.0005 from 0.005 BTC)
+    let tick = if ex == Exchange::Deribit { deribit::tick_for(symbol, r.tick, price) } else { r.tick };
+    let px = fmt_step(price, tick, false);
     if px.parse::<f64>().unwrap_or(0.0) <= 0.0 { bail!("invalid price {price}"); }
     match ex {
         Exchange::Bybit => bybit::option_order(k, symbol, side, &q, &px, tif, reduce_only).await,
+        Exchange::Deribit => deribit::option_order(k, symbol, side, &q, &px, tif, reduce_only).await,
         _ => bail!("{ex:?}: option orders not supported yet"),
     }
 }
@@ -524,6 +561,7 @@ pub async fn option_order(k: &Keys, ex: Exchange, symbol: &str, side: Side, qty:
 pub async fn option_cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {
     match ex {
         Exchange::Bybit => bybit::option_cancel(k, symbol, id).await,
+        Exchange::Deribit => deribit::option_cancel(k, id).await,
         _ => bail!("{ex:?}: option orders not supported yet"),
     }
 }
@@ -532,6 +570,7 @@ pub async fn option_cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Re
 pub async fn option_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
     match ex {
         Exchange::Bybit => bybit::option_orders(k).await,
+        Exchange::Deribit => deribit::option_orders(k).await,
         _ => Ok(vec![]),
     }
 }
@@ -656,6 +695,8 @@ pub async fn positions(ex: Exchange, k: &Keys) -> Result<Vec<Position>> {
         Exchange::Kraken => kraken::positions(k).await,
         Exchange::Hyperliquid => hyperliquid::positions(k).await,
         Exchange::Lighter => lighter::positions(k).await,
+        // options only: its positions are option_positions
+        Exchange::Deribit => Ok(vec![]),
         _ => bail!("{ex:?} trading not implemented"),
     }
 }
@@ -688,6 +729,7 @@ pub async fn open_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
         Exchange::Kraken => kraken::open_orders(k).await,
         Exchange::Hyperliquid => hyperliquid::open_orders(k).await,
         Exchange::Lighter => lighter::open_orders(k).await,
+        Exchange::Deribit => Ok(vec![]),
         _ => bail!("{ex:?} trading not implemented"),
     }
 }
@@ -702,6 +744,7 @@ pub async fn balance(ex: Exchange, k: &Keys) -> Result<Balance> {
         Exchange::Kraken => kraken::balance(k).await,
         Exchange::Hyperliquid => hyperliquid::balance(k).await,
         Exchange::Lighter => lighter::balance(k).await,
+        Exchange::Deribit => deribit::balance(k).await,
         _ => bail!("{ex:?} trading not implemented"),
     }
 }
@@ -738,6 +781,8 @@ pub enum AccEvent {
     Fill(Fill),
     /// option position upsert by symbol; qty 0 removes
     OptPos(OptPos),
+    /// option order upsert by id while `open`, removed otherwise
+    OptOrder { o: OpenOrder, open: bool },
     /// a spot order changed (placed, filled, cancelled): refetch spot orders and balances
     SpotDirty,
 }
@@ -755,6 +800,7 @@ pub async fn stream(ex: Exchange, k: Keys, tx: AccTx) {
         Exchange::Kraken => kraken::stream(k, tx).await,
         Exchange::Hyperliquid => hyperliquid::stream(k, tx).await,
         Exchange::Lighter => lighter::stream(k, tx).await,
+        Exchange::Deribit => deribit::stream(k, tx).await,
         _ => {}
     }
 }
@@ -993,6 +1039,23 @@ mod tests {
         assert_eq!((b["category"].as_str(), b["side"].as_str(), b["orderType"].as_str(), b["timeInForce"].as_str()), (Some("option"), Some("Sell"), Some("Limit"), Some("PostOnly")));
         assert!(b["reduceOnly"] == true && b["orderLinkId"].as_str().is_some_and(|s| s.starts_with("t1opt")));
         assert_eq!(spot::effect_str(spot::Effect::Borrow), "MARGIN_BUY");
+    }
+
+    #[test]
+    fn option_symbols_and_quotes() {
+        assert_eq!(opt_parts("HYPE-30OCT26-72-P-USDT"), Some(("HYPE".into(), "30OCT26".into(), 72.0, false)));
+        assert_eq!(opt_parts("BTC-25DEC26-105000-C"), Some(("BTC".into(), "25DEC26".into(), 105000.0, true)));
+        assert_eq!(opt_parts("BTCUSDT"), None);
+        // Deribit inverse and linear names
+        assert_eq!(opt_parts("ETH-6NOV26-2000-P"), Some(("ETH".into(), "6NOV26".into(), 2000.0, false)));
+        assert_eq!(opt_parts("BTC_USDC-26OCT26-72000-C"), Some(("BTC".into(), "26OCT26".into(), 72000.0, true)));
+        assert_eq!(opt_parts("BTC-PERPETUAL"), None);
+        assert_eq!((option_quote(Exchange::Deribit, "BTC-6NOV26-100000-P"), option_quote(Exchange::Deribit, "ETH-6NOV26-2000-P")), ("BTC", "ETH"));
+        assert_eq!(option_quote(Exchange::Deribit, "BTC_USDC-26OCT26-72000-C"), "USDC");
+        assert_eq!(option_quote(Exchange::Bybit, "BTC-25DEC26-105000-C-USDT"), "USDT");
+        // Deribit is a key venue (options) but never a perp venue
+        assert!(KEY_VENUES.contains(&Exchange::Deribit) && !TRADABLE.contains(&Exchange::Deribit));
+        assert!(TRADABLE.iter().all(|e| KEY_VENUES.contains(e)));
     }
 
     #[test]

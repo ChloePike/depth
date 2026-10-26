@@ -91,6 +91,7 @@ impl App {
         let opt_positions: Vec<Value> = acc.opts.iter().map(|o| json!({
             "ex": ex_name(o.ex), "symbol": o.symbol, "base": o.base, "expiry": o.expiry, "strike": o.strike, "call": o.call,
             "side": side_name(o.side), "qty": o.qty, "entry": o.avg, "mark": o.mark, "upnl": o.upnl, "option": true,
+            "delta": o.delta, "gamma": o.gamma, "vega": o.vega, "theta": o.theta, "quote": trade::option_quote(o.ex, &o.symbol),
         })).collect();
         let positions: Vec<Value> = acc.positions.iter().map(|p| {
             let f = funds.get(&(p.ex, p.symbol.clone()));

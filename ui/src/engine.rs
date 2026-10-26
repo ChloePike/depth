@@ -284,7 +284,7 @@ impl Engine {
     pub fn new() -> Self {
         Engine { agg: Default::default(), stats: Default::default(), base: String::new(), rt: None, tx: None, started: vec![], tfs: vec![], venue_tasks: HashMap::new(), tickers: Default::default(), funding: Default::default(), fng: Default::default(), signals: Default::default(), account: {
             let mut a = Account::default();
-            for ex in trade::TRADABLE { if let Some(k) = trade::keychain(ex) { a.keys.insert(ex, k); } }
+            for ex in trade::KEY_VENUES { if let Some(k) = trade::keychain(ex) { a.keys.insert(ex, k); } }
             Arc::new(Mutex::new(a))
         }, wants_options: Default::default(), wants_l3: Default::default(), l3_started: false, hl_l3: None, l3_flowscan: false, off: Default::default(), acct_rt: None, acct_tx: None, streams: HashMap::new(), key_tests: Default::default(), watch_rt: None, watching: HashMap::new(), watched: Default::default(), borrow: Default::default() }
     }
@@ -820,7 +820,7 @@ impl Engine {
         rt.spawn(async move {
             let Some(k) = account.lock().unwrap().keys.get(&p.ex).cloned() else { return };
             let res = trade::buy_option(&k, &p).await;
-            let what = format!("{:?} {} buy {} limit {} IOC", p.ex, p.symbol, p.qty, p.limit);
+            let what = format!("{:?} {} buy {} limit {} {} IOC", p.ex, p.symbol, p.qty, p.limit, trade::option_quote(p.ex, &p.symbol));
             let mut a = account.lock().unwrap();
             match res { Ok(id) => a.note(format!("OK {what} id {id}"), true), Err(e) => a.note(format!("FAIL {what}: {e:#}"), false) }
             ctx.request_repaint();
@@ -885,7 +885,7 @@ impl Engine {
                 Ok(r) => { account.lock().unwrap().rules.insert(key, r); trade::option_order(&k, ex, &symbol, side, qty, price, tif, reduce_only, &r).await }
                 Err(e) => Err(e),
             };
-            let what = format!("{ex:?} option {} {symbol} {qty} @ {price} {tif:?}{}", if side == depth::Side::Buy { "buy" } else { "sell" }, if reduce_only { " reduce-only" } else { "" });
+            let what = format!("{ex:?} option {} {symbol} {qty} @ {price} {} {tif:?}{}", if side == depth::Side::Buy { "buy" } else { "sell" }, trade::option_quote(ex, &symbol), if reduce_only { " reduce-only" } else { "" });
             { let mut a = account.lock().unwrap(); match res { Ok(id) => a.note(format!("OK {what} id {id}"), true), Err(e) => a.note(format!("FAIL {what}: {e:#}"), false) } }
             ctx.request_repaint();
             for wait in [500, 2_500] {
@@ -1226,6 +1226,8 @@ impl Engine {
             let mut a = self.account.lock().unwrap();
             a.positions.retain(|p| p.ex != ex);
             a.orders.retain(|o| o.ex != ex);
+            a.opts.retain(|p| p.ex != ex);
+            a.opt_orders.retain(|o| o.ex != ex);
             a.balances.remove(&ex);
             a.errors.remove(&ex);
             a.wallets.remove(&ex);
@@ -1594,6 +1596,11 @@ fn apply(a: &mut Account, ex: Exchange, ev: trade::AccEvent) -> bool {
             if p.qty > 0.0 { a.opts.push(p); }
             true
         }
+        E::OptOrder { o, open } => {
+            a.opt_orders.retain(|x| !(x.ex == ex && x.id == o.id));
+            if open { a.opt_orders.push(o); }
+            true
+        }
         E::Resync | E::BalanceDirty | E::SpotDirty => false,
     }
 }
@@ -1678,6 +1685,15 @@ mod tests {
         assert_eq!(a.orders[0].filled, 0.5);
         apply(&mut a, ex, E::OrderDone { id: "7".into() });
         assert!(a.orders.is_empty());
+        // option orders: upsert while open, removed when not; another venue's same id stays
+        let d = Exchange::Deribit;
+        let oo = OpenOrder { ex: d, symbol: "BTC-6NOV26-100000-P".into(), id: "ETH-1".into(), side: Side::Buy, price: 0.0125, qty: 1.0, filled: 0.0, kind: "limit".into(), tif: String::new(), reduce_only: false, ts: 0, pos: None, client_id: None, trigger: None };
+        a.opt_orders.push(OpenOrder { ex: Exchange::Bybit, ..oo.clone() });
+        apply(&mut a, d, E::OptOrder { o: oo.clone(), open: true });
+        apply(&mut a, d, E::OptOrder { o: OpenOrder { filled: 0.1, ..oo.clone() }, open: true });
+        assert_eq!(a.opt_orders.iter().filter(|x| x.ex == d).map(|x| x.filled).collect::<Vec<_>>(), vec![0.1]);
+        apply(&mut a, d, E::OptOrder { o: oo, open: false });
+        assert_eq!(a.opt_orders.iter().map(|x| x.ex).collect::<Vec<_>>(), vec![Exchange::Bybit]);
     }
 
     #[test]
