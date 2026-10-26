@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
-const WS: &str = "wss://www.deribit.com/ws/api/v2";
-const REST: &str = "https://www.deribit.com/api/v2";
+// T1_TESTNET: test.deribit.com, so the chain the ticket fills prices from is the book the orders hit
+fn ws_url() -> &'static str { if crate::trade::testnet() { "wss://test.deribit.com/ws/api/v2" } else { "wss://www.deribit.com/ws/api/v2" } }
 const PING: &str = r#"{"jsonrpc":"2.0","id":0,"method":"public/test"}"#;
 /// channels per (un)subscribe request (a request costs 3000 credits of a 50000 pool, so a full chain is 4 requests)
 const CHUNK: usize = 250;
@@ -38,7 +38,7 @@ async fn option_feed(e: Emit, base: String) {
     let live = Arc::new(Mutex::new(Vec::<String>::new()));
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let l = live.clone();
-    let spec = Spec::new("deribit option", WS).ping(Duration::from_secs(30), PING)
+    let spec = Spec::new("deribit option", ws_url()).ping(Duration::from_secs(30), PING)
         .dynamic(move || l.lock().unwrap().chunks(CHUNK).map(|c| rpc("public/subscribe", c)).collect(), rx);
     let (e2, mut last) = (e.clone(), HashMap::new());
     let stream = ws::run(spec, move |f| on_option(&e2, &mut last, f));
@@ -72,7 +72,7 @@ async fn option_feed(e: Emit, base: String) {
 
 /// public/get_instruments costs 10000 credits (1 per second allowed), hence the slow refresh
 async fn instruments(base: &str) -> anyhow::Result<Vec<Value>> {
-    let v = ws::get_json(&format!("{REST}/public/get_instruments?currency={base}&kind=option&expired=false")).await?;
+    let v = ws::get_json(&format!("{}/api/v2/public/get_instruments?currency={base}&kind=option&expired=false", crate::trade::deribit::url())).await?;
     v["result"].as_array().cloned().filter(|l| !l.is_empty()).ok_or_else(|| anyhow::anyhow!("no option instruments: {}", v["error"]))
 }
 

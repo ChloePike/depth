@@ -17,6 +17,7 @@ use sha2::Sha256;
 pub mod binance;
 pub mod bitget;
 pub mod bybit;
+pub mod deribit;
 pub mod gate;
 pub mod hyperliquid;
 pub mod kraken;
@@ -432,9 +433,9 @@ pub async fn place(ex: Exchange, k: &Keys, req: &OrderReq, r: &Rules, ref_px: f6
 
 // ---------------------------------------------------------------- options (position insurance)
 
-/// Venues where protection options can be bought. ponytail: Bybit only; Binance / OKX / Gate
-/// option order entry goes here behind the same two functions.
-pub const OPTION_VENUES: &[Exchange] = &[Exchange::Bybit];
+/// Venues where options can be ordered (chain ticket, protection). ponytail: Bybit and Deribit; Binance /
+/// OKX / Gate option order entry goes here behind the same functions.
+pub const OPTION_VENUES: &[Exchange] = &[Exchange::Bybit, Exchange::Deribit];
 
 /// A protection buy priced off the venue's real ask side: one IOC limit at the worst level the
 /// size needs, so it fills at once or not at all past that price.
@@ -467,6 +468,7 @@ pub fn ceil_step(qty: f64, step: f64, min: f64) -> f64 { ((qty / step - 1e-9).ce
 pub async fn option_rules(ex: Exchange, symbol: &str) -> Result<Rules> {
     match ex {
         Exchange::Bybit => bybit::option_rules(symbol).await,
+        Exchange::Deribit => deribit::option_rules(symbol).await,
         _ => bail!("{ex:?}: option orders not supported yet"),
     }
 }
@@ -474,6 +476,7 @@ pub async fn option_rules(ex: Exchange, symbol: &str) -> Result<Rules> {
 pub async fn option_plan(ex: Exchange, symbol: &str, qty: f64) -> Result<OptBuy> {
     match ex {
         Exchange::Bybit => bybit::option_plan(symbol, qty).await,
+        Exchange::Deribit => deribit::option_plan(symbol, qty).await,
         _ => bail!("{ex:?}: option orders not supported yet"),
     }
 }
@@ -509,6 +512,7 @@ pub fn option_quote(ex: Exchange, symbol: &str) -> &'static str {
 pub async fn option_positions(ex: Exchange, k: &Keys) -> Result<Vec<OptPos>> {
     match ex {
         Exchange::Bybit => bybit::option_positions(k).await,
+        Exchange::Deribit => deribit::option_positions(k).await,
         _ => Ok(vec![]),
     }
 }
@@ -524,10 +528,13 @@ pub async fn buy_option(k: &Keys, p: &OptBuy) -> Result<String> {
 pub async fn option_order(k: &Keys, ex: Exchange, symbol: &str, side: Side, qty: f64, price: f64, tif: Tif, reduce_only: bool, r: &Rules) -> Result<String> {
     let q = fmt_step(qty, r.step, true);
     if q.parse::<f64>().unwrap_or(0.0) < r.min_qty.max(1e-12) { bail!("size {qty} below minimum {}", r.min_qty); }
-    let px = fmt_step(price, r.tick, false);
+    // Deribit's tick grows above a price (0.0005 from 0.005 BTC)
+    let tick = if ex == Exchange::Deribit { deribit::tick_for(symbol, r.tick, price) } else { r.tick };
+    let px = fmt_step(price, tick, false);
     if px.parse::<f64>().unwrap_or(0.0) <= 0.0 { bail!("invalid price {price}"); }
     match ex {
         Exchange::Bybit => bybit::option_order(k, symbol, side, &q, &px, tif, reduce_only).await,
+        Exchange::Deribit => deribit::option_order(k, symbol, side, &q, &px, tif, reduce_only).await,
         _ => bail!("{ex:?}: option orders not supported yet"),
     }
 }
@@ -535,6 +542,7 @@ pub async fn option_order(k: &Keys, ex: Exchange, symbol: &str, side: Side, qty:
 pub async fn option_cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {
     match ex {
         Exchange::Bybit => bybit::option_cancel(k, symbol, id).await,
+        Exchange::Deribit => deribit::option_cancel(k, id).await,
         _ => bail!("{ex:?}: option orders not supported yet"),
     }
 }
@@ -543,6 +551,7 @@ pub async fn option_cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Re
 pub async fn option_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
     match ex {
         Exchange::Bybit => bybit::option_orders(k).await,
+        Exchange::Deribit => deribit::option_orders(k).await,
         _ => Ok(vec![]),
     }
 }
@@ -672,6 +681,7 @@ pub async fn balance(ex: Exchange, k: &Keys) -> Result<Balance> {
         Exchange::Kraken => kraken::balance(k).await,
         Exchange::Hyperliquid => hyperliquid::balance(k).await,
         Exchange::Lighter => lighter::balance(k).await,
+        Exchange::Deribit => deribit::balance(k).await,
         _ => bail!("{ex:?} trading not implemented"),
     }
 }
