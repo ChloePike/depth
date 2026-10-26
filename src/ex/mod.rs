@@ -3,6 +3,7 @@ pub mod binance;
 pub mod bitget;
 pub mod bybit;
 pub mod coinbase;
+pub mod deribit;
 pub mod gate;
 pub mod hyperliquid;
 pub mod kraken;
@@ -33,6 +34,7 @@ pub fn spawn(ex: Exchange, sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
         Exchange::Gate => gate::spawn(sub, tx),
         Exchange::Hyperliquid => hyperliquid::spawn(sub, tx),
         Exchange::Lighter => lighter::spawn(sub, tx),
+        Exchange::Deribit => deribit::spawn(sub, tx),
     }
 }
 
@@ -50,6 +52,7 @@ pub async fn history(ex: Exchange, sub: &Sub, minutes: usize) -> anyhow::Result<
         Exchange::Gate => gate::history(sub, minutes).await,
         Exchange::Hyperliquid => hyperliquid::history(sub, minutes).await,
         Exchange::Lighter => lighter::history(sub, minutes).await,
+        Exchange::Deribit => deribit::history(sub, minutes).await,
     }
 }
 
@@ -68,5 +71,6 @@ pub async fn history_tf(ex: Exchange, sub: &Sub, tf: u32, bars: usize) -> anyhow
         Exchange::Gate => gate::history_tf(sub, tf, bars).await,
         Exchange::Hyperliquid => hyperliquid::history_tf(sub, tf, bars).await,
         Exchange::Lighter => lighter::history_tf(sub, tf, bars).await,
+        Exchange::Deribit => deribit::history_tf(sub, tf, bars).await,
     }
 }

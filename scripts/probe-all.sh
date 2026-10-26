@@ -8,7 +8,7 @@ out=$(mktemp -d)
 cargo build -q --release --bin probe || exit 1
 bin=target/release/probe
 
-for ex in binance bybit bitget okx mexc coinbase kraken gate hyperliquid lighter; do
+for ex in binance bybit bitget okx mexc coinbase kraken gate hyperliquid lighter deribit; do
   for m in spot margin perp option; do
     t=$secs; [ "$m" = option ] && t=$((secs + 10))
     ( "$bin" "$ex" "$m" BTC USDT "$t" >"$out/$ex.$m" 2>&1; echo "exit=$?" >>"$out/$ex.$m" ) &
@@ -18,7 +18,7 @@ wait
 
 printf '%-12s %-8s %-6s %s\n' EXCHANGE MARKET RESULT EVENTS
 fail=0
-for ex in binance bybit bitget okx mexc coinbase kraken gate hyperliquid lighter; do
+for ex in binance bybit bitget okx mexc coinbase kraken gate hyperliquid lighter deribit; do
   for m in spot margin perp option; do
     f="$out/$ex.$m"
     code=$(sed -n 's/^exit=//p' "$f")
@@ -31,18 +31,19 @@ done
 
 # Startup REST history (spot + perp); n/a where the venue has no such market.
 cargo build -q --release --bin hist || exit 1
-for ex in binance bybit bitget okx mexc coinbase kraken gate hyperliquid lighter; do
+for ex in binance bybit bitget okx mexc coinbase kraken gate hyperliquid lighter deribit; do
   for m in spot perp; do
     ( target/release/hist "$ex" "$m" BTC >"$out/h.$ex.$m" 2>&1; echo "exit=$?" >>"$out/h.$ex.$m" ) &
   done
 done
 wait
 printf '\n%-12s %-8s %-6s %s\n' EXCHANGE HISTORY RESULT SERIES
-for ex in binance bybit bitget okx mexc coinbase kraken gate hyperliquid lighter; do
+for ex in binance bybit bitget okx mexc coinbase kraken gate hyperliquid lighter deribit; do
   for m in spot perp; do
     f="$out/h.$ex.$m"
     r=OK; grep -q '^OK' "$f" || r=FAIL
     [ "$ex.$m" = lighter.spot ] && r=n/a
+    [ "$ex" = deribit ] && r=n/a # options only so far
     ser=$(awk '/^(klines|oi|funding|long\/short|taker) /{printf "%s:%s ", $1, $2}' "$f")
     printf '%-12s %-8s %-6s %s\n' "$ex" "$m" "$r" "$ser"
     [ "$r" = FAIL ] && { fail=1; grep '^FAIL' "$f" | sed 's/^/             /'; }
