@@ -261,20 +261,58 @@ pub async fn positions(k: &Keys) -> Result<Vec<Position>> {
     }).collect())
 }
 
-pub async fn open_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
-    let ex = Exchange::Binance;
-    let v = binance(k, reqwest::Method::GET, "/fapi/v1/openOrders", &[]).await?;
-    let mut out: Vec<OpenOrder> = v.as_array().into_iter().flatten().map(|o| OpenOrder {
-        ex, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].to_string(),
+/// One REST order row (`openOrders`, `order` query).
+fn binance_order(o: &Value) -> OpenOrder {
+    OpenOrder {
+        ex: Exchange::Binance, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].to_string(),
         side: if o["side"] == "SELL" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["origQty"]), filled: n(&o["executedQty"]),
         tif: o["timeInForce"].as_str().unwrap_or_default().into(), kind: o["type"].as_str().unwrap_or_default().into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: o["time"].as_i64().unwrap_or(0),
         pos: match o["positionSide"].as_str() { Some("LONG") => Some(Side::Buy), Some("SHORT") => Some(Side::Sell), _ => None },
         client_id: opt_id(&o["clientOrderId"]), trigger: None,
-    }).collect();
+    }
+}
+
+pub async fn open_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
+    let v = binance(k, reqwest::Method::GET, "/fapi/v1/openOrders", &[]).await?;
+    let mut out: Vec<OpenOrder> = v.as_array().into_iter().flatten().map(binance_order).collect();
     // conditional entries and trailing stops live in the algo service (its TP/SL rows go to tpsl::list,
     // which shares this fetch)
     out.extend(tpsl::binance_algo_rows(k).await?.iter().filter_map(tpsl::binance_algo_order));
     Ok(out)
+}
+
+/// A queried order (`/fapi/v1/order`): open while NEW / PARTIALLY_FILLED.
+fn binance_found(o: &Value) -> Found {
+    match o["status"].as_str() {
+        Some("NEW" | "PARTIALLY_FILLED") => Found::Open(binance_order(o)),
+        s => Found::Done { id: o["orderId"].to_string(), filled: crate::opt_num(&o["executedQty"]).unwrap_or(0.0), status: s.unwrap_or_default().into() },
+    }
+}
+
+/// A queried algo order (`algoOrder`): open while NEW.
+fn binance_algo_found(o: &Value) -> Option<Found> {
+    Some(match o["algoStatus"].as_str() {
+        Some("NEW") => Found::Open(tpsl::binance_algo_as_order(o)?),
+        s => Found::Done { id: o["algoId"].to_string(), filled: crate::opt_num(&o["executedQty"]).unwrap_or(0.0), status: s.unwrap_or_default().into() },
+    })
+}
+
+/// Our order by client id, one call each, weight 1: `/fapi/v1/order?origClientOrderId=` (PM
+/// /papi/v1/um/order); when that does not know it (-2013) the algo service by clientAlgoId
+/// (conditional and trailing orders; PM /papi/v1/um/algo/algoOrder). Any other answer is an error.
+pub async fn order_by_client_id(k: &Keys, symbol: &str, cid: &str) -> Result<Option<Found>> {
+    let unknown = |e: &anyhow::Error| format!("{e:#}").contains("(-2013)");
+    match binance(k, reqwest::Method::GET, "/fapi/v1/order", &[("symbol", symbol.into()), ("origClientOrderId", cid.into())]).await {
+        Ok(v) => return Ok(Some(binance_found(&v))),
+        Err(e) if !unknown(&e) => return Err(e),
+        Err(_) => {}
+    }
+    let (base, path) = if binance_pm(k).await? { (papi_url(), "/papi/v1/um/algo/algoOrder") } else { (binance_url(), "/fapi/v1/algoOrder") };
+    match binance_at(k, base, reqwest::Method::GET, path, &[("clientAlgoId", cid.into())]).await {
+        Ok(v) => Ok(binance_algo_found(&v)),
+        Err(e) if unknown(&e) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn balance(k: &Keys) -> Result<Balance> {
@@ -601,6 +639,28 @@ mod tests {
         assert_eq!((get(&w, "side").as_deref(), get(&w, "reduceOnly").as_deref(), get(&w, "positionSide")), (Some("BUY"), Some("true"), None));
         assert_eq!(native_twap(Exchange::Bybit), None);
         assert_eq!(native_twap(Exchange::Binance), Some((5, 1440)));
+    }
+
+    #[test]
+    fn found_by_client_id() {
+        // GET /fapi/v1/order (docs fields): FILLED is done with its filled size, NEW is open
+        let q: Value = serde_json::from_str(r#"{"avgPrice":"0.00000","clientOrderId":"t1m19a2","cumQuote":"0","executedQty":"0.004","orderId":1917641,"origQty":"0.40",
+            "origType":"LIMIT","price":"95000","reduceOnly":false,"side":"BUY","positionSide":"BOTH","status":"FILLED","stopPrice":"0","closePosition":false,"symbol":"BTCUSDT",
+            "time":1579276756075,"timeInForce":"GTC","type":"LIMIT","updateTime":1579276756075,"workingType":"CONTRACT_PRICE","priceProtect":false}"#).unwrap();
+        let Found::Done { id, filled, status } = binance_found(&q) else { panic!("done") };
+        assert_eq!((id.as_str(), filled, status.as_str()), ("1917641", 0.004, "FILLED"));
+        let mut open = q.clone();
+        open["status"] = "PARTIALLY_FILLED".into();
+        let Found::Open(o) = binance_found(&open) else { panic!("open") };
+        assert_eq!((o.id.as_str(), o.client_id.as_deref(), o.qty, o.filled, o.trigger), ("1917641", Some("t1m19a2"), 0.4, 0.004, None));
+        // algo query: a reducing stop is still found as an open order (not filtered as TP/SL), a cancelled one is done
+        let a = json!({"algoId": 2146760, "clientAlgoId": "t1m19a3", "algoType": "CONDITIONAL", "orderType": "STOP_MARKET", "symbol": "BTCUSDT", "side": "SELL",
+            "positionSide": "BOTH", "quantity": "0.01", "algoStatus": "NEW", "triggerPrice": "90000", "price": "0", "reduceOnly": true, "createTime": 1750485492076u64});
+        let Some(Found::Open(o)) = binance_algo_found(&a) else { panic!("open algo") };
+        assert_eq!((o.id.as_str(), o.kind.as_str(), o.trigger, o.reduce_only), ("2146760", "stop_market", Some(90000.0), true));
+        let mut c = a.clone();
+        c["algoStatus"] = "CANCELED".into();
+        assert!(matches!(binance_algo_found(&c), Some(Found::Done { ref id, ref status, .. }) if id == "2146760" && status == "CANCELED"));
     }
 
     #[test]

@@ -289,6 +289,22 @@ pub async fn open_orders(k: &Keys) -> Result<Vec<OpenOrder>> {
     Ok(rows.iter().filter(|o| tpsl::bybit_row(o).is_none()).map(bybit_order).collect())
 }
 
+/// An order row found by orderLinkId: open while New / PartiallyFilled / Untriggered.
+fn bybit_found(o: &Value) -> Found {
+    if matches!(o["orderStatus"].as_str(), Some("New" | "PartiallyFilled" | "Untriggered")) { return Found::Open(bybit_order(o)); }
+    Found::Done { id: o["orderId"].as_str().unwrap_or_default().into(), filled: crate::opt_num(&o["cumExecQty"]).unwrap_or(0.0), status: o["orderStatus"].as_str().unwrap_or_default().into() }
+}
+
+/// Our order by orderLinkId, one call each (50/s per UID): realtime answers for open and the last
+/// 500 closed orders (openOnly does not apply to an orderLinkId query), then history (7 days).
+pub async fn order_by_client_id(k: &Keys, symbol: &str, cid: &str) -> Result<Option<Found>> {
+    for path in ["/v5/order/realtime", "/v5/order/history"] {
+        let v = bybit(k, true, path, json!({"category": "linear", "symbol": symbol, "orderLinkId": cid})).await?;
+        if let Some(o) = v["list"].as_array().and_then(|l| l.first()) { return Ok(Some(bybit_found(o))); }
+    }
+    Ok(None)
+}
+
 /// Unified account totals from a wallet row (REST `wallet-balance` list[0] and the `wallet` push share the fields).
 fn balance_of(a: &Value) -> Balance {
     Balance { equity: n(&a["totalEquity"]), available: n(&a["totalAvailableBalance"]), uni_mmr: None, mm_rate: crate::opt_num(&a["accountMMRate"]),
@@ -593,6 +609,23 @@ mod tests {
         assert_eq!(ids(true), ["trail"]);
         // the resting-order call failed: its plain rows go one by one too
         assert_eq!(ids(false), ["trail", "filled"]);
+    }
+
+    #[test]
+    fn found_by_order_link_id() {
+        // /v5/order/realtime rows (docs fields): open while New, done with its status and fill otherwise
+        let row = json!({"orderId": "fd4300ae", "orderLinkId": "t1a2l0", "symbol": "ETHUSDT", "price": "1600.00", "qty": "0.10", "side": "Buy", "positionIdx": 1,
+            "orderStatus": "New", "orderType": "Limit", "timeInForce": "GTC", "cumExecQty": "0.00", "reduceOnly": false, "triggerPrice": "", "createdTime": "1684738540559"});
+        let Found::Open(o) = bybit_found(&row) else { panic!("open") };
+        assert_eq!((o.id.as_str(), o.client_id.as_deref(), o.pos, o.price, o.trigger), ("fd4300ae", Some("t1a2l0"), Some(Side::Buy), 1600.0, None));
+        let mut done = row.clone();
+        done["orderStatus"] = "PartiallyFilledCanceled".into();
+        done["cumExecQty"] = "0.04".into();
+        let Found::Done { id, filled, status } = bybit_found(&done) else { panic!("done") };
+        assert_eq!((id.as_str(), filled, status.as_str()), ("fd4300ae", 0.04, "PartiallyFilledCanceled"));
+        let mut cond = row.clone();
+        cond["orderStatus"] = "Untriggered".into();
+        assert!(matches!(bybit_found(&cond), Found::Open(_)));
     }
 
     #[test]

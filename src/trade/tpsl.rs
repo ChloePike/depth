@@ -150,7 +150,13 @@ pub fn binance_row(o: &Value) -> Option<TpSl> {
 /// `trigger` is always Some on these rows (trailing: the activation price, 0 when none): that is
 /// what routes their cancel to the algo endpoint. None for TP/SL rows (`binance_row`).
 pub fn binance_algo_order(o: &Value) -> Option<OpenOrder> {
-    if o["algoType"] != "CONDITIONAL" || binance_row(o).is_some() { return None; }
+    if binance_row(o).is_some() { return None; }
+    binance_algo_as_order(o)
+}
+
+/// Any conditional algo row as an order row, TP/SL included (a lookup by client id).
+pub(super) fn binance_algo_as_order(o: &Value) -> Option<OpenOrder> {
+    if o["algoType"] != "CONDITIONAL" { return None; }
     let kind = o["orderType"].as_str().filter(|k| !k.is_empty())?.to_lowercase();
     let px = |f: &str| crate::opt_num(&o[f]).filter(|x| *x > 0.0);
     let trigger = if kind == "trailing_stop_market" { px("activatePrice").or(px("triggerPrice")) } else { px("triggerPrice") };

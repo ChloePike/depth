@@ -594,6 +594,35 @@ pub async fn cancel_all(ex: Exchange, k: &Keys, orders: &[OpenOrder]) -> Result<
     }
 }
 
+/// An order found by our client id: still open, or finished with the venue's status (Filled,
+/// Cancelled, Rejected, ...; FILLED, CANCELED, EXPIRED, ...) and how much of it filled.
+#[derive(Clone, Debug)]
+pub enum Found { Open(OpenOrder), Done { id: String, filled: f64, status: String } }
+
+/// One-shot lookup of an order by our client id, after a request whose outcome is unknown
+/// (`is_unknown_outcome`): Some when the venue knows the order, None when it does not. Never looped.
+/// Venues without a lookup answer an error rather than None, which would read as "not placed".
+pub async fn order_by_client_id(ex: Exchange, k: &Keys, symbol: &str, client_id: &str) -> Result<Option<Found>> {
+    match ex {
+        Exchange::Bybit => bybit::order_by_client_id(k, symbol, client_id).await,
+        Exchange::Binance => binance::order_by_client_id(k, symbol, client_id).await,
+        _ => bail!("{ex:?}: no order lookup by client id yet; check the venue for {client_id}"),
+    }
+}
+
+/// Whether a failed order request may still have reached the venue, so the order may be live: a
+/// timeout, a transport failure once connected, a response that could not be read, a 2xx / 5xx
+/// answer that is not JSON (Bybit), one without a venue code (Binance), or the venues' own
+/// "status unknown" codes (Binance -1006 / -1007, Bybit 10000 / 10016). A venue refusal, a failed
+/// connect or a paused host is a plain failure: nothing was placed. Unknown means look it up by
+/// client id, never re-send blindly.
+pub fn is_unknown_outcome(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| match c.downcast_ref::<reqwest::Error>() {
+        Some(r) => r.is_timeout() || (!r.is_connect() && (r.is_request() || r.is_body() || r.is_decode())),
+        None => { let s = c.to_string(); ["(-1006)", "(-1007)", "(10000)", "(10016)", ": HTTP 2", ": HTTP 5", ": ? (null)"].iter().any(|m| s.contains(m)) }
+    })
+}
+
 pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {
     match ex {
         Exchange::Bybit => { bybit::cancel(k, symbol, id).await?; }
@@ -1168,6 +1197,46 @@ mod tests {
         let other = Position { ex: Exchange::Bybit, ..pos(Side::Buy, 1.0) };
         assert_eq!(merge_snapshot(&[other], vec![blank(Side::Buy, 1.0)])[0].mark, 0.0);
         assert!(merge_snapshot(&[pos(Side::Buy, 1.0)], vec![]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_outcome_only_when_the_order_may_be_live() {
+        use std::io::{Read, Write};
+        // venue refusals, a paused host and a refused connection: nothing was placed
+        for e in ["binance /fapi/v1/order: Margin is insufficient. (-2019)", "bybit /v5/order/create: params error (10001)", "bybit /v5/order/create: HTTP 403: <html>",
+                  "api.bybit.com: rate limited, paused for 30s more"] {
+            assert!(!is_unknown_outcome(&anyhow!("{e}")), "{e}");
+        }
+        // the venues' own "status unknown" answers and answers without a venue verdict
+        for e in ["binance /fapi/v1/order: Timeout waiting for response from backend server. Send status unknown; execution status unknown. (-1007)",
+                  "bybit /v5/order/create: Server Timeout (10000)", "bybit /v5/order/create: HTTP 502: <html>bad gateway</html>",
+                  "bybit /v5/order/create: HTTP 200: <html>gateway</html>", "binance /fapi/v1/order: ? (null)"] {
+            assert!(is_unknown_outcome(&anyhow!("{e}")), "{e}");
+            assert!(is_unknown_outcome(&anyhow!("{e}").context("place leg 2")), "context on top: {e}");
+        }
+        let c = reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_millis(300)).build().unwrap();
+        // nothing listens: connect refused
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", closed.local_addr().unwrap());
+        drop(closed);
+        let e: anyhow::Error = c.get(&url).send().await.unwrap_err().into();
+        assert!(!is_unknown_outcome(&e), "{e:#}");
+        // connected, no answer in time: the venue may have the order
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let e: anyhow::Error = c.get(format!("http://{}/", silent.local_addr().unwrap())).send().await.unwrap_err().into();
+        assert!(is_unknown_outcome(&e), "{e:#}");
+        // the answer breaks off mid-body
+        let cut = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = cut.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = cut.accept().unwrap();
+            let _ = s.read(&mut [0u8; 1024]);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"orderId\"");
+        });
+        let r = c.get(format!("http://{addr}/")).send().await.unwrap();
+        let e: anyhow::Error = r.text().await.unwrap_err().into();
+        assert!(is_unknown_outcome(&e), "{e:#}");
+        drop(silent);
     }
 
     #[test]
