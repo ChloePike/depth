@@ -1369,9 +1369,14 @@ impl Engine {
             let Some(k) = account.lock().unwrap().keys.get(&p.ex).cloned() else { return };
             let res = trade::buy_option(&k, &p).await;
             let what = format!("{:?} {} buy {} limit {} {} IOC", p.ex, p.symbol, p.qty, p.limit, trade::option_quote(p.ex, &p.symbol));
-            let mut a = account.lock().unwrap();
-            match res { Ok(id) => a.note(format!("OK {what} id {id}"), true), Err(e) => a.note(format!("FAIL {what}: {e:#}"), false) }
+            let unknown = note_opt(&mut account.lock().unwrap(), &what, res);
             ctx.request_repaint();
+            // the IOC may have filled: the held options once more, so the buy is not repeated blind
+            if unknown {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                refresh_opts(&account, p.ex).await;
+                ctx.request_repaint();
+            }
         });
     }
 
@@ -1434,7 +1439,7 @@ impl Engine {
                 Err(e) => Err(e),
             };
             let what = format!("{ex:?} option {} {symbol} {qty} @ {price} {} {tif:?}{}", if side == depth::Side::Buy { "buy" } else { "sell" }, trade::option_quote(ex, &symbol), if reduce_only { " reduce-only" } else { "" });
-            { let mut a = account.lock().unwrap(); match res { Ok(id) => a.note(format!("OK {what} id {id}"), true), Err(e) => a.note(format!("FAIL {what}: {e:#}"), false) } }
+            note_opt(&mut account.lock().unwrap(), &what, res);
             ctx.request_repaint();
             for wait in [500, 2_500] {
                 tokio::time::sleep(Duration::from_millis(wait)).await;
@@ -2005,6 +2010,16 @@ async fn refresh_spot(account: &Arc<Mutex<Account>>, ex: Exchange) {
     match b { Ok(b) => { a.margin_bal.insert(ex, b); } Err(e) => depth::sys::append_log("trade.log", &format!("{ex:?} margin balances: {e:#}\n")) }
 }
 
+/// An option order's outcome in the order log; true when its answer was lost (`is_unknown_outcome`):
+/// it may have filled, so it reads UNKNOWN, never FAIL, and the held options are read again.
+fn note_opt(a: &mut Account, what: &str, res: anyhow::Result<String>) -> bool {
+    match res {
+        Ok(id) => { a.note(format!("OK {what} id {id}"), true); false }
+        Err(e) if trade::is_unknown_outcome(&e) => { a.note(format!("UNKNOWN {what}: no answer read ({e:#}): check held options before retrying"), false); true }
+        Err(e) => { a.note(format!("FAIL {what}: {e:#}"), false); false }
+    }
+}
+
 /// REST snapshot of one venue's option orders and positions (option venues only).
 async fn refresh_opts(account: &Arc<Mutex<Account>>, ex: Exchange) {
     if !trade::OPTION_VENUES.contains(&ex) { return; }
@@ -2418,6 +2433,16 @@ mod tests {
         assert!(a.tpsl_wait[0].armed && !a.tpsl_wait[0].restored);
         wait_touch(&mut a, ex, &E::Order(order("55", Some("t1al0"), 1.0)), 13);
         assert_eq!(fired(&settle(&mut a, 14)), 1);
+    }
+
+    #[test]
+    fn lost_option_answers_read_unknown() {
+        let mut a = Account::default();
+        assert!(!note_opt(&mut a, "x", Ok("1".into())) && a.log.back().unwrap().1 == "OK x id 1");
+        assert!(!note_opt(&mut a, "x", Err(anyhow::anyhow!("deribit private/buy: not_enough_funds (10009)"))) && a.log.back().unwrap().1.starts_with("FAIL x"));
+        // a reply that could not be read: it may have filled
+        assert!(note_opt(&mut a, "x", Err(anyhow::anyhow!("deribit private/buy: HTTP 502: <html>"))));
+        assert!(a.log.back().is_some_and(|l| l.1.starts_with("UNKNOWN x") && l.1.ends_with("check held options before retrying") && !l.2));
     }
 
     #[test]
