@@ -2,6 +2,9 @@
 use t1_ui as ui;
 
 fn main() -> eframe::Result<()> {
+    depth::sys::install_panic_log();
+    // a second Depth would fight the first over the account streams and settings.json (T1_MULTI=1 skips it)
+    if !ui::single_instance() { return Ok(()); }
     #[cfg(feature = "hotpatch")]
     dioxus_devtools::connect_subsecond();
     // opens where it was closed (settings.json); first launch: the default size, placed by the OS

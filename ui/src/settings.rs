@@ -37,6 +37,7 @@ pub struct Prefs {
     pub proxy: ProxyMode,
     pub proxy_url: String,
     /// keyboard shortcuts (hotkeys::complete fills in actions added later)
+    #[serde(deserialize_with = "super::lenient_vec")]
     pub hotkeys: Vec<super::hotkeys::Binding>,
     /// order size of the trading hotkeys, USDT notional (0 = trading hotkeys off)
     pub hot_usdt: f64,
@@ -335,7 +336,8 @@ impl SettingsView {
                         .font(prop_m(12.5)).color(fg())).wrap());
                 });
             });
-        footer(ui, l("Stored in the macOS Keychain (service \"depth\"), never written to a file."));
+        footer(ui, l(os("Stored in the macOS Keychain (service \"depth\"), never written to a file.", "Stored in the Windows Credential Manager (target \"depth\"), never written to a file.",
+            "Stored in the system keyring (libsecret, service \"depth\"), never written to a file.")));
         let keys = st["keys"].as_array().cloned().unwrap_or_default();
         section(ui, l("Venues"), "", |ui| {
             for (i, k) in keys.iter().enumerate() {
@@ -419,7 +421,7 @@ impl SettingsView {
             ui.add_space(4.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let ok = !self.key.trim().is_empty() && !self.secret.is_empty() && !(needs_extra && self.extra.is_empty());
-                if kit::button(ui, l("Save to Keychain"), kit::Look::Fill(accent()), kit::H, None, ok).clicked() { save = true; }
+                if kit::button(ui, l(os("Save to Keychain", "Save", "Save")), kit::Look::Fill(accent()), kit::H, None, ok).clicked() { save = true; }
                 if kit::button(ui, l("Cancel"), kit::Look::Secondary, kit::H, None, true).clicked() { cancel = true; }
             });
         });
@@ -443,7 +445,8 @@ impl SettingsView {
             ui.vertical_centered(|ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
                 ui.label(RichText::new(l("Remove API key?")).font(prop_s(13.5)).color(fg_strong()));
-                ui.add(egui::Label::new(RichText::new(format!("{ex}: {}", l("The key is deleted from the Keychain and the venue disconnects from your account."))).font(prop(12.0)).color(mu())).wrap());
+                ui.add(egui::Label::new(RichText::new(format!("{ex}: {}", l(os("The key is deleted from the Keychain and the venue disconnects from your account.", "The key is deleted from the Credential Manager and the venue disconnects from your account.",
+                    "The key is deleted from the system keyring and the venue disconnects from your account.")))).font(prop(12.0)).color(mu())).wrap());
                 ui.add_space(6.0);
             });
             ui.columns(2, |c| {
@@ -465,7 +468,8 @@ impl SettingsView {
             let img = decode_png(include_bytes!("../../assets/appicon/icon-1024.png")).unwrap_or_default();
             ui.ctx().load_texture("appicon", img, egui::TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..egui::TextureOptions::LINEAR })
         }).clone();
-        section(ui, "", l("Local multi-exchange trading terminal. Runs entirely on this Mac: no relay, no server."), |ui| {
+        section(ui, "", l(os("Local multi-exchange trading terminal. Runs entirely on this Mac: no relay, no server.", "Local multi-exchange trading terminal. Runs entirely on this PC: no relay, no server.",
+            "Local multi-exchange trading terminal. Runs entirely on this computer: no relay, no server.")), |ui| {
             ui.horizontal(|ui| {
                 ui.set_min_height(76.0);
                 ui.add(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(56.0, 56.0)));
@@ -491,7 +495,7 @@ impl SettingsView {
                     ui.painter().line_segment([c - egui::vec2(3.5, 0.0), c + egui::vec2(3.5, 0.0)], s);
                     ui.painter().line_segment([c + egui::vec2(0.5, -3.0), c + egui::vec2(3.5, 0.0)], s);
                     ui.painter().line_segment([c + egui::vec2(0.5, 3.0), c + egui::vec2(3.5, 0.0)], s);
-                    if resp.on_hover_text(l("Show in Finder")).clicked() { reveal(&p); }
+                    if resp.on_hover_text(l(os("Show in Finder", "Show in Explorer", "Show in file manager"))).clicked() { reveal(&p); }
                     let home = std::env::var("HOME").unwrap_or_default();
                     let mut s = p.display().to_string();
                     if !home.is_empty() && s.starts_with(&home) { s = format!("~{}", &s[home.len()..]); }
@@ -499,9 +503,14 @@ impl SettingsView {
                 });
                 row_sep(ui);
             }
-            row(ui, l("API keys"), |ui| { ui.label(RichText::new(l("macOS Keychain (depth)")).font(prop(12.5)).color(mu())); });
+            row(ui, l("API keys"), |ui| { ui.label(RichText::new(l(os("macOS Keychain (depth)", "Windows Credential Manager (depth)", "System keyring (depth)"))).font(prop(12.5)).color(mu())); });
         });
     }
+}
+
+/// The wording for this OS: macOS / Windows / the rest (each a full sentence for `l`, never pieced together).
+fn os(mac: &'static str, win: &'static str, other: &'static str) -> &'static str {
+    if cfg!(target_os = "macos") { mac } else if cfg!(windows) { win } else { other }
 }
 
 /// Reveal `p` in the file manager.
@@ -520,6 +529,13 @@ fn reveal(p: &std::path::Path) {
 const TZS: [i32; 30] = [-600, -540, -480, -420, -360, -300, -240, -180, -120, -60, 0, 60, 120, 180, 210, 240, 270, 300, 330, 345, 360, 390, 420, 480, 525, 540, 570, 600, 660, 720];
 
 fn prefs(st: &Value) -> Prefs { serde_json::from_value(st["prefs"].clone()).unwrap_or_default() }
+
+/// `cur` with the keys of `patch` replaced: the native hosts know only some of the prefs and send just those.
+pub(crate) fn merge_prefs(cur: &Prefs, patch: &Value) -> Result<Prefs, String> {
+    let mut base = serde_json::to_value(cur).map_err(|e| e.to_string())?;
+    for (k, v) in patch.as_object().ok_or("prefs must be an object")? { base[k] = v.clone(); }
+    serde_json::from_value(base).map_err(|e| e.to_string())
+}
 
 fn set_prefs(before: &Prefs, p: &Prefs, call: &mut Call) {
     if p != before { let _ = call(json!({"op": "set_prefs", "prefs": p})); }
@@ -795,4 +811,19 @@ fn warn_triangle(p: &egui::Painter, r: egui::Rect) {
     p.add(egui::Shape::convex_polygon(vec![c + egui::vec2(0.0, -h), c + egui::vec2(h, h * 0.8), c + egui::vec2(-h, h * 0.8)], WARN, egui::Stroke::NONE));
     p.line_segment([c + egui::vec2(0.0, -h * 0.35), c + egui::vec2(0.0, h * 0.25)], egui::Stroke::new(1.6, Color32::WHITE));
     p.circle_filled(c + egui::vec2(0.0, h * 0.55), 1.0, Color32::WHITE);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_prefs_patch_keeps_the_rest() {
+        let cur = Prefs { proxy: ProxyMode::Custom, fill_sound: "none".into(), ..Default::default() };
+        let m = merge_prefs(&cur, &json!({"theme": "dark", "radius": 5})).unwrap();
+        assert!(m.theme == ThemePref::Dark && m.radius == 5);
+        assert!(m.hotkeys == cur.hotkeys && m.proxy == ProxyMode::Custom && m.fill_sound == "none");
+        // a value that does not parse is refused whole
+        assert!(merge_prefs(&cur, &json!({"zoom": "x"})).is_err() && merge_prefs(&cur, &json!([1])).is_err());
+    }
 }

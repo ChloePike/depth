@@ -59,14 +59,16 @@ async fn main() {
     if lag.1 > 0 { println!("avg exchange->local lag: {} ms", lag.0 / lag.1 as i64); }
 
     let required: &[&str] = match market {
-        Market::Spot | Market::Margin => &["trade", "book", "bbo"],
+        Market::Spot => &["trade", "book", "bbo"],
+        // margin shares the spot book: its connectors only poll borrow rates (none at all where the venue publishes none: exit 2)
+        Market::Margin => &["borrow"],
         Market::Perp => &["trade", "book", "bbo", "mark"],
         Market::Option => &["greeks", "mark", "optinfo"],
     };
     for r in required { if !count.contains_key(r) { bad.push(format!("missing {r}")); } }
 
     // Book top must sit near the BBO and trades near the book (single-symbol markets).
-    if market != Market::Option {
+    if !matches!(market, Market::Option | Market::Margin) {
         if let (Some(b), Some(Msg { ev: Event::Bbo { bid, ask, .. }, symbol, .. })) = (books.values().next(), last.get("bbo")) {
             let mid = (bid + ask) / 2.0;
             if let (Some(bb), Some(ba)) = (b.best_bid(), b.best_ask()) {

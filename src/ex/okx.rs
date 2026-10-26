@@ -21,14 +21,11 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
     let e = Emit { ex: Exchange::Okx, market: sub.market, tx };
     let (b, q) = (sub.base.to_uppercase(), sub.quote.to_uppercase());
     match sub.market {
-        Market::Spot | Market::Margin => {
+        Market::Spot => vec![tokio::spawn(book_feed(e, format!("{b}-{q}"), 1.0))],
+        // the margin book is the spot book (Spot already streams it): only the borrow rates are new
+        Market::Margin => {
             let sym = format!("{b}-{q}");
-            let mut v = vec![tokio::spawn(book_feed(e.clone(), sym.clone(), 1.0))];
-            if sub.market == Market::Margin {
-                v.push(tokio::spawn(ws::poll("okx borrow".into(), Duration::from_secs(300),
-                    move || poll_borrow(e.clone(), sym.clone(), [b.clone(), q.clone()]))));
-            }
-            v
+            vec![tokio::spawn(ws::poll("okx borrow".into(), Duration::from_secs(300), move || poll_borrow(e.clone(), sym.clone(), [b.clone(), q.clone()])))]
         }
         Market::Perp => {
             let sym = format!("{b}-{q}-SWAP");

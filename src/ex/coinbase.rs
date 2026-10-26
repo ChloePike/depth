@@ -26,8 +26,9 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
     let (base, mut quote) = (sub.base.to_uppercase(), sub.quote.to_uppercase());
     if quote == "USDT" || quote == "USDC" { quote = "USD".into(); }
     match sub.market {
-        // ponytail: Coinbase publishes no margin borrow rates, so margin is spot data only
-        Market::Spot | Market::Margin => vec![tokio::spawn(async move { stream(e, spot_id(&base, &quote).await, 1.0).await })],
+        // ponytail: Coinbase publishes no margin borrow rates and margin shares the spot book (Spot streams it), so Margin opens nothing
+        Market::Margin => vec![],
+        Market::Spot => vec![tokio::spawn(async move { stream(e, spot_id(&base, &quote).await, 1.0).await })],
         Market::Perp => vec![tokio::spawn(perp(e, base))],
         Market::Option => vec![], // no public options market data
     }

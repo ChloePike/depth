@@ -1,5 +1,5 @@
 //! The few OS services the terminal needs: per-user folders, the secret store, the local UTC
-//! offset and the process's resident memory. macOS, Windows and Linux.
+//! offset, the process's resident memory, notifications and sounds. macOS, Windows and Linux.
 use anyhow::{bail, Result};
 use std::path::PathBuf;
 
@@ -266,4 +266,140 @@ pub fn append_log(name: &str, text: &str) {
     let p = dir.join(name);
     if std::fs::metadata(&p).is_ok_and(|m| m.len() > 1 << 20) { let _ = std::fs::rename(&p, dir.join(format!("{name}.old"))); }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) { let _ = f.write_all(text.as_bytes()); }
+}
+
+/// Panics (any thread, tokio tasks included) go to panic.log in `log_dir()` with location and
+/// backtrace, then on to the previous hook (stderr in a terminal run): a Finder launch has no stderr.
+pub fn install_panic_log() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let bt = std::backtrace::Backtrace::force_capture();
+            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            append_log("panic.log", &format!("{ts} {info}\n{bt}\n"));
+            prev(info);
+        }));
+    });
+}
+
+// ---------------------------------------------------------------- one instance
+
+/// Take the exclusive lock on `p` (created if missing). The lock belongs to the open file, so a
+/// second open of the same path fails even inside this process; the OS drops it when the file
+/// closes or the process dies, so a crash never leaves a stale lock.
+fn lock_file(p: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(p)?;
+    f.try_lock().map_err(|e| match e { std::fs::TryLockError::WouldBlock => std::io::ErrorKind::WouldBlock.into(), std::fs::TryLockError::Error(e) => e })?;
+    Ok(f)
+}
+
+/// One Depth per user: true for the first caller, which holds `data_dir()/depth.lock` until it
+/// exits; false when another Depth runs (the caller says so and quits). A folder or filesystem
+/// that cannot lock counts as free, never as a reason not to start. `T1_MULTI` (a dev build beside
+/// the installed app) and screenshot runs (`T1_SHOT`) skip the check.
+pub fn lock_instance() -> bool {
+    static LOCK: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+    if std::env::var_os("T1_MULTI").is_some() || std::env::var_os("T1_SHOT").is_some() { return true; }
+    let Some(dir) = data_dir() else { return true };
+    let _ = std::fs::create_dir_all(&dir);
+    match lock_file(&dir.join("depth.lock")) {
+        Ok(f) => { let _ = LOCK.set(f); true }
+        Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+    }
+}
+
+// ---------------------------------------------------------------- notifications, sounds
+
+/// Run a helper process detached from our stdio, reaped on a thread. A helper that is not
+/// installed (notify-send, afplay on a stripped system) just means no notification / sound.
+fn spawn_reaped(c: &mut std::process::Command) {
+    let null = std::process::Stdio::null;
+    if let Ok(mut c) = c.stdin(null()).stdout(null()).stderr(null()).spawn() { std::thread::spawn(move || { let _ = c.wait(); }); }
+}
+
+/// At most 10 notifications per 10 s (each one is a process): the 11th is dropped.
+fn allow(now: std::time::Instant, recent: &mut std::collections::VecDeque<std::time::Instant>) -> bool {
+    while recent.front().is_some_and(|t| now.duration_since(*t) >= std::time::Duration::from_secs(10)) { recent.pop_front(); }
+    if recent.len() >= 10 { return false; }
+    recent.push_back(now);
+    true
+}
+
+/// An OS notification with a title line and a body: macOS Notification Center through osascript,
+/// a Windows toast through PowerShell, Linux libnotify's `notify-send`. Never blocks; shown by the
+/// plain egui build only (the native hosts post notifications themselves).
+pub fn notify(title: &str, body: &str) {
+    static RECENT: std::sync::Mutex<std::collections::VecDeque<std::time::Instant>> = std::sync::Mutex::new(std::collections::VecDeque::new());
+    if !allow(std::time::Instant::now(), &mut RECENT.lock().unwrap()) { return eprintln!("[notify] too many notifications, dropped: {title}"); }
+    #[cfg(target_os = "macos")]
+    {
+        let q = |s: &str| s.replace('\\', "").replace('"', "'");
+        let script = format!("display notification \"{}\" with title \"Depth\" subtitle \"{}\"", q(body), q(title));
+        spawn_reaped(std::process::Command::new("osascript").arg("-e").arg(script));
+    }
+    // ponytail: Windows PowerShell 5.1 (always present) posts the toast under its own app id, so the
+    // sender reads "Windows PowerShell" and each toast costs ~0.5-1 s of process start. Upgrade: a
+    // Start-menu shortcut carrying Depth's own AppUserModelID (the installer), then no PowerShell.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const TOAST: &str = "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; \
+            [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null; \
+            $x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); \
+            $t = $x.GetElementsByTagName('text'); \
+            $t.Item(0).AppendChild($x.CreateTextNode($env:DEPTH_T)) | Out-Null; \
+            $t.Item(1).AppendChild($x.CreateTextNode($env:DEPTH_B)) | Out-Null; \
+            [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))";
+        // title and body travel in the environment, so no quoting can break the script
+        spawn_reaped(std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", TOAST])
+            .env("DEPTH_T", title).env("DEPTH_B", body).creation_flags(0x0800_0000 /* CREATE_NO_WINDOW */));
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    spawn_reaped(std::process::Command::new("notify-send").args(["-a", "Depth", "--", title, body]));
+}
+
+/// Play a sound file (wav; aiff on macOS) without blocking: afplay, winmm `PlaySoundW`, or
+/// PulseAudio's `paplay` with ALSA's `aplay` as the fallback.
+pub fn play_sound_file(p: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    spawn_reaped(std::process::Command::new("afplay").arg(p));
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_FILENAME, SND_NODEFAULT};
+        let w = wide(&p.to_string_lossy());
+        // SAFETY: w is NUL-terminated and lives past the call; SND_FILENAME takes no module handle
+        unsafe { PlaySoundW(w.as_ptr(), std::ptr::null_mut(), SND_FILENAME | SND_ASYNC | SND_NODEFAULT) };
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let p = p.to_path_buf();
+        std::thread::spawn(move || {
+            let run = |prog: &str| std::process::Command::new(prog).arg(&p).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+            if !run("paplay") { run("aplay"); }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn notifications_are_rate_limited() {
+        let (t0, mut recent) = (Instant::now(), std::collections::VecDeque::new());
+        assert!((0..10).all(|i| super::allow(t0 + Duration::from_millis(i), &mut recent)));
+        assert!(!super::allow(t0 + Duration::from_secs(9), &mut recent));
+        assert!(super::allow(t0 + Duration::from_secs(11), &mut recent));
+    }
+
+    #[test]
+    fn one_holder_of_the_instance_lock() {
+        let p = std::env::temp_dir().join(format!("depth-lock-test-{}", std::process::id()));
+        let first = super::lock_file(&p).unwrap();
+        assert_eq!(super::lock_file(&p).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        drop(first);
+        assert!(super::lock_file(&p).is_ok());
+        let _ = std::fs::remove_file(p);
+    }
 }

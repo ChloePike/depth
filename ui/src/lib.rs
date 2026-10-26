@@ -178,8 +178,8 @@ pub fn hms(ms: i64) -> String {
 
 /// Persisted UI state: settings.json in `sys::data_dir()`.
 /// Written when it changes (checked once a second); env overrides (T1_BASE, ...) win on load.
-#[derive(serde::Deserialize, Default)]
-#[serde(default)]
+/// Read by `load_settings`, key by key.
+#[derive(Default)]
 struct Settings { route: Option<depth::route::Policy>, prefs: Option<settings::Prefs>, lang: Option<String>, base: Option<String>, mode: Option<Market>, chart: Option<chart::Chart>, layout: Option<String>, cell: Option<usize>, charts: Option<Vec<(usize, chart::Chart)>>, trade_ex: Option<Exchange>, off: Option<Vec<Exchange>>, auto: Option<HashMap<Exchange, engine::AutoTopUp>>, order_panel: Option<bool>, window: Option<[f32; 4]>, book: Option<book::BookView> }
 
 #[derive(serde::Serialize)]
@@ -191,8 +191,95 @@ fn settings_path() -> Option<std::path::PathBuf> {
 
 /// The window's last position and size [x, y, w, h] (points), for the plain app to open where it was.
 pub fn saved_window() -> Option<[f32; 4]> {
-    let s: Settings = serde_json::from_slice(&std::fs::read(settings_path()?).ok()?).ok()?;
-    s.window.filter(|w| w.iter().all(|v| v.is_finite()) && w[2] >= 600.0 && w[3] >= 400.0)
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(settings_path()?).ok()?).ok()?;
+    let w: [f32; 4] = serde_json::from_value(v.get("window")?.clone()).ok()?;
+    Some(w).filter(|w| w.iter().all(|v| v.is_finite()) && w[2] >= 600.0 && w[3] >= 400.0)
+}
+
+/// One Depth per user (`sys::lock_instance`): false when another one runs, after saying so in the
+/// saved language; the caller then exits before it opens a window.
+pub fn single_instance() -> bool {
+    if depth::sys::lock_instance() { return true; }
+    let v: Option<serde_json::Value> = settings_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok());
+    set_lang(v.as_ref().and_then(|v| v["lang"].as_str()).unwrap_or_default());
+    depth::sys::notify(t("run.title"), t("run.body"));
+    false
+}
+
+thread_local! { static DROPPED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
+
+/// A list that keeps the entries that parse (one an older build does not know is dropped, not the list).
+pub(crate) fn lenient_vec<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(d: D) -> Result<Vec<T>, D::Error> {
+    let all: Vec<serde_json::Value> = serde::Deserialize::deserialize(d)?;
+    let n = all.len();
+    let ok: Vec<T> = all.into_iter().filter_map(|x| serde_json::from_value(x).ok()).collect();
+    DROPPED.with(|c| c.set(c.get() + (n - ok.len()) as u32));
+    Ok(ok)
+}
+
+/// A map whose entries that parse are kept (a venue key an older build does not know is dropped).
+pub(crate) fn lenient_map<'de, D: serde::Deserializer<'de>, K: serde::de::DeserializeOwned + std::hash::Hash + Eq, V: serde::de::DeserializeOwned>(d: D) -> Result<HashMap<K, V>, D::Error> {
+    let all: serde_json::Map<String, serde_json::Value> = serde::Deserialize::deserialize(d)?;
+    let n = all.len();
+    let ok: HashMap<K, V> = all.into_iter().filter_map(|(k, v)| Some((serde_json::from_value(k.into()).ok()?, serde_json::from_value(v).ok()?))).collect();
+    DROPPED.with(|c| c.set(c.get() + (n - ok.len()) as u32));
+    Ok(ok)
+}
+
+/// Lists per key (drawings per base asset), each list read with `lenient_vec`.
+pub(crate) fn lenient_map_vec<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(d: D) -> Result<HashMap<String, Vec<T>>, D::Error> {
+    let all: HashMap<String, serde_json::Value> = serde::Deserialize::deserialize(d)?;
+    Ok(all.into_iter().map(|(k, v)| (k, lenient_vec(v).unwrap_or_default())).collect())
+}
+
+/// settings.json read key by key: what this build cannot parse (a newer build's enum variant or
+/// field type, a hand edit) costs only that value, never the whole file. `lossy` = something was
+/// dropped or is unknown here, so saving would lose it (with_ctx keeps a settings.json.bad copy).
+struct Doc { v: serde_json::Value, lossy: bool }
+
+impl Doc {
+    fn take(&mut self, k: &str) -> Option<serde_json::Value> { self.v.as_object_mut()?.remove(k).filter(|x| !x.is_null()) }
+    fn keep<T, E: std::fmt::Display>(&mut self, k: &str, r: Result<T, E>) -> Option<T> {
+        r.map_err(|e| { eprintln!("[settings] {k} ignored: {e}"); self.lossy = true; }).ok()
+    }
+    fn get<T: serde::de::DeserializeOwned>(&mut self, k: &str) -> Option<T> { let x = self.take(k)?; self.keep(k, serde_json::from_value(x)) }
+    fn list<T: serde::de::DeserializeOwned>(&mut self, k: &str) -> Option<Vec<T>> { let x = self.take(k)?; self.keep(k, lenient_vec(x)) }
+    /// A struct read key by key: a key `T` rejects keeps its default; keys `T` does not have are noted.
+    fn obj<T: serde::Serialize + serde::de::DeserializeOwned + Default>(&mut self, k: &str) -> Option<T> {
+        let x = self.take(k)?;
+        let keys: Vec<String> = x.as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+        let t = match T::deserialize(&x) {
+            Ok(t) => t,
+            Err(e) => {
+                let mut base = serde_json::to_value(T::default()).ok()?;
+                let Some(m) = x.as_object() else { return self.keep(k, Err(e)) };
+                for (key, val) in m {
+                    let Some(slot) = base.get_mut(key) else { continue };
+                    let old = std::mem::replace(slot, val.clone());
+                    if let Err(e) = T::deserialize(&base) { eprintln!("[settings] {k}.{key} ignored: {e}"); self.lossy = true; base[key] = old; }
+                }
+                T::deserialize(&base).ok()?
+            }
+        };
+        let out = serde_json::to_value(&t).ok()?;
+        if keys.iter().any(|key| out.get(key).is_none()) { eprintln!("[settings] {k} has keys this build does not know"); self.lossy = true; }
+        Some(t)
+    }
+}
+
+fn load_settings(text: &str) -> (Settings, bool) {
+    DROPPED.with(|c| c.set(0));
+    let v: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
+    let mut d = Doc { lossy: !v.is_object() && !text.trim().is_empty(), v };
+    let s = Settings {
+        route: d.obj("route"), prefs: d.obj("prefs"), lang: d.get("lang"), base: d.get("base"), mode: d.get("mode"), chart: d.obj("chart"), layout: d.get("layout"), cell: d.get("cell"),
+        charts: d.list("charts"), trade_ex: d.get("trade_ex"), off: d.list("off"),
+        auto: d.take("auto").and_then(|x| { let r = lenient_map(x); d.keep("auto", r) }),
+        order_panel: d.get("order_panel"), window: d.get("window"), book: d.obj("book"),
+    };
+    // keys left over belong to a newer build
+    let unknown = d.v.as_object().is_some_and(|m| !m.is_empty());
+    (s, d.lossy || unknown || DROPPED.with(|c| c.get()) > 0)
 }
 
 pub struct App {
@@ -296,7 +383,9 @@ impl App {
         }
         let env = |k: &str| std::env::var(k).ok();
         let saved = settings_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
-        let st: Settings = serde_json::from_str(&saved).unwrap_or_default();
+        let (st, lossy) = load_settings(&saved);
+        // part of the file was dropped (or is newer than this build): keep a copy before the first save rewrites it
+        if lossy && let Some(p) = settings_path() && std::fs::copy(&p, p.with_extension("json.bad")).is_ok() { eprintln!("[settings] original kept in {}.bad", p.display()); }
         set_lang(&env("T1_LANG").or(st.lang.clone()).unwrap_or_default());
         let prefs = st.prefs.clone().unwrap_or_default();
         prefs.apply(&cc.egui_ctx);
@@ -344,8 +433,8 @@ impl App {
         ui.horizontal(|ui| {
             ui.set_height(46.0);
             ui.spacing_mut().item_spacing.x = 14.0;
-            // hosted: macOS draws the traffic lights over this space
-            if self.hosted { ui.add_space(56.0); } else { window_buttons(ui, maximized); }
+            // hosted: macOS draws the traffic lights over this space; Windows / Linux get their buttons on the right
+            if self.hosted { ui.add_space(56.0); } else if cfg!(target_os = "macos") { window_buttons(ui, maximized); }
             let tickers = self.eng.tickers.lock().unwrap().clone();
             if let Some(b) = self.picker.show(ui, &self.eng.base, &tickers) { if b != self.eng.base { *new_base = Some(b); } }
             let names: Vec<&str> = MODES.iter().map(|(_, k)| t(k)).collect();
@@ -355,6 +444,7 @@ impl App {
             self.top.price(ui, a.mid(book_market));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
+                if !self.hosted && !cfg!(target_os = "macos") { window_controls_right(ui, maximized); }
                 if kit::icon_button(ui, 30.0, false, top::gear).on_hover_text(t("set.title")).clicked() { self.settings.open = true; }
                 // show / hide the order panel (the Swift toolbar's sidebar.trailing button); Perp and Spot
                 let tip = l("Show or hide the order panel (Option-Command-I)");
@@ -780,14 +870,10 @@ impl App {
         let mut px = self.eng.watched.lock().unwrap().clone();
         if let Some(p) = self.chart.price(a, self.mode) { px.insert(base, p); }
         self.chart.check_alerts(&px);
-        // the egui window has no notification API of its own: macOS notifications through osascript
-        // (the SwiftUI host drains `fired` itself and posts them natively)
-        if !self.hosted && cfg!(target_os = "macos") {
-            for (title, body) in self.chart.fired.drain(..) {
-                let q = |s: &str| s.replace('\\', "").replace('"', "'");
-                let script = format!("display notification \"{}\" with title \"Depth\" subtitle \"{}\"", q(&body), q(&title));
-                if let Ok(mut c) = std::process::Command::new("osascript").arg("-e").arg(script).spawn() { std::thread::spawn(move || { let _ = c.wait(); }); }
-            }
+        // the egui window has no notification API of its own: the OS notification through sys::notify
+        // (the native hosts drain `fired` themselves and post them natively)
+        if !self.hosted {
+            for (title, body) in self.chart.fired.drain(..) { depth::sys::notify(&title, &body); }
         }
     }
 
@@ -1176,6 +1262,35 @@ fn window_buttons(ui: &mut Ui, maximized: bool) {
     }
 }
 
+/// Windows / Linux minimize, maximize (restore when maximized) and close, flush with the window's
+/// top right corner (the window has no native title bar). Reserves their width in the header's
+/// right-to-left row so the items there stop short of them.
+fn window_controls_right(ui: &mut Ui, maximized: bool) {
+    let win = ui.ctx().content_rect();
+    ui.add_space((3.0 * 46.0 - (win.right() - ui.max_rect().right())).max(0.0));
+    let cmds = [egui::ViewportCommand::Minimized(true), egui::ViewportCommand::Maximized(!maximized), egui::ViewportCommand::Close];
+    for (i, cmd) in cmds.into_iter().enumerate() {
+        let r = egui::Rect::from_min_size(egui::pos2(win.right() - 46.0 * (3 - i) as f32, win.top()), egui::vec2(46.0, 30.0));
+        let resp = ui.interact(r, ui.id().with(("winctl", i)), egui::Sense::click());
+        let red = i == 2 && resp.hovered();
+        if resp.hovered() { ui.painter().rect_filled(r, 0, if red { Color32::from_rgb(0xe8, 0x11, 0x23) } else { hl() }); }
+        let (c, s, p) = (r.center(), egui::Stroke::new(1.0, if red { Color32::WHITE } else { fg() }), ui.painter());
+        match i {
+            0 => { p.hline(c.x - 5.0..=c.x + 5.0, c.y, s); }
+            1 if maximized => {
+                p.rect_stroke(egui::Rect::from_min_size(c + egui::vec2(-5.0, -2.0), egui::vec2(7.0, 7.0)), 0, s, egui::StrokeKind::Inside);
+                p.line_segment([c + egui::vec2(-2.0, -2.0), c + egui::vec2(-2.0, -5.0)], s);
+                p.line_segment([c + egui::vec2(-2.0, -5.0), c + egui::vec2(5.0, -5.0)], s);
+                p.line_segment([c + egui::vec2(5.0, -5.0), c + egui::vec2(5.0, 2.0)], s);
+                p.line_segment([c + egui::vec2(5.0, 2.0), c + egui::vec2(2.0, 2.0)], s);
+            }
+            1 => { p.rect_stroke(egui::Rect::from_center_size(c, egui::vec2(10.0, 10.0)), 0, s, egui::StrokeKind::Inside); }
+            _ => { p.line_segment([c - egui::vec2(5.0, 5.0), c + egui::vec2(5.0, 5.0)], s); p.line_segment([c + egui::vec2(-5.0, 5.0), c + egui::vec2(5.0, -5.0)], s); }
+        }
+        if resp.clicked() { ui.ctx().send_viewport_cmd(cmd); }
+    }
+}
+
 /// Status bar venue: state dot (green streaming, red silent, grey switched off), name, push latency.
 fn status_venue(ui: &mut Ui, e: Exchange, on: bool, alive: bool, lat: Option<f64>, lat_col: Color32, names: bool) -> egui::Response {
     let name = ui.painter().layout_no_wrap(if names { format!("{e:?}") } else { String::new() }, prop(11.5), if on { mu() } else { dim() });
@@ -1204,5 +1319,34 @@ mod tests {
         assert_eq!(fmt_dp(-1234567.891, 2), "-1,234,567.89");
         assert_eq!(fmt_px(120.204), "120.20");
         assert_eq!(fmt_px(0.10872), "0.108720");
+    }
+
+    #[test]
+    fn settings_load_keeps_what_parses() {
+        use serde_json::{json, to_value};
+        let hk = to_value(&hotkeys::defaults()[0]).unwrap();
+        let line = json!({"tool": "HLine", "a": [0, 100.0], "b": [0, 100.0]});
+        let text = json!({
+            "mode": "Futures", "base": "ETH", "off": ["Bybit", "Nope"], "window": [1.0, 2.0, 900.0, 700.0],
+            "prefs": {"theme": "neon", "radius": 5, "hotkeys": [hk, {"act": "Nope", "key": null}]},
+            "chart": {"drawings": {"BTC": [line, {"tool": "bogus", "a": [0, 1.0], "b": [0, 1.0]}]}},
+        }).to_string();
+        let (s, lossy) = load_settings(&text);
+        assert!(lossy && s.mode.is_none());
+        assert_eq!((s.base.as_deref(), s.off, s.window), (Some("ETH"), Some(vec![Exchange::Bybit]), Some([1.0, 2.0, 900.0, 700.0])));
+        // the bad theme falls back to its default, the other prefs and the good list entries stay
+        let p = s.prefs.unwrap();
+        assert!(p.theme == settings::ThemePref::System && p.radius == 5 && p.hotkeys.len() == 1);
+        assert_eq!(to_value(s.chart.unwrap()).unwrap()["drawings"]["BTC"].as_array().map(|a| a.len()), Some(1));
+        // a file this build wrote itself loses nothing
+        let ok = json!({
+            "prefs": to_value(settings::Prefs::default()).unwrap(), "chart": to_value(chart::Chart::default()).unwrap(), "book": to_value(book::BookView::default()).unwrap(),
+            "route": to_value(depth::route::Policy::default()).unwrap(), "off": ["Okx"], "charts": [], "auto": {"Bybit": {"enabled": true, "min": 1.0, "target": 2.0}}, "mode": "Perp",
+        }).to_string();
+        let (s, lossy) = load_settings(&ok);
+        assert!(!lossy && s.prefs.is_some() && s.chart.is_some() && s.book.is_some() && s.route.is_some() && s.auto.is_some_and(|a| a.len() == 1));
+        // a key only a newer build writes, broken JSON: flagged; no file yet: not
+        assert!(load_settings(r#"{"base": "BTC", "from_the_future": 1}"#).1 && load_settings("{oops").1);
+        assert!(!load_settings("").1);
     }
 }

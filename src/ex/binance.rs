@@ -12,8 +12,10 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
     let sym = format!("{}{}", sub.base, sub.quote).to_uppercase();
     let s = sym.to_lowercase();
     match sub.market {
-        // ponytail: margin borrow rates need an API key, so this stream is spot data only; the engine reads them with the user's key (Engine::spawn_borrow, trade::spot::borrow_rates)
-        Market::Spot | Market::Margin => {
+        // margin shares the spot book (Spot streams it), so Margin opens nothing; borrow rates need the user's key and
+        // are read by the engine (Engine::spawn_borrow, trade::spot::borrow_rates)
+        Market::Margin => vec![],
+        Market::Spot => {
             let url = format!("wss://stream.binance.com:9443/stream?streams={s}@trade/{s}@bookTicker");
             let depth = format!("wss://stream.binance.com:9443/stream?streams={s}@depth@100ms");
             let snap = format!("https://api.binance.com/api/v3/depth?symbol={sym}&limit=1000");
