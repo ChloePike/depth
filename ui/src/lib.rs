@@ -378,6 +378,8 @@ pub struct App {
     hot_trade: Vec<hotkeys::Act>,
     /// a venue switched in the status bar, applied once the agg lock is free: (venue, on)
     venue_toggle: Option<(Exchange, bool)>,
+    /// every listed coin's logo queued once the ticker list is known (theme::preload_coins)
+    coins_preloaded: bool,
     /// order panel shown (Perp; Cmd-Opt-I or the header button), persisted
     order_panel: bool,
     /// header price flash; the book column's Venues / Quant pages
@@ -460,7 +462,7 @@ impl App {
             shot_sent: false, started: Instant::now(), last_frame: Instant::now(), hosted,
             route: st.route.clone().unwrap_or_default(), pending_base: None, pending_mode: None, pending_restart: false, book_w: 0.0,
             layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(), fills_key: Default::default(), log_seen: now_ms(), fill_seen: 0,
-            st: (Default::default(), Instant::now(), true), order: Default::default(), hot_trade: vec![], venue_toggle: None, order_panel: st.order_panel.unwrap_or(true), top: Default::default(), venue_pages: Default::default(),
+            st: (Default::default(), Instant::now(), true), order: Default::default(), hot_trade: vec![], venue_toggle: None, coins_preloaded: false, order_panel: st.order_panel.unwrap_or(true), top: Default::default(), venue_pages: Default::default(),
             account: Default::default(),
         }
     }
@@ -481,6 +483,12 @@ impl App {
             // hosted: macOS draws the traffic lights over this space; Windows / Linux get their buttons on the right
             if self.hosted { ui.add_space(56.0); } else if cfg!(target_os = "macos") { window_buttons(ui, maximized); }
             let tickers = self.eng.tickers.lock().unwrap().clone();
+            if !self.coins_preloaded && !tickers.is_empty() {
+                let mut by_vol: Vec<_> = tickers.iter().map(|t| (t.quote_vol, t.base.clone())).collect();
+                by_vol.sort_by(|a, b| b.0.total_cmp(&a.0));
+                theme::preload_coins(ui.ctx(), by_vol.into_iter().map(|(_, b)| b));
+                self.coins_preloaded = true;
+            }
             if let Some(b) = self.picker.show(ui, &self.eng.base, &tickers) { if b != self.eng.base { *new_base = Some(b); } }
             let names: Vec<&str> = MODES.iter().map(|(_, k)| t(k)).collect();
             let sel = MODES.iter().position(|(m, _)| *m == self.mode).unwrap_or(0);

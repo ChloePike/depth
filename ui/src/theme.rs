@@ -149,21 +149,32 @@ pub fn icon(p: &Painter, e: Exchange, rect: Rect, dim: bool) {
     }
 }
 
-enum Coin { Loading, Ready(TextureHandle), Missing }
+/// Queued: only the preload asked (behind on-screen requests); Loading: on screen, fetched first.
+enum Coin { Queued, Loading, Ready(TextureHandle), Missing }
 
 static COINS: std::sync::Mutex<Option<HashMap<String, Coin>>> = std::sync::Mutex::new(None);
-static COIN_TX: OnceLock<std::sync::mpsc::Sender<(String, egui::Context)>> = OnceLock::new();
+/// (symbol, context, on screen): on-screen requests overtake the preload queue
+static COIN_TX: OnceLock<std::sync::mpsc::Sender<(String, egui::Context, bool)>> = OnceLock::new();
 
 /// Coin logos come from Binance's logo CDN on first use, are cached on disk
 /// (~/Library/Caches/Depth/coins; an empty file marks "no logo"), and decode on one
 /// background thread. Never blocks the frame.
-fn coin_fetcher() -> &'static std::sync::mpsc::Sender<(String, egui::Context)> {
+fn coin_fetcher() -> &'static std::sync::mpsc::Sender<(String, egui::Context, bool)> {
     COIN_TX.get_or_init(|| {
-        let (tx, rx) = std::sync::mpsc::channel::<(String, egui::Context)>();
+        let (tx, rx) = std::sync::mpsc::channel::<(String, egui::Context, bool)>();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("coin icon runtime");
             let dir = depth::sys::cache_dir().map(|d| d.join("coins"));
-            while let Ok((sym, ctx)) = rx.recv() {
+            let (mut hi, mut lo) = (std::collections::VecDeque::new(), std::collections::VecDeque::new());
+            loop {
+                // take everything waiting, so an icon on screen overtakes the rest of the preload
+                let first = if hi.is_empty() && lo.is_empty() { match rx.recv() { Ok(m) => Some(m), Err(_) => break } } else { None };
+                for (s, c, on_screen) in first.into_iter().chain(std::iter::from_fn(|| rx.try_recv().ok())) {
+                    if on_screen { hi.push_back((s, c)) } else { lo.push_back((s, c)) }
+                }
+                let Some((sym, ctx)) = hi.pop_front().or_else(|| lo.pop_front()) else { continue };
+                // queued twice (preload, then on screen): the first pass settled it
+                if COINS.lock().unwrap().as_ref().is_some_and(|m| matches!(m.get(&sym), Some(Coin::Ready(_) | Coin::Missing))) { continue; }
                 let path = dir.as_ref().map(|d| d.join(format!("{sym}.png")));
                 // no logo anywhere: a marker, re-checked after a week (new listings get logos late)
                 let none = dir.as_ref().map(|d| d.join(format!("{sym}.none")));
@@ -193,7 +204,7 @@ fn coin_fetcher() -> &'static std::sync::mpsc::Sender<(String, egui::Context)> {
                         b
                     }
                 };
-                let state = decode_png(&bytes).map(|img| Coin::Ready(ctx.load_texture(format!("coin-{sym}"), img, egui::TextureOptions::LINEAR))).unwrap_or(Coin::Missing);
+                let state = decode_png(&bytes).map(|img| Coin::Ready(ctx.load_texture(format!("coin-{sym}"), shrink(img, COIN_PX), egui::TextureOptions::LINEAR))).unwrap_or(Coin::Missing);
                 set_coin(&sym, state);
                 ctx.request_repaint();
             }
@@ -204,6 +215,40 @@ fn coin_fetcher() -> &'static std::sync::mpsc::Sender<(String, egui::Context)> {
 
 fn set_coin(sym: &str, c: Coin) { COINS.lock().unwrap().get_or_insert_with(Default::default).insert(sym.to_string(), c); }
 
+/// Coin logos are drawn at 24 pt at most, so 48 px covers a 2x screen; CDN logos run up to 192 px,
+/// which for every listed coin would be ~190 MB of textures instead of ~12 MB.
+const COIN_PX: usize = 48;
+
+/// Area-average downscale to `px` square (a no-op for smaller images); averages the premultiplied
+/// pixels, so transparent edges do not bleed dark fringes.
+fn shrink(img: egui::ColorImage, px: usize) -> egui::ColorImage {
+    let [w, h] = img.size;
+    if w <= px && h <= px { return img; }
+    let (sx, sy) = (w as f32 / px as f32, h as f32 / px as f32);
+    let pixels = (0..px * px).map(|i| {
+        let (tx, ty) = (i % px, i / px);
+        let (x0, x1) = ((tx as f32 * sx) as usize, (((tx + 1) as f32 * sx).ceil() as usize).min(w));
+        let (y0, y1) = ((ty as f32 * sy) as usize, (((ty + 1) as f32 * sy).ceil() as usize).min(h));
+        let mut acc = [0u32; 4];
+        for y in y0..y1 { for x in x0..x1 { for (a, c) in acc.iter_mut().zip(img.pixels[y * w + x].to_array()) { *a += c as u32; } } }
+        let n = ((x1 - x0) * (y1 - y0)).max(1) as u32;
+        Color32::from_rgba_premultiplied((acc[0] / n) as u8, (acc[1] / n) as u8, (acc[2] / n) as u8, (acc[3] / n) as u8)
+    }).collect();
+    egui::ColorImage::new([px, px], pixels)
+}
+
+/// Queues every listed coin's logo (largest first) so pickers and tables never pop icons in: cached ones
+/// decode at once, missing ones download one at a time on the fetcher thread (gentle on a proxy).
+pub fn preload_coins(ctx: &egui::Context, syms: impl IntoIterator<Item = String>) {
+    let mut g = COINS.lock().unwrap();
+    let m = g.get_or_insert_with(Default::default);
+    for s in syms {
+        if m.contains_key(&s) { continue; }
+        m.insert(s.clone(), Coin::Queued);
+        let _ = coin_fetcher().send((s, ctx.clone(), false));
+    }
+}
+
 /// Paint a coin logo (base asset, e.g. "BTC") as a circle; a lettered disc until/unless it loads.
 pub fn coin_icon(ui: &egui::Ui, sym: &str, rect: Rect) {
     let tex = {
@@ -211,8 +256,8 @@ pub fn coin_icon(ui: &egui::Ui, sym: &str, rect: Rect) {
         let m = g.get_or_insert_with(Default::default);
         match m.get(sym) {
             Some(Coin::Ready(t)) => Some(t.id()),
+            Some(Coin::Queued) | None => { m.insert(sym.to_string(), Coin::Loading); let _ = coin_fetcher().send((sym.to_string(), ui.ctx().clone(), true)); None }
             Some(_) => None,
-            None => { m.insert(sym.to_string(), Coin::Loading); let _ = coin_fetcher().send((sym.to_string(), ui.ctx().clone())); None }
         }
     };
     let p = ui.painter();
@@ -529,6 +574,22 @@ fn style(base: &egui::Style, light: bool) -> egui::Style {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn coin_logos_shrink_by_area_average() {
+        // a 4x4 half transparent, half opaque white image shrinks to 2x2 premultiplied averages
+        let px: Vec<Color32> = (0..16).map(|i| if i % 4 < 2 { Color32::TRANSPARENT } else { Color32::WHITE }).collect();
+        let img = shrink(egui::ColorImage::new([4, 4], px), 2);
+        assert_eq!(img.size, [2, 2]);
+        assert_eq!(img.pixels[0], Color32::TRANSPARENT);
+        assert_eq!(img.pixels[1], Color32::WHITE);
+        // a non-integer ratio (3 -> 2) still covers every source pixel; smaller images are untouched
+        let img = shrink(egui::ColorImage::new([3, 3], vec![Color32::WHITE; 9]), 2);
+        assert!(img.pixels.iter().all(|c| *c == Color32::WHITE));
+        assert_eq!(shrink(egui::ColorImage::new([1, 1], vec![Color32::RED]), 48).size, [1, 1]);
+    }
+
     #[test]
     fn decodes_palette_pngs() {
         // 1x1 indexed PNG whose only palette entry is pure red

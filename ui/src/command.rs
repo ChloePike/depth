@@ -143,7 +143,11 @@ impl CommandBar {
         let mut out = None;
         let markets: Vec<Binding> = binds.iter().filter(|b| matches!(b.act, Act::Spot | Act::Margin | Act::Perp | Act::Option)).cloned().collect();
         let market = hotkeys::pressed(ctx, &markets).first().map(|a| match a { Act::Spot => Market::Spot, Act::Margin => Market::Margin, Act::Perp => Market::Perp, _ => Market::Option });
-        let m = egui::Modal::new(egui::Id::new("command_bar")).show(ctx, |ui| {
+        // pinned near the top like a launcher: the line stays put and the rows only grow downwards
+        // (a centred modal re-centres as rows come and go, so the line jumped up)
+        let id = egui::Id::new("command_bar");
+        let top = ctx.content_rect().height() * 0.18;
+        let m = egui::Modal::new(id).area(egui::Modal::default_area(id).anchor(Align2::CENTER_TOP, vec2(0.0, top))).show(ctx, |ui| {
             ui.set_width(460.0);
             ui.spacing_mut().item_spacing.y = 8.0;
             // arrows move the row selection, taken before the line sees them

@@ -275,7 +275,9 @@ impl BookView {
             ui.interact(zone, ui.id().with("l3legend"), Sense::hover())
                 .on_hover_text(l("The strip under each level shows its individual resting orders, largest separate, small ones merged. Lighter: exact. OKX and Hyperliquid: inferred from order counts (faint = only the count is known)."));
         }
-        let hover = ui.input(|i| i.pointer.hover_pos());
+        // only while the book itself is the top layer under the pointer: a modal (command bar, dialogs) or a
+        // popup above it blocks the row highlight and the level tooltip, like egui's own hover does
+        let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| ui.ctx().layer_id_at(*p) == Some(ui.layer_id()));
         // strings for the block tooltip (the row closure's `l` is a level)
         let (s_exact, s_inf, s_split, s_rest) = (l("exact"), l("inferred"), l("split estimate"), l("resting"));
         let (s_orders, s_largest, s_oldest, s_l4) = (l("Orders at this level"), l("Largest orders"), l("Oldest order"), l("Last 60s"));
