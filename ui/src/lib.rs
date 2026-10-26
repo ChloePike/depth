@@ -964,7 +964,7 @@ impl App {
                 }
                 chart::ChartAct::Move(chart::LineAct::Order(ex, id), px) => {
                     let o = self.eng.account.lock().unwrap().orders.iter().find(|o| o.ex == ex && o.id == id).cloned();
-                    if let Some(o) = o { self.eng.replace_order(&o, px, ctx); }
+                    if let Some(o) = o { self.eng.replace_order(&o, false, px, o.qty, ctx); }
                 }
                 chart::ChartAct::Move(chart::LineAct::Preview(field), px) => self.order.set_preview(field, px),
                 chart::ChartAct::Cancel(chart::LineAct::Order(ex, id)) => {
@@ -1212,7 +1212,7 @@ impl App {
                     ex: Some(o.ex), tag: if o.kind.eq_ignore_ascii_case("limit") { String::new() } else { o.kind.clone() },
                     sub: format!("{}{}@{}", if o.side == depth::Side::Buy { "+" } else { "-" }, fmt_qty(o.qty - o.filled), fmt_px(o.price)),
                     // only plain limit orders are dragged: a stop or post-only order would come back as something else
-                    act: (o.kind.eq_ignore_ascii_case("limit") && matches!(o.tif.to_ascii_lowercase().as_str(), "" | "gtc" | "goodtillcancel")).then(|| chart::LineAct::Order(o.ex, o.id.clone())),
+                    act: depth::trade::not_editable(o).is_none().then(|| chart::LineAct::Order(o.ex, o.id.clone())),
                 }));
                 // liquidation price of each position (none on Binance Portfolio Margin: account-level uniMMR)
                 lines.extend(acc.positions.iter().filter(|p| p.symbol == sym).filter_map(|p| p.liq.filter(|l| *l > 0.0).map(|l| chart::ChartLine {
@@ -1236,7 +1236,7 @@ impl App {
                 self.chart.confirm = self.prefs.confirm;
                 self.chart.trading = acc.keys.contains_key(&self.trade.ex) && acc.can_trade.get(&self.trade.ex) != Some(&false);
                 self.chart.equity = acc.balances.get(&self.trade.ex).map(|b| b.equity).filter(|e| *e > 0.0);
-                self.chart.amends = depth::trade::can_amend(self.trade.ex);
+                self.chart.amends = depth::trade::can_amend(self.trade.ex, false);
             }
             self.alerts_tick(&a);
             self.tray_tick(&ctx, &a);

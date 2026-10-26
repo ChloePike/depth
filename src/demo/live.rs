@@ -328,13 +328,13 @@ pub fn cancel(id: &str) -> Result<()> {
     r
 }
 
-/// Re-price a resting perp limit on the `tick` grid.
-pub fn amend(o: &OpenOrder, price: f64, tick: f64) -> Result<()> {
-    let b = book(o.ex, Market::Perp, &o.symbol);
+/// Re-price / re-size a resting limit (`qty` = the new total) on the venue's grid, against its own live book.
+pub fn amend(o: &OpenOrder, market: Market, price: f64, qty: f64, r: &Rules) -> Result<()> {
+    let b = book(o.ex, market, &o.symbol);
     let mut l = live();
-    let r = l.sim.amend(&o.id, price, tick, levels(b.as_ref()), now_ms());
+    let res = l.sim.amend(&o.id, price, qty, r, levels(b.as_ref()), now_ms());
     l.commit();
-    r
+    res
 }
 
 pub fn positions(ex: Exchange) -> Vec<Position> { live().sim.positions(ex) }

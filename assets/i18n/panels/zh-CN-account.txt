@@ -308,3 +308,8 @@ Cancels every order, TP/SL and algorithm on every venue with keys, then closes e
 options not touched: %d resting orders · %d held = 期权不受影响：%d 个挂单 · %d 个持仓
 Positions of the symbol on screen close through the slippage cap and what is left at market; every other position at market. Nothing is undone. = 当前币种的仓位按滑点上限平仓，剩余部分市价平仓；其他所有仓位市价平仓。操作无法撤回。
 Running… = 执行中…
+Click to change, Enter to send = 点击修改，回车发送
+Conditional order: cancel it and place a new one to change it = 条件单无法修改：请撤单后重新下单
+Margin order: cancel it and place a new one to change it = 杠杆单无法修改：请撤单后重新下单
+Only plain GTC limit orders can be changed here = 这里只能修改普通 GTC 限价单
+Change order? = 修改挂单？

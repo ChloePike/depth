@@ -191,13 +191,16 @@ impl Sim {
         Ok(())
     }
 
-    /// Re-price a resting limit (on the `tick` grid). A price that now crosses takes the book like a
-    /// new order would; post-only is refused instead.
-    pub fn amend(&mut self, id: &str, price: f64, tick: f64, book: Option<Levels>, now: i64) -> Result<()> {
-        let price: f64 = trade::fmt_step(price, tick, false).parse()?;
-        if !price.is_finite() || price <= 0.0 { bail!("invalid price {price}"); }
+    /// Re-price and / or re-size a resting limit: `qty` is the new TOTAL size, both checked and put on
+    /// the venue grid as live (`trade::amend_checked`: rules, above what filled). A price that now
+    /// crosses takes the book like a new order would; post-only is refused instead. The pool must carry
+    /// what the change adds (margin, a spot buy's USDT, a spot sell's coins).
+    pub fn amend(&mut self, id: &str, price: f64, qty: f64, r: &Rules, book: Option<Levels>, now: i64) -> Result<()> {
         let Some(o) = self.orders.iter().find(|o| o.id == id).cloned() else { bail!("demo: order {id} not found (filled or cancelled)") };
         let Kind::Limit { price: old, tif } = o.req.kind else { bail!("demo: only resting limit orders can be amended") };
+        let row = self.open_orders(o.ex, o.market).into_iter().find(|x| x.id == id).ok_or_else(|| anyhow!("demo: order {id} not found"))?;
+        let (p, q) = trade::amend_checked(&row, price, qty, r)?;
+        let (price, qty): (f64, f64) = (p.parse()?, q.parse()?);
         let buy = o.req.side() == Side::Buy;
         let opp = book.map_or(&[][..], |b| if buy { b.asks } else { b.bids });
         let last = self.lasts.get(&(o.ex, o.market, o.req.symbol.clone())).copied();
@@ -205,12 +208,17 @@ impl Sim {
         let cross = crosses(buy, price, best);
         if cross && book.is_none() { bail!("demo: no live {:?} book for {}; open it on the chart", o.ex, o.req.symbol); }
         if cross && tif == Tif::PostOnly { bail!("demo: post-only order would take liquidity"); }
-        // what a higher price adds to the order's reserve (as `Sim::reserved` counts it)
-        let left = o.req.qty - o.filled;
+        // what the new price and size add to the order's reserve (as `Sim::reserved` counts it)
+        let (was, left) = (o.req.qty - o.filled, qty - o.filled);
         let per = match o.market { Market::Spot if buy => 1.0, Market::Spot => 0.0, _ if o.req.close => 0.0, _ => 1.0 / self.lev(o.ex, &o.req.symbol) };
-        let more = (price - old) * left * per;
+        let more = (price * left - old * was) * per;
         if more > self.available() + 1e-9 { bail!("demo: insufficient margin: {more:.2} > {:.2} USDT", self.available()); }
-        self.record(now, EvKind::Amend { id: id.into(), price });
+        if o.market == Market::Spot && !buy && left > was {
+            let c = coin(&o.req.symbol);
+            let free = self.coins.get(&(o.ex, c.to_string())).map_or(0.0, |x| x.0) - self.selling(o.ex, c);
+            if free < (left - was) * (1.0 - 1e-9) { bail!("demo: insufficient {c}: {free} < {}", left - was); }
+        }
+        self.record(now, EvKind::Amend { id: id.into(), price, qty: Some(qty) });
         if cross {
             let left = if o.req.close { left.min(self.held(o.ex, &o.req.symbol, o.req.pos)) } else { left };
             self.fill(&o, &take(opp, left, Some(price), buy), false, now);
@@ -602,15 +610,65 @@ mod tests {
         let (bids, asks) = ([(98.0, 1.0)], [(100.0, 1.0), (101.0, 1.0)]);
         let mut s = demo();
         let id = s.place(BY, Market::Perp, &req(Buy, false, lim(99.0, Tif::Gtc), 2.0), &R, 99.0, bk(&bids, &asks), 1).unwrap();
-        s.amend(&id, 99.04, 0.1, bk(&bids, &asks), 2).unwrap();
-        assert_eq!(s.open_orders(BY, Market::Perp)[0].price, 99.0);
-        s.amend(&id, 100.5, 0.1, bk(&bids, &asks), 3).unwrap();
+        // 99.04 is 99.0 on the tick grid: nothing changes, nothing is logged
+        let n = s.pending.len();
+        assert!(s.amend(&id, 99.04, 2.0, &R, bk(&bids, &asks), 2).unwrap_err().to_string().contains("nothing to change"));
+        assert_eq!((s.open_orders(BY, Market::Perp)[0].price, s.pending.len()), (99.0, n));
+        s.amend(&id, 100.5, 2.0, &R, bk(&bids, &asks), 3).unwrap();
         assert_eq!(fills(&s), vec![(100.0, 1.0)]);
         assert_eq!((s.orders[0].filled, limit_price(&s.orders[0].req.kind)), (1.0, 100.5));
         let post = s.place(BY, Market::Perp, &req(Buy, false, lim(99.0, Tif::PostOnly), 1.0), &R, 99.0, bk(&bids, &asks), 4).unwrap();
-        assert!(s.amend(&post, 100.0, 0.1, bk(&bids, &asks), 5).is_err());
+        assert!(s.amend(&post, 100.0, 1.0, &R, bk(&bids, &asks), 5).is_err());
         s.cancel(&post, 6).unwrap();
-        assert!(s.cancel(&post, 6).is_err() && s.amend(&post, 99.0, 0.1, None, 6).is_err());
+        assert!(s.cancel(&post, 6).is_err() && s.amend(&post, 99.0, 1.0, &R, None, 6).is_err());
+        replays(&s);
+    }
+
+    #[test]
+    fn amend_resizes_above_the_filled_part() {
+        let (bids, asks) = ([(98.0, 1.0)], [(100.0, 1.0), (101.0, 1.0)]);
+        let b = || bk(&bids, &asks);
+        let mut s = demo();
+        let id = s.place(BY, Market::Perp, &req(Buy, false, lim(99.0, Tif::Gtc), 2.0), &R, 99.0, b(), 1).unwrap();
+        // a bigger size reserves its extra margin: 1 more @99 at 10x
+        let avail = s.available();
+        s.amend(&id, 99.0, 3.0004, &R, b(), 2).unwrap();
+        assert!(close(s.orders[0].req.qty, 3.0) && close(avail - s.available(), 9.9));
+        // crossing with the new size takes the book up to the price; the size is the total, fills included
+        s.amend(&id, 100.5, 3.0, &R, b(), 3).unwrap();
+        assert_eq!((fills(&s), s.orders[0].filled), (vec![(100.0, 1.0)], 1.0));
+        // the ask it took is gone from here on
+        let b = || bk(&bids, &asks[1..]);
+        // never at or below what filled, never under the minimum size or value
+        for q in [1.0, 1.0004, 0.5] { assert!(s.amend(&id, 100.5, q, &R, b(), 4).unwrap_err().to_string().contains("already filled"), "{q}"); }
+        assert!(s.amend(&id, 100.5, 0.0004, &R, b(), 4).unwrap_err().to_string().contains("below minimum"));
+        assert!(s.amend(&id, 100.5, 1.5, &Rules { min_notional: 200.0, ..R }, b(), 4).unwrap_err().to_string().contains("notional"));
+        s.amend(&id, 100.5, 1.5, &R, b(), 5).unwrap();
+        let o = &s.open_orders(BY, Market::Perp)[0];
+        assert_eq!((o.qty, o.filled, o.price), (1.5, 1.0, 100.5));
+        // more margin than the pool has is refused
+        let mut poor = sim(15.0);
+        let id2 = poor.place(BY, Market::Perp, &req(Buy, false, lim(99.0, Tif::Gtc), 1.0), &R, 99.0, b(), 1).unwrap();
+        assert!(poor.amend(&id2, 99.0, 2.0, &R, b(), 2).unwrap_err().to_string().contains("insufficient margin"));
+        poor.amend(&id2, 99.0, 1.5, &R, b(), 3).unwrap();
+        replays(&s);
+        replays(&poor);
+        // a log written before sizes changed still reads: the price only
+        let old: EvKind = serde_json::from_str(r#"{"kind":"Amend","id":"x","price":1.0}"#).unwrap();
+        assert_eq!(old, EvKind::Amend { id: "x".into(), price: 1.0, qty: None });
+    }
+
+    #[test]
+    fn spot_amend_holds_what_the_new_size_needs() {
+        let (bids, asks) = ([(99.0, 5.0)], [(100.0, 5.0)]);
+        let b = || bk(&bids, &asks);
+        let mut s = demo();
+        s.place(BY, Market::Spot, &req(Buy, false, Kind::Market, 1.0), &R, 100.0, b(), 1).unwrap();
+        let sell = s.place(BY, Market::Spot, &req(Sell, false, lim(105.0, Tif::Gtc), 0.5), &R, 100.0, b(), 2).unwrap();
+        // 1 BTC held: the sell grows to all of it, not past it
+        s.amend(&sell, 105.0, 1.0, &R, b(), 3).unwrap();
+        assert!(s.amend(&sell, 105.0, 1.2, &R, b(), 4).unwrap_err().to_string().contains("insufficient BTC"));
+        assert_eq!(s.spot_balances(BY)[1].locked, 1.0);
         replays(&s);
     }
 

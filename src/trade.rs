@@ -623,22 +623,50 @@ pub async fn can_trade(ex: Exchange, k: &Keys) -> Result<Option<bool>> {
     })
 }
 
-/// Venues whose resting limit orders `amend` changes in place (same id); the others are moved by
-/// cancel + new.
-pub fn can_amend(ex: Exchange) -> bool { matches!(ex, Exchange::Bybit | Exchange::Binance) }
+/// Venues whose resting limit orders `amend` changes in place (same id): Bybit linear and (unified
+/// account) spot, Binance USD-M. The others, Binance spot included, are changed by cancel + new.
+pub fn can_amend(ex: Exchange, spot: bool) -> bool { ex == Exchange::Bybit || (ex == Exchange::Binance && !spot) }
 
-/// Re-price a resting limit order in place, keeping its size left and its id. Binance's modify
-/// needs side and quantity again (it rejects a quantity below what already filled).
-pub async fn amend(ex: Exchange, k: &Keys, o: &OpenOrder, price: f64, r: &Rules) -> Result<()> {
-    if k.demo { return crate::demo::amend(o, price, r.tick); }
-    let px = fmt_step(price, r.tick, false);
-    if !(px.parse::<f64>().is_ok_and(|p| p > 0.0)) { bail!("invalid price {price}"); }
+impl OpenOrder {
+    /// Whether the order reduces a position: reduce-only, or in hedge mode a sell on the long / a buy on the short.
+    pub fn closes(&self) -> bool { self.reduce_only || self.pos.is_some_and(|p| p != self.side) }
+}
+
+/// Why a resting order row cannot be changed (price / size) from Depth, None when it can: only a plain
+/// GTC limit ("lmt" is Kraken's), never a conditional row (a cancel + new would lose its trigger) nor
+/// post-only / IOC (it would come back as a GTC limit on the cancel + new venues).
+pub fn not_editable(o: &OpenOrder) -> Option<&'static str> {
+    if o.trigger.is_some() { return Some("trigger"); }
+    let limit = o.kind.eq_ignore_ascii_case("limit") || o.kind == "lmt";
+    if !(limit && matches!(o.tif.to_ascii_lowercase().as_str(), "" | "gtc" | "goodtillcancel")) { return Some("type"); }
+    None
+}
+
+/// A resting limit's new price and new TOTAL size (its filled part included) on the venue grid, checked
+/// as a new order would be (`checked`: tick, step, minimum size, minimum value unless it closes) and
+/// above what already filled (Binance cancels an order resized to its filled part or less). (price, size).
+pub fn amend_checked(o: &OpenOrder, price: f64, qty: f64, r: &Rules) -> Result<(String, String)> {
+    if !(r.tick > 0.0 && r.step > 0.0) { bail!("no trading rules for {}", o.symbol); }
+    if !(price > 0.0 && price.is_finite() && qty > 0.0 && qty.is_finite()) { bail!("invalid price {price} or size {qty}"); }
+    let req = OrderReq { symbol: o.symbol.clone(), pos: o.side, close: o.closes(), kind: Kind::Limit { price, tif: Tif::Gtc }, qty, client_id: None, attach: None };
+    let (q, px) = checked(&req, r, price)?;
+    let px = px.unwrap_or_default();
+    if !px.parse::<f64>().is_ok_and(|p| p > 0.0) { bail!("invalid price {price}"); }
+    if q.parse::<f64>()? <= o.filled + r.step * 0.5 { bail!("size {q} must stay above the {} already filled", o.filled); }
+    if px == fmt_step(o.price, r.tick, false) && q == fmt_step(o.qty, r.step, true) { bail!("nothing to change: same price and size"); }
+    Ok((px, q))
+}
+
+/// Change a resting limit order in place, keeping its id: `price` and `qty` (the new TOTAL size, its
+/// filled part included) as `amend_checked` puts them on the grid. `spot`: a spot row (Bybit only).
+pub async fn amend(ex: Exchange, k: &Keys, o: &OpenOrder, spot: bool, price: f64, qty: f64, r: &Rules) -> Result<()> {
+    if k.demo { return crate::demo::amend(o, if spot { crate::Market::Spot } else { crate::Market::Perp }, price, qty, r); }
+    if !can_amend(ex, spot) { bail!("{ex:?}: no in-place amend"); }
+    let (px, q) = amend_checked(o, price, qty, r)?;
     match ex {
-        Exchange::Bybit => { bybit::amend(k, o, px).await?; }
-        Exchange::Binance => { binance::amend(k, o, px, r).await?; }
-        _ => bail!("{ex:?}: no in-place amend"),
+        Exchange::Bybit => bybit::amend(k, o, spot, &px, &q, r).await,
+        _ => binance::amend(k, o, &px, &q).await,
     }
-    Ok(())
 }
 
 /// Cancels one resting order row. Binance trigger rows (`o.trigger`, algo service) go to the algo
@@ -1451,9 +1479,13 @@ mod tests {
         }
         for (ex, id) in ids {
             let row = now(open_orders(ex, &k)).unwrap().into_iter().find(|x| x.id == id).unwrap();
-            if can_amend(ex) {
-                // the Sim re-prices against the live price; none streams here
-                assert!(now(amend(ex, &k, &row, 1_000.5, &r)).unwrap_err().to_string().contains("no live"));
+            // the size rules hold before anything else: never at or below what filled, never under the minimum
+            assert!(now(amend(ex, &k, &row, false, 1_000.0, 0.0004, &r)).unwrap_err().to_string().contains("below minimum"));
+            assert!(now(amend(ex, &k, &row, false, 1_000.0, 0.001, &r)).unwrap_err().to_string().contains("notional"));
+            if can_amend(ex, false) {
+                // the Sim re-prices and re-sizes against the live price; none streams here
+                assert!(now(amend(ex, &k, &row, false, 1_000.5, row.qty, &r)).unwrap_err().to_string().contains("no live"));
+                assert!(now(amend(ex, &k, &row, false, row.price, 0.02, &r)).unwrap_err().to_string().contains("no live"));
                 now(cancel_order(ex, &k, &row)).unwrap();
             } else {
                 now(cancel(ex, &k, "DEMOTESTUSDT", &id)).unwrap();
@@ -1487,6 +1519,48 @@ mod tests {
         assert!(!is_unknown_outcome(&now(place(Exchange::Bybit, &k, &req, &r, 1.0, Mode::OneWay)).unwrap_err()));
         assert!(now(tpsl::cancel(Exchange::Bybit, &k, "BTCUSDT", "none")).unwrap_err().to_string().contains("demo"));
         assert!(now(tpsl::clear_position_tpsl(Exchange::Bybit, &k, "BTCUSDT", Side::Buy, Mode::OneWay, true, true)).is_ok());
+    }
+
+    #[test]
+    fn amend_size_rules() {
+        let o = OpenOrder { ex: Exchange::Bybit, symbol: "BTCUSDT".into(), id: "1".into(), side: Side::Buy, price: 80_000.0, qty: 0.010, filled: 0.004, kind: "Limit".into(),
+            tif: "GTC".into(), reduce_only: false, ts: 0, pos: None, client_id: None, trigger: None };
+        let r = Rules { tick: 0.1, step: 0.001, min_qty: 0.001, min_notional: 100.0 };
+        let err = |o: &OpenOrder, p: f64, q: f64, r: &Rules| amend_checked(o, p, q, r).unwrap_err().to_string();
+        assert_eq!(amend_checked(&o, 79_500.04, 0.0159, &r).unwrap(), ("79500.0".into(), "0.015".into()));
+        // the size is the total: at or below the filled 0.004 (after flooring) is refused, just above is fine
+        assert!(err(&o, 80_000.0, 0.004, &r).contains("already filled") && err(&o, 80_000.0, 0.0049, &r).contains("already filled"));
+        assert_eq!(amend_checked(&o, 80_000.0, 0.005, &r).unwrap().1, "0.005");
+        // minimum size, then minimum value (skipped for an order that closes, one-way or hedge)
+        assert!(err(&o, 80_000.0, 0.0009, &r).contains("below minimum"));
+        assert!(err(&o, 80_000.0, 0.009, &Rules { min_qty: 0.01, ..r }).contains("below minimum"));
+        assert!(err(&o, 10_000.0, 0.009, &r).contains("notional"));
+        assert!(amend_checked(&OpenOrder { reduce_only: true, ..o.clone() }, 10_000.0, 0.009, &r).is_ok());
+        assert!(amend_checked(&OpenOrder { pos: Some(Side::Sell), ..o.clone() }, 10_000.0, 0.009, &r).is_ok());
+        // a value of 1,000 USDT at 80,000 is 0.0125, floored to the step
+        assert_eq!(amend_checked(&o, 80_000.0, 1_000.0 / 80_000.0, &r).unwrap().1, "0.012");
+        // nothing changed on the grid, no rules, nonsense
+        assert!(err(&o, 80_000.04, 0.0101, &r).contains("nothing to change"));
+        assert!(err(&o, 80_000.0, 0.02, &Rules::default()).contains("no trading rules"));
+        assert!(err(&o, f64::NAN, 0.02, &r).contains("invalid") && err(&o, 0.01, 0.02, &Rules { min_notional: 0.0, ..r }).contains("invalid price"));
+        // Bybit gets only what changed; spot rows go to category spot
+        let b = bybit::amend_body(&o, false, "80000.0", "0.015", &r);
+        assert_eq!(b, json!({"category": "linear", "symbol": "BTCUSDT", "orderId": "1", "qty": "0.015"}));
+        let b = bybit::amend_body(&o, true, "79500.0", "0.010", &r);
+        assert_eq!(b, json!({"category": "spot", "symbol": "BTCUSDT", "orderId": "1", "price": "79500.0"}));
+        assert!(can_amend(Exchange::Bybit, true) && can_amend(Exchange::Binance, false) && !can_amend(Exchange::Binance, true) && !can_amend(Exchange::Okx, false));
+        // with real keys the rules refuse before any request; a venue without amend refuses outright
+        let k = Keys { key: "k".into(), secret: "s".into(), extra: None, demo: false };
+        assert!(now(amend(Exchange::Bybit, &k, &o, false, 80_000.0, 0.004, &r)).unwrap_err().to_string().contains("already filled"));
+        assert!(now(amend(Exchange::Binance, &k, &o, false, 80_000.0, 0.0009, &r)).unwrap_err().to_string().contains("below minimum"));
+        assert!(now(amend(Exchange::Okx, &k, &o, false, 79_000.0, 0.01, &r)).unwrap_err().to_string().contains("no in-place amend"));
+        assert!(now(amend(Exchange::Binance, &k, &o, true, 79_000.0, 0.01, &r)).unwrap_err().to_string().contains("no in-place amend"));
+        // only plain GTC limits are changed from Depth
+        assert_eq!(not_editable(&o), None);
+        assert_eq!(not_editable(&OpenOrder { kind: "lmt".into(), tif: String::new(), ..o.clone() }), None);
+        assert_eq!(not_editable(&OpenOrder { trigger: Some(1.0), ..o.clone() }), Some("trigger"));
+        assert_eq!(not_editable(&OpenOrder { tif: "PostOnly".into(), ..o.clone() }), Some("type"));
+        assert_eq!(not_editable(&OpenOrder { kind: "STOP".into(), ..o.clone() }), Some("type"));
     }
 
     #[test]

@@ -106,6 +106,8 @@ impl App {
         let order_json = |o: &trade::OpenOrder, market: &str| json!({
             "ex": ex_name(o.ex), "symbol": o.symbol, "id": o.id, "side": if o.side == Side::Buy { "buy" } else { "sell" }, "price": o.price, "qty": o.qty,
             "filled": o.filled, "kind": o.kind, "tif": o.tif, "reduce_only": o.reduce_only, "ts": o.ts, "pos": o.pos.map(side_name), "spot": market != "perp", "market": market,
+            // price / size editable (None) or why not; changed in place or by cancel + new
+            "edit": if market == "margin" { Some("margin") } else { trade::not_editable(o) }, "amends": trade::can_amend(o.ex, market == "spot"),
         });
         let orders: Vec<Value> = acc.orders.iter().map(|o| order_json(o, "perp")).chain(acc.spot_orders.iter().map(|o| order_json(o, "spot")))
             .chain(acc.margin_orders.iter().map(|o| order_json(o, "margin"))).collect();
@@ -279,10 +281,22 @@ impl App {
                 let o = self.eng.account.lock().unwrap().orders.iter().find(|o| o.ex == e && o.id == id).cloned().ok_or("order not found")?;
                 self.eng.cancel(&o, ctx);
             }
-            "move_order" => {
-                let (e, id) = (exv()?, s("id"));
-                let o = self.eng.account.lock().unwrap().orders.iter().find(|o| o.ex == e && o.id == id).cloned().ok_or("order not found")?;
-                self.eng.replace_order(&o, f("price").filter(|p| *p > 0.0).ok_or("no price")?, ctx);
+            "order_rules" => self.eng.want_rules(exv()?, &s("symbol"), v["spot"] == true),
+            // a perp or spot row's new price and / or total size ("qty", or "value" in USDT at the new price):
+            // check_amend answers it on the venue grid (or why not) for the confirmation, move_order sends it
+            op @ ("move_order" | "check_amend") => {
+                let (e, id, spot) = (exv()?, s("id"), v["spot"] == true);
+                let o = { let a = self.eng.account.lock().unwrap(); (if spot { &a.spot_orders } else { &a.orders }).iter().find(|o| o.ex == e && o.id == id).cloned() }.ok_or("order not found")?;
+                let price = f("price").filter(|p| *p > 0.0);
+                let qty = f("qty").or_else(|| f("value").map(|x| x / price.unwrap_or(o.price))).filter(|q| *q > 0.0);
+                if price.is_none() && qty.is_none() { return Err("no new price or size".into()); }
+                let (price, qty) = (price.unwrap_or(o.price), qty.unwrap_or(o.qty));
+                if op == "move_order" { self.eng.replace_order(&o, spot, price, qty, ctx); return Ok(json!({})); }
+                if let Some(why) = trade::not_editable(&o) { return Err(format!("not a plain GTC limit order ({why})")); }
+                let r = self.eng.account.lock().unwrap().rules.get(&(e, if spot { format!("spot:{}", o.symbol) } else { o.symbol.clone() })).copied();
+                let Some(r) = r else { self.eng.want_rules(e, &o.symbol, spot); return Err(format!("{} trading rules are still loading: try again in a moment", o.symbol)) };
+                let (p, q) = trade::amend_checked(&o, price, qty, &r).map_err(|e| format!("{e:#}"))?;
+                return Ok(json!({"price": p.parse::<f64>().unwrap_or(price), "qty": q.parse::<f64>().unwrap_or(qty)}));
             }
             "close_position" => {
                 let (e, symbol) = (exv()?, s("symbol"));

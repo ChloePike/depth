@@ -26,11 +26,15 @@ impl Tab {
     fn history(self) -> bool { matches!(self, Tab::OrderHist | Tab::TradeHist | Tab::PosHist) }
 }
 
-/// A destructive position action waiting for confirmation.
-enum PosAct { Market(Value, f64), Limit(Value, f64, f64), Reverse(Value), CloseAll(Vec<Value>), Move(Value, f64) }
+/// A destructive position action waiting for confirmation. Move: an open order's new price and total size.
+enum PosAct { Market(Value, f64), Limit(Value, f64, f64), Reverse(Value), CloseAll(Vec<Value>), Move(Value, f64, f64) }
 
-/// Something a table cell or menu asked for, run after the frame's tables are drawn.
-enum Act { Op(Value), Goto(String), Copy(String), Confirm(PosAct), TpSl(Value), Share(Value), Prefill(Value), Transfer(String), Keys, Insure(Value) }
+/// Something a table cell or menu asked for, run after the frame's tables are drawn. Amend: an open
+/// order's cell committed (column: 4 price, 5 size, 7 value; the typed number).
+enum Act { Op(Value), Goto(String), Copy(String), Confirm(PosAct), TpSl(Value), Share(Value), Prefill(Value), Transfer(String), Keys, Insure(Value), Amend(Value, usize, f64) }
+
+/// The one open-order cell being edited: row key, column, typed text, whether its field took focus yet.
+struct Edit { key: String, col: usize, text: String, focused: bool }
 
 /// PnL card options (what the copied text reveals).
 struct Share { p: Value, amount: bool, prices: bool, copied: bool, shot: Option<Rect> }
@@ -52,8 +56,8 @@ pub struct AccountPanel {
     sel_tpsl: Vec<String>,
     /// per-position inline limit close price, only once edited (else it follows the mark)
     close_px: HashMap<String, String>,
-    /// open order prices being edited in the table, by row key
-    order_px: HashMap<String, String>,
+    /// the open order cell (price / size / value) being edited
+    edit: Option<Edit>,
     confirm: Option<PosAct>,
     share: Option<Share>,
     sheet: Option<TpSlSheet>,
@@ -79,7 +83,7 @@ impl Default for AccountPanel {
             // T1_ACC_TAB=<n>: open the strip on tab n (screenshots)
             tab: std::env::var("T1_ACC_TAB").ok().and_then(|s| s.parse::<usize>().ok()).and_then(|n| TABS.get(n).copied()).unwrap_or(Tab::Positions), hide_others: false, hist_requested: false,
             sort_orders: (0, true), sort_tpsl: (0, false), sort_oh: (0, true), sort_fills: (0, true), sort_closed: (0, true),
-            sel_orders: vec![], sel_tpsl: vec![], close_px: HashMap::new(), order_px: HashMap::new(),
+            sel_orders: vec![], sel_tpsl: vec![], close_px: HashMap::new(), edit: None,
             confirm: None, share: None, sheet: None, xfer: None, wallets_requested: vec![], error: None, xfer_shot: false,
             open_settings: None, prefill: None, insure: None, kill_prompt: false, kill_seen: 0,
         }
@@ -337,6 +341,31 @@ fn cell_field(ui: &mut Ui, r: Rect, text: &mut String, id: impl std::hash::Hash 
     resp
 }
 
+/// An open-order cell that turns into a text field when clicked; `why` (a row that cannot change)
+/// shows as its tooltip instead. (edit started, Some(text) when Enter commits); Esc or a click
+/// elsewhere drops the edit.
+#[allow(clippy::too_many_arguments)]
+fn edit_cell(ui: &mut Ui, r: Rect, edit: &mut Option<Edit>, key: &str, col: usize, shown: String, font: egui::FontId, c: Color32, why: Option<&str>) -> (bool, Option<String>) {
+    if let Some(e) = edit.as_mut().filter(|e| e.key == key && e.col == col) {
+        let w = r.width().min(110.0);
+        let fr = cell_field(ui, Rect::from_min_size(egui::pos2(r.right() - w, r.center().y - 13.0), egui::vec2(w, 26.0)), &mut e.text, ("oedit", key, col));
+        if !e.focused { fr.request_focus(); e.focused = true; }
+        if !fr.lost_focus() { return (false, None); }
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let t = edit.take().map(|e| e.text);
+        return (false, t.filter(|_| enter));
+    }
+    let tr = txt(ui, r, &shown, font, c, true);
+    let hit = tr.expand2(egui::vec2(6.0, 5.0));
+    let resp = ui.interact(hit, ui.id().with(("ocell", key, col)), if why.is_some() { egui::Sense::hover() } else { egui::Sense::click() });
+    if let Some(w) = why { resp.on_hover_text(w); return (false, None); }
+    if resp.hovered() { ui.painter().rect_stroke(hit, kit::rad(), egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside); }
+    let resp = resp.on_hover_cursor(egui::CursorIcon::Text).on_hover_text(l("Click to change, Enter to send"));
+    if !resp.clicked() { return (false, None); }
+    *edit = Some(Edit { key: key.into(), col, text: shown, focused: false });
+    (true, None)
+}
+
 /// Centered empty state: title, description, optional button.
 fn empty_state(ui: &mut Ui, title: &str, desc: &str, button: Option<&str>) -> bool {
     let mut clicked = false;
@@ -572,6 +601,16 @@ impl AccountPanel {
                     self.prefill = Some((p, std::time::Instant::now()));
                 }
                 Act::Transfer(ex) => self.open_transfer(&ex, st, call),
+                Act::Amend(o, col, x) => {
+                    // the engine puts it on the venue grid and checks it (rules, above the filled part) before anything is shown or sent
+                    let mut v = json!({"op": "check_amend", "ex": o["ex"], "id": o["id"], "spot": o["spot"]});
+                    v[match col { 4 => "price", 5 => "qty", _ => "value" }] = x.into();
+                    match call(v) {
+                        Ok(n) if st["prefs"]["confirm"].as_bool().unwrap_or(true) => self.confirm = Some(PosAct::Move(o, f(&n["price"]), f(&n["qty"]))),
+                        Ok(n) => { if let Err(e) = call(json!({"op": "move_order", "ex": o["ex"], "id": o["id"], "spot": o["spot"], "price": n["price"], "qty": n["qty"]})) { self.error = Some(e); } }
+                        Err(e) => self.error = Some(e),
+                    }
+                }
                 Act::Keys => self.open_settings = Some(3),
                 Act::Insure(p) => {
                     // option chains load for the engine's base: move there first
@@ -835,10 +874,16 @@ impl AccountPanel {
                     ], l("Two market orders, the open only after the close was accepted; if the second fails you are left flat."))
                 }
             }
-            PosAct::Move(o, x) => (l("Move order?"), l("Move"), Some(o), vec![
-                (l("Side").into(), side_name(s(&o["side"])).into(), if s(&o["side"]) == "buy" { up() } else { dn() }), (l("Size").into(), unit(o, f(&o["qty"]) - f(&o["filled"])), fg_strong()),
-                (l("Price").into(), format!("{} → {}", fmt_px(f(&o["price"])), fmt_px(*x)), fg_strong()),
-            ], ""),
+            // "Buy 0.010 @ 80,000.0 → 0.015 @ 79,500.0": sizes are the total, the filled part included
+            PosAct::Move(o, x, q) => {
+                let mut rows = vec![
+                    (l("Side").into(), side_name(s(&o["side"])).into(), if s(&o["side"]) == "buy" { up() } else { dn() }),
+                    (l("Order").into(), format!("{} @ {} → {} @ {}", qty(f(&o["qty"])), fmt_px(f(&o["price"])), qty(*q), fmt_px(*x)), fg_strong()),
+                    (l("Value").into(), format!("{} → {} USDT", usd(f(&o["qty"]) * f(&o["price"])), usd(q * x)), fg()),
+                ];
+                if f(&o["filled"]) > 0.0 { rows.push((l("Filled").into(), unit(o, f(&o["filled"])), mu())); }
+                (l("Change order?"), l("Change"), Some(o), rows, if o["amends"] == false { super::t("tr.move_replace") } else { "" })
+            }
             PosAct::CloseAll(ps) => (l("Close all positions at market?"), l("Close All"), None,
                 ps.iter().map(|p| (format!("{} {} {}", s(&p["ex"]), s(&p["symbol"]), ls(p)), unit(p, f(&p["qty"])), side_col(p))).collect(),
                 l("Sent at market, or as an IOC limit at the slippage cap (Settings > Trading) when the book is thin; what does not fill stays open.")),
@@ -873,7 +918,7 @@ impl AccountPanel {
             PosAct::Limit(p, x, q) => vec![close(&p, q, Some(x))],
             PosAct::Reverse(p) => vec![json!({"op": "reverse_position", "ex": p["ex"], "symbol": p["symbol"], "side": p["side"]})],
             PosAct::CloseAll(ps) => ps.iter().map(|p| close(p, f(&p["qty"]), None)).collect(),
-            PosAct::Move(o, x) => vec![json!({"op": "move_order", "ex": o["ex"], "id": o["id"], "price": x})],
+            PosAct::Move(o, x, q) => vec![json!({"op": "move_order", "ex": o["ex"], "id": o["id"], "spot": o["spot"], "price": x, "qty": q})],
         };
         for v in ops { if let Err(e) = call(v) { self.error = Some(e); } }
     }
@@ -1032,8 +1077,9 @@ impl AccountPanel {
                 if kit::button(ui, l("Cancel Selected Orders"), Look::Link, H_SM, None, true).clicked() { for o in &picked { acts.push(Act::Op(json!({"op": "cancel", "ex": o["ex"], "id": o["id"], "spot": o["spot"]}))); } }
             });
         }
-        let px_map = &mut self.order_px;
-        let confirm = st["prefs"]["confirm"].as_bool().unwrap_or(true);
+        // an edited row that filled or went away takes its edit with it
+        if self.edit.as_ref().is_some_and(|e| !rows.iter().any(|o| row_key(o) == e.key)) { self.edit = None; }
+        let edit = &mut self.edit;
         table(ui, "orders", &cols, rows, 36.0, l("No open orders"), Some(&mut self.sort_orders), Some(&mut self.sel_orders), &mut |ui, part| match part {
             Part::Cell(i, r, o) => match i {
                 0 => { txt(ui, r, time(o["ts"].as_i64().unwrap_or(0)), mono(12.0), mu(), false); }
@@ -1057,31 +1103,28 @@ impl AccountPanel {
                         chip_at(ui, x + 4.0, r.center().y, if closes { l("Close") } else { l("Open") }, if closes { kit::Tone::Warn } else { kit::Tone::Outline });
                     }
                 }
-                // perp GTC limits: the price is a field, Enter moves the order (same rule as dragging its chart line)
-                4 if o["market"] == "perp" && s(&o["kind"]).eq_ignore_ascii_case("limit") && matches!(s(&o["tif"]).to_ascii_lowercase().as_str(), "" | "gtc" | "goodtillcancel") => {
-                    let key = row_key(o);
-                    let mut t = px_map.get(&key).cloned().unwrap_or_else(|| fmt_px(f(&o["price"])));
-                    let fr = cell_field(ui, Rect::from_min_size(egui::pos2(r.right() - 96.0, r.center().y - 13.0), egui::vec2(96.0, 26.0)), &mut t, ("opx", &key))
-                        .on_hover_text(l("Type a new price, Enter to move the order"));
-                    if fr.changed() { px_map.insert(key.clone(), t.clone()); }
-                    if fr.lost_focus() {
-                        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            if let Some(x) = parse(&t).filter(|x| *x > 0.0 && (x - f(&o["price"])).abs() > 1e-12) {
-                                acts.push(if confirm { Act::Confirm(PosAct::Move(o.clone(), x)) } else { Act::Op(json!({"op": "move_order", "ex": o["ex"], "id": o["id"], "price": x})) });
-                            }
-                        }
-                        px_map.remove(&key);
-                    }
+                // price, size (the total, its filled part included) and value: click to type a new one, Enter
+                // sends it through the confirmation; rows that cannot change say why
+                4 | 5 | 7 => {
+                    let why = match o["edit"].as_str() {
+                        None => None,
+                        Some("trigger") => Some(l("Conditional order: cancel it and place a new one to change it")),
+                        Some("margin") => Some(l("Margin order: cancel it and place a new one to change it")),
+                        Some(_) => Some(l("Only plain GTC limit orders can be changed here")),
+                    };
+                    let (px, q) = (f(&o["price"]), f(&o["qty"]));
+                    let (shown, font, c) = match i { 4 => (fmt_px(px), mono_m(12.5), fg()), 5 => (qty(q), mono(12.5), fg()), _ => (usd(px * q), mono(12.5), mu()) };
+                    let (started, done) = edit_cell(ui, r, edit, &row_key(o), i, shown, font, c, why);
+                    // the rules are read while typing, so the size can be checked before the confirmation
+                    if started { acts.push(Act::Op(json!({"op": "order_rules", "ex": o["ex"], "symbol": o["symbol"], "spot": o["spot"]}))); }
+                    if let Some(x) = done.as_deref().and_then(parse).filter(|x| *x > 0.0) { acts.push(Act::Amend(o.clone(), i, x)); }
                 }
-                4 => { txt(ui, r, fmt_px(f(&o["price"])), mono_m(12.5), fg(), true); }
-                5 => { txt(ui, r, qty(f(&o["qty"])), mono(12.5), fg(), true); }
                 6 => {
                     let (fl, q) = (f(&o["filled"]), f(&o["qty"]));
                     let mut parts = vec![(qty(fl), if fl > 0.0 { fg() } else { mu() })];
                     if q > 0.0 { parts.push((format!(" ({}%)", fmt_dp(fl / q * 100.0, 1)), mu())); }
                     rich_right(ui, r, &parts, mono(12.5));
                 }
-                7 => { txt(ui, r, usd(f(&o["price"]) * f(&o["qty"])), mono(12.5), mu(), true); }
                 _ => {
                     let b = Rect::from_min_max(egui::pos2(r.left(), r.center().y - H_SM / 2.0), egui::pos2(r.right(), r.center().y + H_SM / 2.0));
                     if at(ui, b, |ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| kit::button(ui, l("Cancel"), Look::Secondary, H_SM, None, true)).inner).clicked() { acts.push(Act::Op(json!({"op": "cancel", "ex": o["ex"], "id": o["id"], "spot": o["spot"]}))); }

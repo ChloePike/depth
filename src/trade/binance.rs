@@ -198,11 +198,16 @@ pub async fn can_trade(k: &Keys) -> Result<Option<bool>> {
     Ok(v[flag].as_bool())
 }
 
-pub async fn amend(k: &Keys, o: &OpenOrder, px: String, r: &Rules) -> Result<()> {
+/// Modify (PUT /fapi/v1/order, PM /papi/v1/um/order): LIMIT only; side, quantity (the new total) and
+/// price every time. A quantity at or below what filled would cancel the order (`amend_checked`
+/// refuses it first). reduceOnly=true on a reduce-only order skips the venue's min-notional check as
+/// `checked` does (documented on USD-M only: PM gets no reduceOnly, the venue may refuse a small one).
+pub async fn amend(k: &Keys, o: &OpenOrder, px: &str, qty: &str) -> Result<()> {
     // the algo service has no modify
     if o.trigger.is_some() { bail!("binance: a conditional or trailing order cannot be amended; cancel it and place a new one"); }
-    binance(k, reqwest::Method::PUT, "/fapi/v1/order", &[("symbol", o.symbol.clone()), ("orderId", o.id.clone()),
-        ("side", side_str(Exchange::Binance, o.side).into()), ("quantity", fmt_step(o.qty, r.step, true)), ("price", px)]).await?;
+    let mut p = vec![("symbol", o.symbol.clone()), ("orderId", o.id.clone()), ("side", side_str(Exchange::Binance, o.side).into()), ("quantity", qty.into()), ("price", px.into())];
+    if o.reduce_only && !binance_pm(k).await? { p.push(("reduceOnly", "true".into())); }
+    binance(k, reqwest::Method::PUT, "/fapi/v1/order", &p).await?;
     Ok(())
 }
 

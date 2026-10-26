@@ -71,8 +71,8 @@ pub enum EvKind {
     Place { o: DemoOrder },
     /// an order or TP/SL is gone: cancelled, an IOC remainder, a fired TP/SL, an orphaned close
     Cancel { id: String },
-    /// a resting limit order's new price
-    Amend { id: String, price: f64 },
+    /// a resting limit order's new price and new total size (None: unchanged; logs from before sizes changed)
+    Amend { id: String, price: f64, #[serde(default, skip_serializing_if = "Option::is_none")] qty: Option<f64> },
     /// a stop / trailing order fired at `px`: from here it is a market order, or a limit at its limit price
     Trigger { id: String, px: f64 },
     /// one execution at one price; `order` = the DemoOrder or TP/SL id, `pos` = the position side it acts on
@@ -188,8 +188,11 @@ impl Sim {
                 if let Some(i) = self.orders.iter().position(|o| &o.id == id) { let o = self.orders.remove(i); self.done(&o, true, ts); }
                 self.tpsl.retain(|t| &t.id != id);
             }
-            EvKind::Amend { id, price } => if let Some(o) = self.orders.iter_mut().find(|o| &o.id == id)
-                && let Kind::Limit { tif, .. } = o.req.kind { o.req.kind = Kind::Limit { price: *price, tif }; },
+            EvKind::Amend { id, price, qty } => if let Some(o) = self.orders.iter_mut().find(|o| &o.id == id)
+                && let Kind::Limit { tif, .. } = o.req.kind {
+                o.req.kind = Kind::Limit { price: *price, tif };
+                if let Some(q) = qty { o.req.qty = *q; }
+            },
             EvKind::Trigger { id, .. } => if let Some(o) = self.orders.iter_mut().find(|o| &o.id == id) {
                 o.req.kind = match o.req.kind {
                     Kind::Stop { limit: Some(price), .. } => Kind::Limit { price, tif: Tif::Gtc },
@@ -646,7 +649,7 @@ mod tests {
         s.record(1, by(Buy, Buy, 100.0, 1.0, 0.1));
         let before = snap(&s);
         s.record(2, EvKind::Cancel { id: "nope".into() });
-        s.record(2, EvKind::Amend { id: "nope".into(), price: 1.0 });
+        s.record(2, EvKind::Amend { id: "nope".into(), price: 1.0, qty: Some(1.0) });
         s.record(2, EvKind::Trigger { id: "nope".into(), px: 1.0 });
         assert_eq!(snap(&s), before);
         let dup = s.pending[1].clone();

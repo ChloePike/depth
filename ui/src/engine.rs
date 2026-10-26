@@ -1820,42 +1820,80 @@ impl Engine {
         });
     }
 
-    /// Move a resting limit order (dragged on the chart): amended in place where the venue allows it
-    /// (Bybit, Binance: same id, nothing in between); elsewhere cancelled, then the rest of it placed
-    /// at `price` only once the cancel succeeded, so a failed cancel never leaves two orders.
+    /// Read a symbol's trading rules into the cache once (the open orders table asks when a cell is
+    /// edited, so the new size is checked before the confirmation). Public data; a cached symbol costs nothing.
+    pub fn want_rules(&self, ex: Exchange, symbol: &str, spot: bool) {
+        let key = (ex, if spot { format!("spot:{symbol}") } else { symbol.to_string() });
+        let (Some(rt), account, symbol) = (self.acct_rt.as_ref(), self.account.clone(), symbol.to_string()) else { return };
+        if account.lock().unwrap().rules.contains_key(&key) { return; }
+        rt.spawn(async move {
+            let r = if spot { trade::spot::rules(ex, &symbol).await } else { trade::rules(ex, &symbol).await };
+            if let Ok(r) = r { account.lock().unwrap().rules.insert(key, r); }
+        });
+    }
+
+    /// Change a resting limit order's price and / or size (`qty` = the new TOTAL size, its filled part
+    /// included; a chart drag passes the row's own): in place where the venue amends (`trade::can_amend`:
+    /// same id, nothing in between); elsewhere cancelled, then the rest of the new size placed at `price`
+    /// only once the cancel succeeded, so a failed cancel never leaves two orders. The change, the new
+    /// order of the cancel + place path and (perps) the risk limits are checked before anything is sent.
+    /// `spot`: a row of `spot_orders` (Bybit amends it; Binance spot is cancelled and placed again).
     /// ponytail: OKX / Bitget / Gate / Kraken / Hyperliquid have amend endpoints too; wire them once
-    /// those venues are verified on a real account.
-    pub fn replace_order(&self, o: &OpenOrder, price: f64, ctx: &eframe::egui::Context) {
+    /// those venues are verified on a real account. Cancel + place counts the filled part as the row last
+    /// showed it: a fill landing between that and the cancel is placed again (read each venue's cancel
+    /// answer for its final fill to close that).
+    pub fn replace_order(&self, o: &OpenOrder, spot: bool, price: f64, qty: f64, ctx: &eframe::egui::Context) {
         let (Some(rt), account, ctx, o, agg, base) = (self.acct_rt.as_ref(), self.account.clone(), ctx.clone(), o.clone(), self.agg.clone(), self.base.clone()) else { return };
-        let opp = |s: depth::Side| if s == depth::Side::Buy { depth::Side::Sell } else { depth::Side::Buy };
-        let req = OrderReq {
-            symbol: o.symbol.clone(), close: o.reduce_only, kind: trade::Kind::Limit { price, tif: trade::Tif::Gtc }, qty: o.qty - o.filled, client_id: None, attach: None,
-            // the position the order acts on: its own side when opening, the other one when reducing
-            pos: o.pos.unwrap_or(if o.reduce_only { opp(o.side) } else { o.side }),
-        };
         rt.spawn(async move {
             let Some(k) = account.lock().unwrap().keys.get(&o.ex).cloned() else { return };
-            // the new price against the risk band too (in the task: the caller may hold the agg lock)
-            let mid = venue_mid(&agg, &base, o.ex, &o.symbol);
-            let gate = risk_gate(&mut account.lock().unwrap(), o.ex, &req, mid);
-            if let Err(e) = gate { account.lock().unwrap().note(format!("FAIL move {:?} {} {} -> {price}: risk limit: {e}", o.ex, o.symbol, o.id), false); ctx.request_repaint(); return; }
-            if trade::can_amend(o.ex) {
-                let cached = account.lock().unwrap().rules.get(&(o.ex, o.symbol.clone())).copied();
-                let res = async {
-                    let r = match cached { Some(r) => r, None => trade::rules(o.ex, &o.symbol).await? };
-                    trade::amend(o.ex, &k, &o, price, &r).await
-                }.await;
-                let what = format!("{:?} {} {} {} -> {price}", o.ex, o.symbol, o.id, o.price);
-                let ok = res.is_ok();
-                account.lock().unwrap().note(match res { Ok(()) => format!("OK amend {what}"), Err(e) => format!("FAIL amend {what}: {e:#}") }, ok);
-                ctx.request_repaint();
+            let what = format!("{:?} {} {} {}@{} -> {qty}@{price}", o.ex, o.symbol, o.id, o.qty, o.price);
+            let note = |msg: String, ok: bool| { account.lock().unwrap().note(msg, ok); ctx.request_repaint(); };
+            let fail = |msg: String| note(format!("FAIL amend {what}: {msg}"), false);
+            if let Some(why) = trade::not_editable(&o) { return fail(format!("not a plain GTC limit order ({why}); cancel it and place a new one")); }
+            let key = (o.ex, if spot { format!("spot:{}", o.symbol) } else { o.symbol.clone() });
+            let cached = account.lock().unwrap().rules.get(&key).copied();
+            let r = match cached { Some(r) => Ok(r), None if spot => trade::spot::rules(o.ex, &o.symbol).await, None => trade::rules(o.ex, &o.symbol).await };
+            let r = match r { Ok(r) => { account.lock().unwrap().rules.insert(key.clone(), r); r } Err(e) => return fail(format!("{e:#}")) };
+            let (px, q) = match trade::amend_checked(&o, price, qty, &r) { Ok(x) => x, Err(e) => return fail(format!("{e:#}")) };
+            let (price, total) = (px.parse().unwrap_or(price), q.parse().unwrap_or(qty));
+            let opp = |s: depth::Side| if s == depth::Side::Buy { depth::Side::Sell } else { depth::Side::Buy };
+            // what is left of the new size; the position it acts on: its own side when opening, the other one when reducing
+            let req = OrderReq { symbol: o.symbol.clone(), close: o.closes(), kind: trade::Kind::Limit { price, tif: trade::Tif::Gtc }, qty: total - o.filled, client_id: None, attach: None,
+                pos: o.pos.unwrap_or(if o.closes() { opp(o.side) } else { o.side }) };
+            // the new order against the risk limits too (in the task: the caller may hold the agg lock)
+            let mid = if spot { 0.0 } else { venue_mid(&agg, &base, o.ex, &o.symbol) };
+            if !spot { let gate = risk_gate(&mut account.lock().unwrap(), o.ex, &req, mid); if let Err(e) = gate { return fail(format!("risk limit: {e}")); } }
+            if trade::can_amend(o.ex, spot) {
+                match trade::amend(o.ex, &k, &o, spot, price, total, &r).await {
+                    Ok(()) => note(format!("OK amend {what}"), true),
+                    Err(e) if trade::is_unknown_outcome(&e) => note(format!("UNKNOWN amend {what}: no answer read ({e:#}); the order list shows what the venue did, it is never sent again"), false),
+                    Err(e) => fail(format!("{e:#}")),
+                }
+                if spot { refresh_spot(&account, o.ex).await; ctx.request_repaint(); }
                 return;
             }
-            match trade::cancel(o.ex, &k, &o.symbol, &o.id).await {
-                Ok(()) => { place_logged(&account, o.ex, &req, if mid > 0.0 { mid } else { price }, k.demo).await; }
-                Err(e) => account.lock().unwrap().note(format!("FAIL move {:?} {} {}: cancel: {e:#}", o.ex, o.symbol, o.id), false),
+            // cancel + place: the new order must pass as one, and the position mode be known, before the old one goes
+            let new_ok = if spot { trade::spot::checked(req.kind, req.qty, &r, price).map(|_| ()) } else { trade::checked(&req, &r, price).map(|_| ()) };
+            if let Err(e) = new_ok { return fail(format!("the new order would be refused ({e:#}); nothing was cancelled")); }
+            let cached_mode = account.lock().unwrap().modes.get(&key).copied().flatten();
+            if !spot && cached_mode.is_none() {
+                match trade::mode(o.ex, &k, &o.symbol).await { Ok(m) => { account.lock().unwrap().modes.insert(key, Some(m)); } Err(e) => return fail(format!("{e:#}")) }
             }
-            ctx.request_repaint();
+            let cancel = if spot { trade::spot::cancel(o.ex, &k, &o.symbol, &o.id, false).await } else { trade::cancel_order(o.ex, &k, &o).await };
+            match cancel {
+                Err(e) if trade::is_unknown_outcome(&e) => note(format!("UNKNOWN amend {what}: the cancel got no answer ({e:#}); the new order was not placed: check the venue"), false),
+                Err(e) => fail(format!("cancel: {e:#}")),
+                Ok(()) if spot => {
+                    match trade::spot::place(o.ex, &k, &o.symbol, o.side, req.kind, req.qty, &r, price, None).await {
+                        Ok(id) => note(format!("OK amend {what}: cancelled, the rest placed as {id}"), true),
+                        Err(e) if trade::is_unknown_outcome(&e) => note(format!("UNKNOWN amend {what}: cancelled, the new order got no answer ({e:#}); it may be live: check Open Orders, it is never sent again"), false),
+                        Err(e) => fail(format!("cancelled, the new order failed: {e:#}")),
+                    }
+                    refresh_spot(&account, o.ex).await;
+                    ctx.request_repaint();
+                }
+                Ok(()) => { place_logged(&account, o.ex, &req, if mid > 0.0 { mid } else { price }, k.demo).await; ctx.request_repaint(); }
+            }
         });
     }
 

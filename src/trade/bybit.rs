@@ -220,8 +220,18 @@ pub async fn can_trade(k: &Keys) -> Result<Option<bool>> {
     Ok(Some(!ro && perms))
 }
 
-pub async fn amend(k: &Keys, o: &OpenOrder, px: String) -> Result<()> {
-    bybit(k, false, "/v5/order/amend", json!({"category": "linear", "symbol": o.symbol, "orderId": o.id, "price": px})).await?;
+/// `/v5/order/amend` body (linear, or spot on the unified account): only what changed, as the venue
+/// asks; `qty` is the new total order size.
+pub fn amend_body(o: &OpenOrder, spot: bool, px: &str, qty: &str, r: &Rules) -> Value {
+    let mut b = json!({"category": if spot { "spot" } else { "linear" }, "symbol": o.symbol, "orderId": o.id});
+    if px != fmt_step(o.price, r.tick, false) { b["price"] = px.into(); }
+    if qty != fmt_step(o.qty, r.step, true) { b["qty"] = qty.into(); }
+    b
+}
+
+/// Accepted is not done (the venue amends asynchronously): the private stream shows the result.
+pub async fn amend(k: &Keys, o: &OpenOrder, spot: bool, px: &str, qty: &str, r: &Rules) -> Result<()> {
+    bybit(k, false, "/v5/order/amend", amend_body(o, spot, px, qty, r)).await?;
     Ok(())
 }
 
