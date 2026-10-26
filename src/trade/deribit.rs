@@ -125,9 +125,17 @@ pub fn order_params(symbol: &str, side: Side, q: &str, px: &str, tif: Tif, reduc
 pub async fn option_order(k: &Keys, symbol: &str, side: Side, q: &str, px: &str, tif: Tif, reduce_only: bool) -> Result<String> {
     let (method, p) = order_params(symbol, side, q, px, tif, reduce_only);
     let v = deribit(Some(k), method, &p).await?;
-    let o = &v["order"];
+    outcome(method, &v["order"])
+}
+
+/// The order id of a buy / sell reply, with how much filled when anything did. Rejected, or cancelled
+/// with nothing filled (an IOC / FOK that found no match), is an error: nothing was bought or sold.
+fn outcome(method: &str, o: &Value) -> Result<String> {
     if o["order_state"] == "rejected" { bail!("deribit {method}: order rejected ({})", o["reject_reason"].as_str().unwrap_or("no reason given")); }
-    o["order_id"].as_str().map(String::from).ok_or_else(|| anyhow!("deribit {method}: no order id in the reply"))
+    let id = o["order_id"].as_str().ok_or_else(|| anyhow!("deribit {method}: no order id in the reply"))?;
+    let (filled, amount) = (z(&o["filled_amount"]), z(&o["amount"]));
+    if filled <= 0.0 && o["order_state"] == "cancelled" { bail!("deribit {method}: not filled, order {id} cancelled with nothing matched"); }
+    Ok(if filled > 0.0 { format!("{id}, filled {filled} of {amount}") } else { id.into() })
 }
 
 pub async fn option_cancel(k: &Keys, id: &str) -> Result<()> {
@@ -348,6 +356,19 @@ mod tests {
         assert_eq!(get(&order_params("X", Side::Buy, "1", "1", Tif::Fok, false).1, "time_in_force").as_deref(), Some("fill_or_kill"));
         // every param goes through the signed URI as is
         assert!(uri(m, &p).is_ok());
+    }
+
+    #[test]
+    fn order_replies_say_what_filled() {
+        let o = |state: &str, filled: f64| json!({"order_id": "BTC-1", "order_state": state, "amount": 0.5, "filled_amount": filled});
+        assert_eq!(outcome("private/buy", &o("filled", 0.5)).unwrap(), "BTC-1, filled 0.5 of 0.5");
+        assert_eq!(outcome("private/buy", &o("cancelled", 0.2)).unwrap(), "BTC-1, filled 0.2 of 0.5", "IOC partial");
+        assert_eq!(outcome("private/buy", &o("open", 0.0)).unwrap(), "BTC-1", "resting GTC");
+        // an IOC that matched nothing is not a success, and not an unknown outcome either
+        let e = outcome("private/buy", &o("cancelled", 0.0)).unwrap_err();
+        assert!(e.to_string().contains("not filled") && !is_unknown_outcome(&e));
+        assert!(outcome("private/buy", &json!({"order_state": "rejected", "reject_reason": "x"})).unwrap_err().to_string().contains("rejected (x)"));
+        assert!(outcome("private/buy", &json!({"order_state": "open"})).is_err());
     }
 
     #[test]
