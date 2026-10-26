@@ -151,7 +151,7 @@ fn qty_str(v: f64, step: Option<f64>) -> String {
 }
 
 pub(crate) fn usd(v: f64) -> String { fmt_dp(v, 2) }
-pub(crate) fn signed(v: f64) -> String { format!("{}{}", if v >= 0.0 { "+" } else { "" }, fmt_dp(v, 2)) }
+pub(crate) fn signed(v: f64) -> String { let t = fmt_dp(v, 2); if t.starts_with('-') { t } else { format!("+{t}") } }
 fn f(v: &Value) -> Option<f64> { v.as_f64() }
 fn s(v: &Value) -> &str { v.as_str().unwrap_or_default() }
 

@@ -134,7 +134,9 @@ pub fn step_dp(step: f64) -> usize {
 
 /// `d` decimals with thousands separators.
 pub fn fmt_dp(v: f64, d: usize) -> String {
-    let s = format!("{v:.d$}");
+    let mut s = format!("{v:.d$}");
+    // a value that rounds to zero prints without a sign ("-0.00" from -0.0 or -0.001)
+    if s.starts_with('-') && s.bytes().all(|c| matches!(c, b'-' | b'0' | b'.')) { s.remove(0); }
     // thousands separators on the integer part
     let (int, frac) = s.split_once('.').map(|(i, f)| (i, Some(f))).unwrap_or((&s, None));
     let (sign, digits) = int.strip_prefix('-').map(|d| ("-", d)).unwrap_or(("", int));
@@ -1383,6 +1385,17 @@ fn status_venue(ui: &mut Ui, e: Exchange, on: bool, alive: bool, idle: bool, lat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_prints_unsigned() {
+        assert_eq!(fmt_dp(-0.0, 2), "0.00");
+        assert_eq!(fmt_dp(-0.001, 2), "0.00");
+        assert_eq!(fmt_dp(-0.01, 2), "-0.01");
+        assert_eq!(fmt_dp(-1234.5, 1), "-1,234.5");
+        assert_eq!(crate::order::signed(-0.0), "+0.00");
+        assert_eq!(crate::order::signed(-0.004), "+0.00");
+        assert_eq!(crate::order::signed(-2.0), "-2.00");
+    }
     #[test]
     fn number_formats() {
         assert_eq!([2.0, 1.0, 0.5, 0.1, 0.004, 0.00001].map(step_dp), [0, 0, 1, 1, 3, 5]);
