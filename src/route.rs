@@ -1,14 +1,16 @@
 //! Smart order routing: a pure planner (no network, no locks). See docs/sor.md.
 //! Every leg is priced from its venue's own raw book in its own quote; the composite index never
 //! prices a leg. Fixed-venue mode is the same path restricted to one venue and one leg.
+//! Venues are compared in USDT (each book's `fx`); every leg's prices stay raw in its venue's quote.
 use crate::trade::{self, Kind, Mode, OrderReq, Position, Rules, Tif};
 use crate::{Exchange, Side};
 use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 
-/// One venue's raw book in its own quote, best level first.
+/// One venue's raw book in its own quote, best level first; `fx` converts that quote to USDT
+/// (1.0 for USDT venues, `Agg::usdt` for USD / USDC ones).
 #[derive(Clone, Debug)]
-pub struct VenueSnap { pub ex: Exchange, pub bids: Vec<(f64, f64)>, pub asks: Vec<(f64, f64)>, pub ts_ms: i64, pub lat_ms: Option<f64> }
+pub struct VenueSnap { pub ex: Exchange, pub bids: Vec<(f64, f64)>, pub asks: Vec<(f64, f64)>, pub ts_ms: i64, pub lat_ms: Option<f64>, pub fx: f64 }
 
 /// Local account state per venue (no REST in the planner).
 #[derive(Clone, Debug, Default)]
@@ -43,8 +45,11 @@ impl Default for Policy {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Leg { pub ex: Exchange, pub req: OrderReq, pub ref_px: f64, pub mode: Mode, pub est_px: f64, pub est_fee: f64, pub slip_bps: f64, pub avail_after: f64 }
+pub struct Leg { pub ex: Exchange, pub req: OrderReq, pub ref_px: f64, pub mode: Mode, pub est_px: f64, pub est_fee: f64, pub slip_bps: f64, pub avail_after: f64,
+    /// the venue's quote -> USDT (prices above are in the venue's quote)
+    pub fx: f64 }
 
+/// `vwap` is in USDT (legs at their fx); everything per leg is in its venue's quote.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RoutePlan { pub legs: Vec<Leg>, pub excluded: Vec<(Exchange, String)>, pub clamped_from: Option<f64>, pub total_qty: f64, pub vwap: f64, pub fees: f64 }
 
@@ -91,6 +96,8 @@ struct Cand<'a> {
     ex: Exchange, lv: &'a [(f64, f64)], own: &'a [(f64, f64)], rules: Rules, mode: Mode,
     /// most this venue may take: margin cap (open) or the position held (close)
     cap: f64, avail: f64, lev: f64, est: f64, fee: f64, complete: bool, lat: f64,
+    /// quote -> USDT, used only where venues are compared
+    fx: f64,
 }
 
 pub fn plan(req: &OrderReq, venues: &[VenueSnap], acct: &AcctSnap, p: &Policy, now_ms: i64, plan_id: u64) -> Result<RoutePlan> {
@@ -118,6 +125,7 @@ pub fn plan(req: &OrderReq, venues: &[VenueSnap], acct: &AcctSnap, p: &Policy, n
             if age > p.max_stale_ms { return Err(format!("stale book ({age} ms)")); }
             if v.bids.is_empty() || v.asks.is_empty() { return Err("empty book".into()); }
             if v.bids[0].0 >= v.asks[0].0 { return Err("crossed book".into()); }
+            if !(v.fx > 0.0 && v.fx.is_finite()) { return Err("no USDT rate for its quote".into()); }
             let rules = acct.rules.get(&ex).copied().filter(|r| r.step > 0.0).ok_or("no instrument rules")?;
             let mode = acct.mode.get(&ex).copied().ok_or("no position mode")?;
             if let Kind::Bbo { level, .. } = req.kind {
@@ -132,25 +140,25 @@ pub fn plan(req: &OrderReq, venues: &[VenueSnap], acct: &AcctSnap, p: &Policy, n
             let lat = v.lat_ms.unwrap_or(f64::MAX);
             if req.close {
                 if held <= 0.0 { return Err("no position on that side".into()); }
-                return Ok(Cand { ex, lv, own, rules, mode, cap: held, avail: avail.unwrap_or(0.0), lev: lev.unwrap_or(1.0), est, fee, complete, lat });
+                return Ok(Cand { ex, lv, own, rules, mode, cap: held, avail: avail.unwrap_or(0.0), lev: lev.unwrap_or(1.0), est, fee, complete, lat, fx: v.fx });
             }
             let lev = lev.ok_or("no leverage")?;
             let avail = avail.ok_or("no balance")?;
             let cap = avail * lev / est * 0.98;
             if cap < rules.min_qty.max(rules.step) { return Err("insufficient margin".into()); }
-            Ok(Cand { ex, lv, own, rules, mode, cap, avail, lev, est, fee, complete, lat })
+            Ok(Cand { ex, lv, own, rules, mode, cap, avail, lev, est, fee, complete, lat, fx: v.fx })
         })();
         match why { Ok(c) => cands.push(c), Err(r) => out.excluded.push((ex, r)) }
     }
 
     // dispersion guard: a venue whose touch is far from the median touch, either way, is refused (bad / lagging data).
     // ponytail: with two venues the median is their mean, so a lone bad venue needs a third to be caught
-    let mut touches: Vec<f64> = cands.iter().map(|c| c.lv[0].0).collect();
+    let mut touches: Vec<f64> = cands.iter().map(|c| c.lv[0].0 * c.fx).collect();
     touches.sort_by(f64::total_cmp);
     if let Some(&m) = touches.get(touches.len() / 2) {
         let med = if touches.len() % 2 == 0 { (m + touches[touches.len() / 2 - 1]) / 2.0 } else { m };
         cands.retain(|c| {
-            let off = (c.lv[0].0 - med).abs() / med * 1e4;
+            let off = (c.lv[0].0 * c.fx - med).abs() / med * 1e4;
             if off > p.max_disp_bps { out.excluded.push((c.ex, format!("dispersion {off:.1} bp off the median"))); }
             off <= p.max_disp_bps
         });
@@ -162,12 +170,12 @@ pub fn plan(req: &OrderReq, venues: &[VenueSnap], acct: &AcctSnap, p: &Policy, n
 
     // rank: fills now, then fee-adjusted price, then distance of a resting price from the touch, then latency.
     // closes: largest position first.
-    let key = |c: &Cand| (if req.close { -c.cap } else { 0.0 }, !c.complete, sgn * c.est * (1.0 + sgn * c.fee), sgn * (c.lv[0].0 - c.est), c.lat);
+    let key = |c: &Cand| (if req.close { -c.cap } else { 0.0 }, !c.complete, sgn * c.est * c.fx * (1.0 + sgn * c.fee), sgn * (c.lv[0].0 - c.est) * c.fx, c.lat);
     cands.sort_by(|a, b| key(a).partial_cmp(&key(b)).unwrap_or(std::cmp::Ordering::Equal));
     let best = &cands[0];
     let touch = best.lv[0].0;
     let legs = p.max_legs.max(1);
-    let can_split = p.allow_split && legs > 1 && (req.close || q * touch >= p.min_split_notional);
+    let can_split = p.allow_split && legs > 1 && (req.close || q * touch * best.fx >= p.min_split_notional);
     let costly = market && !req.close && (!best.complete || sgn * (best.est - touch) / touch * 1e4 > p.split_bps);
     let eps = q * 1e-9;
 
@@ -178,7 +186,7 @@ pub fn plan(req: &OrderReq, venues: &[VenueSnap], acct: &AcctSnap, p: &Policy, n
         if costly {
             // merged fee-adjusted ladder across venues, respecting margin caps and max legs
             let mut lad: Vec<(f64, usize, f64)> = cands.iter().enumerate()
-                .flat_map(|(i, c)| c.lv.iter().map(move |&(px, lq)| (sgn * px * (1.0 + sgn * c.fee), i, lq))).collect();
+                .flat_map(|(i, c)| c.lv.iter().map(move |&(px, lq)| (sgn * px * c.fx * (1.0 + sgn * c.fee), i, lq))).collect();
             lad.sort_by(|a, b| a.0.total_cmp(&b.0));
             for (_, i, lq) in lad {
                 if left <= eps { break; }
@@ -238,10 +246,10 @@ pub fn plan(req: &OrderReq, venues: &[VenueSnap], acct: &AcctSnap, p: &Policy, n
         let leg_req = OrderReq { kind, qty: x, client_id: Some(format!("t1{plan_id:x}l{n}")), ..req.clone() };
         trade::checked(&leg_req, &c.rules, t).map_err(|e| anyhow!("{:?}: {e}", c.ex))?;
         let avail_after = if req.close { c.avail - est_fee } else { c.avail - x * est / c.lev - est_fee };
-        out.legs.push(Leg { ex: c.ex, req: leg_req, ref_px: t, mode: c.mode, est_px: est, est_fee, slip_bps: if taker_side { slip } else { 0.0 }, avail_after });
+        out.legs.push(Leg { ex: c.ex, req: leg_req, ref_px: t, mode: c.mode, est_px: est, est_fee, slip_bps: if taker_side { slip } else { 0.0 }, avail_after, fx: c.fx });
     }
     out.total_qty = out.legs.iter().map(|l| l.req.qty).sum();
-    out.vwap = out.legs.iter().map(|l| l.est_px * l.req.qty).sum::<f64>() / out.total_qty;
+    out.vwap = out.legs.iter().map(|l| l.est_px * l.fx * l.req.qty).sum::<f64>() / out.total_qty;
     out.fees = out.legs.iter().map(|l| l.est_fee).sum();
     out.clamped_from = clamped.then_some(q);
     Ok(out)
@@ -250,12 +258,12 @@ pub fn plan(req: &OrderReq, venues: &[VenueSnap], acct: &AcctSnap, p: &Policy, n
 #[cfg(test)]
 mod tests {
     use super::*;
-    use Exchange::{Binance, Bybit, Okx};
+    use Exchange::{Binance, Bybit, Kraken, Okx};
 
     const NOW: i64 = 1_000_000;
 
     fn snap(ex: Exchange, bids: &[(f64, f64)], asks: &[(f64, f64)]) -> VenueSnap {
-        VenueSnap { ex, bids: bids.to_vec(), asks: asks.to_vec(), ts_ms: NOW - 100, lat_ms: Some(50.0) }
+        VenueSnap { ex, bids: bids.to_vec(), asks: asks.to_vec(), ts_ms: NOW - 100, lat_ms: Some(50.0), fx: 1.0 }
     }
     fn acct(exs: &[Exchange]) -> AcctSnap {
         let mut a = AcctSnap::default();
@@ -436,6 +444,36 @@ mod tests {
         let r = plan(&req(Kind::Market, 1.0), &v, &a, &smart(), NOW, 13).unwrap();
         assert_eq!(r.legs[0].ex, Bybit);
         assert!(r.excluded.iter().any(|(e, why)| *e == Binance && why.contains("dispersion")), "{r:?}");
+    }
+
+    #[test]
+    fn usd_venue_compared_in_usdt() {
+        // Kraken's 100.00 USD is 100.05 USDT: dearer than Bybit's 100.03 USDT, though cheaper in raw numbers
+        let a = acct(&[Bybit, Kraken]);
+        let kraken = |fx| VenueSnap { fx, ..snap(Kraken, BIDS, &[(100.0, 10.0)]) };
+        let v = [snap(Bybit, BIDS, &[(100.03, 10.0)]), kraken(1.0005)];
+        let r = plan(&req(Kind::Market, 1.0), &v, &a, &smart(), NOW, 15).unwrap();
+        assert_eq!(r.legs[0].ex, Bybit);
+        let v = [snap(Bybit, BIDS, &[(100.03, 10.0)]), kraken(1.0)];
+        assert_eq!(plan(&req(Kind::Market, 1.0), &v, &a, &smart(), NOW, 15).unwrap().legs[0].ex, Kraken);
+        // the leg keeps the venue's own price; the plan's average is in USDT
+        let v = [snap(Bybit, BIDS, &[(100.2, 10.0)]), kraken(1.0005)];
+        let r = plan(&req(Kind::Market, 1.0), &v, &a, &smart(), NOW, 15).unwrap();
+        assert_eq!((r.legs[0].ex, r.legs[0].est_px, r.legs[0].fx), (Kraken, 100.0, 1.0005));
+        assert!(close(r.vwap, 100.05), "{}", r.vwap);
+    }
+
+    #[test]
+    fn dispersion_guard_uses_fx() {
+        // a USD venue 25 bp under the others in raw numbers is 2 bp off in USDT: kept
+        let a = acct(&[Bybit, Okx, Kraken]);
+        let p = Policy { max_disp_bps: 10.0, ..smart() };
+        let kraken = |fx| VenueSnap { fx, ..snap(Kraken, &[(99.7, 10.0)], &[(99.75, 10.0)]) };
+        let v = |fx| [snap(Bybit, BIDS, &[(100.0, 10.0)]), snap(Okx, BIDS, &[(100.01, 10.0)]), kraken(fx)];
+        let r = plan(&req(Kind::Market, 1.0), &v(1.0023), &a, &p, NOW, 16).unwrap();
+        assert!(r.excluded.iter().all(|(e, _)| *e != Kraken), "{r:?}");
+        let r = plan(&req(Kind::Market, 1.0), &v(1.0), &a, &p, NOW, 16).unwrap();
+        assert!(r.excluded.iter().any(|(e, why)| *e == Kraken && why.contains("dispersion")), "{r:?}");
     }
 
     #[test]

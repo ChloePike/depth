@@ -440,7 +440,7 @@ impl App {
         let st = self.eng.stats.lock().unwrap();
         let venues: Vec<route::VenueSnap> = trade::TRADABLE.iter().filter_map(|&e| {
             let v = a.venues.get(&(e, Market::Perp))?;
-            Some(route::VenueSnap { ex: e, bids: v.book.bids().take(50).collect(), asks: v.book.asks().take(50).collect(), ts_ms: v.fresh, lat_ms: st.latency(e) })
+            Some(route::VenueSnap { ex: e, bids: v.book.bids().take(50).collect(), asks: v.book.asks().take(50).collect(), ts_ms: v.fresh, lat_ms: st.latency(e), fx: a.usdt(e, Market::Perp) })
         }).collect();
         drop(st);
         drop(a);
@@ -480,6 +480,7 @@ fn plan_json(p: &route::RoutePlan) -> Value {
             "ex": ex_name(l.ex), "pos": side_name(l.req.pos), "close": l.req.close, "qty": l.req.qty,
             "kind": l.req.kind.label(),
             "ref_px": l.ref_px, "est_px": l.est_px, "est_fee": l.est_fee, "slip_bps": l.slip_bps, "avail_after": l.avail_after, "client_id": l.req.client_id,
+            "fx": l.fx, "quote": depth::agg::quote_of(l.ex, Market::Perp),
         })).collect::<Vec<_>>(),
         "excluded": p.excluded.iter().map(|(e, r)| json!({"ex": ex_name(*e), "reason": r})).collect::<Vec<_>>(),
         "clamped_from": p.clamped_from, "total_qty": p.total_qty, "vwap": p.vwap, "fees": p.fees,

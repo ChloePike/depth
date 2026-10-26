@@ -1233,7 +1233,10 @@ impl OrderPanel {
                                 ui.label(RichText::new(format!("{} {base}", fmt_qty(f(&lg["qty"]).unwrap_or(0.0)))).font(mono_s(13.0)).color(fg_strong()));
                             });
                         });
-                        pair_row(ui, [(l("Order"), kind_text(s(&lg["kind"])), fg()), (l("Est. price"), fmt_px(f(&lg["est_px"]).unwrap_or(0.0)), fg())], true);
+                        // the leg's own price in its venue's quote (USD / USDC named); the average below is USDT
+                        let q = s(&lg["quote"]);
+                        let est = format!("{}{}", fmt_px(f(&lg["est_px"]).unwrap_or(0.0)), if q.is_empty() || q == "USDT" { String::new() } else { format!(" {q}") });
+                        pair_row(ui, [(l("Order"), kind_text(s(&lg["kind"])), fg()), (l("Est. price"), est, fg())], true);
                         let slip = f(&lg["slip_bps"]).unwrap_or(0.0);
                         pair_row(ui, [(l("Est. fee"), fmt_dp(f(&lg["est_fee"]).unwrap_or(0.0), 3), fg()), (l("Slippage"), format!("{slip:.1} bp"), if slip > 5.0 { WARN } else { fg() })], true);
                         let after = f(&lg["avail_after"]).unwrap_or(0.0);
@@ -1250,7 +1253,7 @@ impl OrderPanel {
             kit::group(ui, |ui| {
                 tight(ui);
                 kit::kv(ui, l("Size"), format!("{} {base}", fmt_qty(total)), fg_strong());
-                kit::kv(ui, l("Est. average price"), fmt_px(vwap), fg_strong());
+                kit::kv(ui, l("Est. average price"), format!("{} USDT", fmt_px(vwap)), fg_strong());
                 kit::kv(ui, l("Order value"), format!("{} USDT", usd(total * vwap)), fg_strong());
                 kit::kv(ui, l("Est. fees"), format!("{} USDT", fmt_dp(f(&tk.plan["fees"]).unwrap_or(0.0), 3)), fg());
                 if tk.tp.is_some() || tk.sl.is_some() {
