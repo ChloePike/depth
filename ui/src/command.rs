@@ -25,14 +25,17 @@ impl Cmd {
     }
 }
 
-const TFS: [(&str, i64); 6] = [("1m", 1), ("5m", 5), ("15m", 15), ("1h", 60), ("4h", 240), ("1d", 1440)];
+/// The chart's intervals (chart.rs TFS).
+const TFS: [(&str, i64); 12] = [("1m", 1), ("5m", 5), ("15m", 15), ("1h", 60), ("4h", 240), ("1d", 1440),
+    ("3m", 3), ("30m", 30), ("2h", 120), ("6h", 360), ("12h", 720), ("1w", 10080)];
 
 /// Every word besides coins, in the order an exact match wins: interval, market, venue, page.
 fn keywords() -> Vec<(String, Cmd)> {
     let mut k: Vec<(String, Cmd)> = TFS.iter().map(|t| (t.0.to_uppercase(), Cmd::Tf(t.1))).collect();
     for (w, m) in [("spot", Market::Spot), ("margin", Market::Margin), ("perp", Market::Perp), ("option", Market::Option), ("opt", Market::Option), ("opts", Market::Option),
         ("options", Market::Option), ("perps", Market::Perp), ("swap", Market::Perp), ("futures", Market::Perp)] { k.push((w.to_uppercase(), Cmd::Mode(m))); }
-    k.extend(Exchange::ALL.map(|e| (format!("{e:?}").to_uppercase(), Cmd::Venue(e))));
+    // trading venues only: the word sets the order panel's venue
+    k.extend(depth::trade::TRADABLE.map(|e| (format!("{e:?}").to_uppercase(), Cmd::Venue(e))));
     for (w, n) in [("settings", 0), ("prefs", 0), ("appearance", 1), ("theme", 1), ("trading", 2), ("routing", 2), ("keys", 3), ("api", 3), ("hotkeys", 4), ("shortcuts", 4)] {
         k.push((w.to_uppercase(), Cmd::Settings(n)));
     }
@@ -218,6 +221,8 @@ mod tests {
         assert_eq!(parse("keys", &t, 0), Ok(vec![Cmd::Settings(3)]));
         assert_eq!(parse("eth nope", &t, 0), Err("nope".into()));
         assert_eq!(parse("  ", &t, 0), Ok(vec![]));
+        assert_eq!(parse("3m 1w", &t, 0), Ok(vec![Cmd::Tf(3), Cmd::Tf(10080)]));
+        assert_eq!(parse("mexc", &t, 0), Err("mexc".into()));
     }
 
     #[test]
