@@ -85,6 +85,100 @@ pub struct Account {
     pub day_start: (i64, HashMap<Exchange, f64>),
     /// TP/SL waiting for their entry order to fill (persisted in settings.json)
     pub tpsl_wait: Vec<TpSlWait>,
+    /// bumped by the kill switch: scaled ladders and sequential orders started before it stop
+    pub kill_gen: u64,
+    /// the last kill switch run, for its report
+    pub kill: Option<KillReport>,
+}
+
+/// One kill switch run: per keyed venue, every step's line (ok or failed) and whether it is done.
+#[derive(Clone, Debug, Default)]
+pub struct KillReport { pub started_ms: i64, pub venues: Vec<(Exchange, Vec<(String, bool)>, bool)> }
+
+/// What the kill switch will act on, per keyed venue: (venue, orders, TP/SL, algorithms with the
+/// waiting TP/SL, positions).
+pub(crate) fn kill_plan(a: &Account) -> Vec<(Exchange, usize, usize, usize, usize)> {
+    let mut v: Vec<_> = a.keys.keys().map(|&e| (e,
+        a.orders.iter().filter(|o| o.ex == e).count(),
+        a.tpsl.iter().filter(|t| t.ex == e).count(),
+        a.algos.iter().filter(|j| j.ex == e && !j.cancelled && j.status != "done").count() + a.tpsl_wait.iter().filter(|w| w.ex == e).count(),
+        a.positions.iter().filter(|p| p.ex == e && p.qty > 0.0).count())).collect();
+    v.sort_by_key(|x| x.0 as u8);
+    v
+}
+
+fn market_close(p: &Position) -> (OrderReq, f64) {
+    (OrderReq { symbol: p.symbol.clone(), pos: p.side, close: true, kind: trade::Kind::Market, qty: p.qty, client_id: None, attach: None }, if p.mark > 0.0 { p.mark } else { p.entry })
+}
+
+/// The kill switch's closes of one venue's positions (as the venue reports them): the planner's
+/// slippage-capped leg where there is one for the position, sized to what the venue holds, else a
+/// market close; and whether a capped leg went out as a limit (its unfilled rest: `kill_rest`).
+fn kill_closes(ps: &[Position], capped: &[(OrderReq, f64)]) -> (Vec<(OrderReq, f64)>, bool) {
+    let mut limited = false;
+    let out = ps.iter().filter(|p| p.qty > 0.0).map(|p| match capped.iter().find(|(r, _)| r.symbol == p.symbol && r.pos == p.side) {
+        Some((r, px)) => { limited |= r.kind != trade::Kind::Market; (OrderReq { qty: p.qty, ..r.clone() }, *px) }
+        None => market_close(p),
+    }).collect();
+    (out, limited)
+}
+
+/// What is left of positions a capped limit leg was sent for: closed at market.
+fn kill_rest(after: &[Position], capped: &[(OrderReq, f64)]) -> Vec<(OrderReq, f64)> {
+    after.iter().filter(|p| p.qty > 0.0 && capped.iter().any(|(r, _)| r.symbol == p.symbol && r.pos == p.side && r.kind != trade::Kind::Market)).map(market_close).collect()
+}
+
+/// One line of the kill switch report (and of the order log).
+fn kill_line(account: &Arc<Mutex<Account>>, ex: Exchange, msg: String, ok: bool) {
+    let mut a = account.lock().unwrap();
+    if let Some(v) = a.kill.as_mut().and_then(|k| k.venues.iter_mut().find(|v| v.0 == ex)) { v.1.push((msg.clone(), ok)); }
+    a.note(format!("KILL {ex:?} {msg}"), ok);
+}
+
+/// The kill switch on one venue, step by step, each step reported whatever the one before did:
+/// cancel its orders (trade::cancel_all), its TP/SL (tpsl::cancel_all) and its venue-run TWAPs,
+/// read its positions once (the local ones if that fails), close them (`kill_closes`), then close at
+/// market what a capped leg left (one more read).
+async fn kill_venue(account: &Arc<Mutex<Account>>, ex: Exchange, k: &Keys, twaps: Vec<(u64, String, String)>, capped: Vec<(OrderReq, f64)>) {
+    let line = |msg: String, ok: bool| kill_line(account, ex, msg, ok);
+    let report = |what: &str, r: anyhow::Result<trade::CancelReport>| match r {
+        Ok(r) => { line(format!("{what}: {} cancelled", r.sent), true); for f in r.failed { line(format!("{what}: {f}"), false); } }
+        Err(e) => line(format!("{what}: {e:#}"), false),
+    };
+    let orders: Vec<OpenOrder> = account.lock().unwrap().orders.iter().filter(|o| o.ex == ex).cloned().collect();
+    report("orders", trade::cancel_all(ex, k, &orders).await);
+    let tps: Vec<trade::tpsl::TpSl> = account.lock().unwrap().tpsl.iter().filter(|t| t.ex == ex).cloned().collect();
+    if !tps.is_empty() { report("TP/SL", trade::tpsl::cancel_all(ex, k, &tps).await); }
+    for (id, symbol, vid) in twaps {
+        let r = trade::cancel_twap(ex, k, &symbol, &vid).await;
+        if let Some(j) = account.lock().unwrap().algos.iter_mut().find(|j| j.id == id) {
+            j.status = match &r { Ok(()) => "cancelled".into(), Err(e) => format!("cancel failed: {e:#}") };
+            j.end_ms = now_ms();
+        }
+        match r { Ok(()) => line(format!("TWAP {vid} cancelled"), true), Err(e) => line(format!("TWAP {vid}: {e:#}"), false) }
+    }
+    let ps = match trade::positions(ex, k).await {
+        Ok(p) => p,
+        Err(e) => { line(format!("positions: {e:#}; closing the positions Depth shows"), false); account.lock().unwrap().positions.iter().filter(|p| p.ex == ex).cloned().collect() }
+    };
+    let (closes, limited) = kill_closes(&ps, &capped);
+    if closes.is_empty() { line("no position".into(), true); }
+    let close = |req: OrderReq, px: f64| async move {
+        let ok = place_logged(account, ex, &req, px).await.is_some();
+        let side = if req.pos == depth::Side::Buy { "long" } else { "short" };
+        kill_line(account, ex, format!("close {} {side} {} {}: {}", req.symbol, req.qty, req.kind.label(), if ok { "sent" } else { "FAILED, see the order log" }), ok);
+    };
+    for (req, px) in closes { close(req, px).await; }
+    if limited {
+        // an IOC is matched by the time the venue answers on most venues, not all: a moment before reading
+        // what is left (a reduce-only market close never flips the position if it read too much)
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        match trade::positions(ex, k).await {
+            Ok(after) => for (req, px) in kill_rest(&after, &capped) { close(req, px).await; },
+            Err(e) => line(format!("positions after the capped closes: {e:#}; check the venue"), false),
+        }
+    }
+    if let Some(v) = account.lock().unwrap().kill.as_mut().and_then(|k| k.venues.iter_mut().find(|v| v.0 == ex)) { v.2 = true; }
 }
 
 /// A TP/SL sent with an opening order on a venue that cannot attach it to the order
@@ -1061,13 +1155,54 @@ impl Engine {
         });
     }
 
+    /// The kill switch: stop every client TWAP, scaled ladder, sequential order and waiting TP/SL, then
+    /// on every keyed venue at once (`kill_venue`) cancel its orders, TP/SL and venue-run TWAPs and close
+    /// every position it reports: `capped` (the planner's slippage-capped closes of the symbol on
+    /// screen) first and their rest at market, every other position at market. Every step is in the
+    /// report and the order log, a notification says when it is over; running it again repeats it.
+    pub fn kill(&self, capped: Vec<(Exchange, OrderReq, f64)>, ctx: &eframe::egui::Context) {
+        let Some(rt) = self.acct_rt.as_ref() else { return };
+        let now = now_ms();
+        let (venues, twaps) = {
+            let mut a = self.account.lock().unwrap();
+            a.kill_gen += 1;
+            let mut twaps = vec![];
+            for j in a.algos.iter_mut().filter(|j| !j.cancelled && j.status != "done" && (j.venue_id.is_none() || j.end_ms > now)) {
+                j.cancelled = true;
+                j.status = "cancelling".into();
+                if let Some(v) = &j.venue_id { twaps.push((j.ex, j.id, j.symbol.clone(), v.clone())); }
+            }
+            let waits = std::mem::take(&mut a.tpsl_wait).len();
+            if waits > 0 { a.note(format!("KILL {waits} waiting TP/SL dropped"), true); }
+            let venues: Vec<(Exchange, Keys)> = a.keys.iter().map(|(e, k)| (*e, k.clone())).collect();
+            a.kill = Some(KillReport { started_ms: now, venues: venues.iter().map(|v| (v.0, vec![], false)).collect() });
+            (venues, twaps)
+        };
+        let (account, ctx) = (self.account.clone(), ctx.clone());
+        rt.spawn(async move {
+            let mut hs = vec![];
+            for (ex, k) in venues {
+                let tw = twaps.iter().filter(|t| t.0 == ex).map(|t| (t.1, t.2.clone(), t.3.clone())).collect();
+                let cap = capped.iter().filter(|c| c.0 == ex).map(|c| (c.1.clone(), c.2)).collect();
+                let (account, ctx) = (account.clone(), ctx.clone());
+                hs.push(tokio::spawn(async move { kill_venue(&account, ex, &k, tw, cap).await; ctx.request_repaint(); }));
+            }
+            for h in hs { let _ = h.await; }
+            let (ok, bad) = account.lock().unwrap().kill.as_ref().map_or((0, 0), |r| r.venues.iter().flat_map(|v| &v.1).fold((0, 0), |(o, b), l| if l.1 { (o + 1, b) } else { (o, b + 1) }));
+            depth::sys::notify(crate::l("Kill switch"), &crate::lf("%d steps done, %d failed", &[ok.to_string(), bad.to_string()]));
+            ctx.request_repaint();
+        });
+    }
+
     /// Place `reqs` on `ex` one after another in one task: each only once the one before was
     /// accepted, so a refused close never leaves the open after it on its own.
     pub fn submit_seq(&self, ex: Exchange, reqs: Vec<OrderReq>, ref_px: f64, ctx: &eframe::egui::Context) {
         let (Some(rt), account, ctx) = (self.rt.as_ref(), self.account.clone(), ctx.clone()) else { return };
+        let kill0 = account.lock().unwrap().kill_gen;
         rt.spawn(async move {
             let n = reqs.len();
             for (i, req) in reqs.iter().enumerate() {
+                if account.lock().unwrap().kill_gen != kill0 { account.lock().unwrap().note(format!("NOTE {ex:?} {}: kill switch, {} of {n} orders not sent", req.symbol, n - i), false); break; }
                 if place_logged(&account, ex, req, ref_px).await.is_none() {
                     if i + 1 < n { account.lock().unwrap().note(format!("NOTE {ex:?} {}: stopped after {i} of {n} orders, the rest was not sent", req.symbol), false); }
                     break;
@@ -1202,9 +1337,11 @@ impl Engine {
             risk_gate(&mut a, ex, &OrderReq { kind: trade::Kind::Market, ..base.clone() }, mid)?;
             for (px, q) in &legs { risk_gate(&mut a, ex, &OrderReq { kind: trade::Kind::Limit { price: *px, tif }, qty: *q, client_id: None, ..base.clone() }, mid)?; }
         }
+        let kill0 = account.lock().unwrap().kill_gen;
         rt.spawn(async move {
             // one after another: venues rate-limit bursts of new orders per second
             for (px, q) in legs {
+                if account.lock().unwrap().kill_gen != kill0 { break; }
                 let req = OrderReq { kind: trade::Kind::Limit { price: px, tif }, qty: q, client_id: None, ..base.clone() };
                 place_logged(&account, ex, &req, if mid > 0.0 { mid } else { px }).await;
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -2106,6 +2243,39 @@ mod tests {
         a.modes.insert((ex, "BTCUSDT".into()), Some(Mode::Hedge));
         assert!(risk_gate(&mut a, ex, &o(trade::Kind::Market, 2.0), 100.0).is_err());
         assert!(risk_gate(&mut a, ex, &OrderReq { close: true, ..o(trade::Kind::Market, 50.0) }, 100.0).is_ok());
+    }
+
+    #[test]
+    fn kill_plan_lists_every_venue_step() {
+        let mut a = Account::default();
+        let k = Keys { key: "k".into(), secret: "s".into(), extra: None, demo: false };
+        a.keys.insert(Exchange::Bybit, k.clone());
+        a.keys.insert(Exchange::Binance, k);
+        a.orders.push(order("1", None, 0.0));
+        a.orders.push(order("2", None, 0.0));
+        a.positions.push(pos(Side::Buy, 1.0));
+        a.positions.push(Position { ex: Exchange::Bybit, ..pos(Side::Sell, 2.0) });
+        a.tpsl_wait.push(wait("t1al0"));
+        a.algos.push(AlgoJob { id: 1, ex: Exchange::Bybit, symbol: "BTCUSDT".into(), buy: true, close: false, total: 1.0, sent: 0.0, slices: 2, done: 0, started_ms: 0, end_ms: 1, status: "running".into(), cancelled: false, venue_id: None });
+        // a venue without keys is not touched
+        a.orders.push(OpenOrder { ex: Exchange::Okx, ..order("3", None, 0.0) });
+        assert_eq!(kill_plan(&a), vec![(Exchange::Binance, 2, 0, 1, 1), (Exchange::Bybit, 0, 0, 1, 1)]);
+    }
+
+    #[test]
+    fn kill_closes_capped_first_then_the_rest_at_market() {
+        let capped = vec![(OrderReq { symbol: "BTCUSDT".into(), pos: Side::Buy, close: true, kind: trade::Kind::Limit { price: 99.9, tif: trade::Tif::Ioc }, qty: 0.5, client_id: Some("t1kl0".into()), attach: None }, 100.0)];
+        let other = Position { symbol: "ETHUSDT".into(), mark: 0.0, entry: 50.0, ..pos(Side::Sell, 3.0) };
+        // the venue holds 0.6 of the capped symbol (more than the screen knew) and an ETH short
+        let (closes, limited) = kill_closes(&[pos(Side::Buy, 0.6), other.clone(), pos(Side::Sell, 0.0)], &capped);
+        assert!(limited && closes.len() == 2);
+        assert_eq!((closes[0].0.qty, closes[0].0.kind, closes[0].0.close, closes[0].1), (0.6, capped[0].0.kind, true, 100.0));
+        assert_eq!((closes[1].0.symbol.as_str(), closes[1].0.kind, closes[1].0.pos, closes[1].0.close, closes[1].1), ("ETHUSDT", trade::Kind::Market, Side::Sell, true, 50.0));
+        // the IOC left 0.2: that goes at market; the ETH short (market) is not sent twice
+        let rest = kill_rest(&[pos(Side::Buy, 0.2), other], &capped);
+        assert_eq!(rest.len(), 1);
+        assert_eq!((rest[0].0.qty, rest[0].0.kind, rest[0].0.close), (0.2, trade::Kind::Market, true));
+        assert!(kill_rest(&[], &capped).is_empty());
     }
 
     #[test]

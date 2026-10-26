@@ -152,6 +152,11 @@ impl App {
             "native": j.venue_id.is_some(),
         })).collect();
         let log: Vec<Value> = acc.log.iter().rev().take(200).map(|(ts, m, ok)| json!({"ts": ts, "msg": m, "ok": ok})).collect();
+        let kill = json!({
+            "plan": super::engine::kill_plan(&acc).iter().map(|(e, o, t, j, p)| json!({"ex": ex_name(*e), "orders": o, "tpsl": t, "algos": j, "positions": p})).collect::<Vec<_>>(),
+            "report": acc.kill.as_ref().map(|r| json!({"started_ms": r.started_ms, "venues": r.venues.iter().map(|(e, lines, done)| json!({"ex": ex_name(*e), "done": done,
+                "lines": lines.iter().map(|(m, ok)| json!({"msg": m, "ok": ok})).collect::<Vec<_>>()})).collect::<Vec<_>>()})),
+        });
         let tpsl_wait: Vec<Value> = acc.tpsl_wait.iter().map(|w| json!({"ex": ex_name(w.ex), "symbol": w.symbol, "pos": side_name(w.pos), "tp": w.tp, "sl": w.sl,
             "trigger": if w.trigger == trade::tpsl::Trigger::Last { "last" } else { "mark" }, "client_id": w.client_id, "order_id": w.order_id, "filled": w.filled_ms.is_some(), "created_ms": w.created_ms})).collect();
         let tests = self.eng.key_tests.lock().unwrap().clone();
@@ -208,7 +213,7 @@ impl App {
             "chart": chart, "book": book, "fired": fired, "signals": signals, "quant": quant,
             "book_click": self.trade.fill.map(|(e, px)| json!({"ex": ex_name(e), "px": px})),
             "tradable": trade::TRADABLE.iter().map(|e| ex_name(*e)).collect::<Vec<_>>(),
-            "risk": risk,
+            "risk": risk, "kill": kill,
         }).to_string()
     }
 
@@ -325,6 +330,17 @@ impl App {
                 let pos = if s("pos") == "short" { Side::Sell } else { Side::Buy };
                 let trigger = if s("trigger") == "last" { trade::tpsl::Trigger::Last } else { trade::tpsl::Trigger::Mark };
                 self.eng.set_tpsl(exv()?, s("symbol"), pos, f("tp"), f("sl"), f("partial_qty"), trigger, ctx);
+            }
+            "kill" => {
+                // closes of the symbol on screen through the slippage cap: the planner prices them from each venue's own book
+                let sym = trade::symbol(&self.eng.base);
+                let ps: Vec<trade::Position> = self.eng.account.lock().unwrap().positions.iter().filter(|p| p.symbol == sym && p.qty > 0.0).cloned().collect();
+                let capped = ps.iter().filter_map(|p| {
+                    let req = OrderReq { symbol: p.symbol.clone(), pos: p.side, close: true, kind: Kind::Market, qty: p.qty, client_id: None, attach: None };
+                    let leg = self.plan_at(&req, Some(p.ex), false).ok()?.legs.into_iter().next()?;
+                    Some((p.ex, leg.req, leg.ref_px))
+                }).collect();
+                self.eng.kill(capped, ctx);
             }
             "cancel_tpsl_wait" => {
                 let (e, cid) = (exv()?, s("client_id"));

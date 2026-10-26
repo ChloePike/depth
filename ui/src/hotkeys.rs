@@ -5,8 +5,9 @@ use eframe::egui::{self, Key, Modifiers};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Act {
-    // trading (perp order panel): preset notional at the touch or at market; cancel / flatten the symbol
-    BuyBid, SellAsk, BuyMarket, SellMarket, CancelAll, Flatten,
+    // trading (perp order panel): preset notional at the touch or at market; cancel / flatten the symbol;
+    // the kill switch (every venue, any mode, asks first)
+    BuyBid, SellAsk, BuyMarket, SellMarket, CancelAll, Flatten, Kill,
     // navigation
     Picker, PrevFav, NextFav, Star, PrevVenue, NextVenue,
     Spot, Margin, Perp, Option,
@@ -18,13 +19,13 @@ pub enum Act {
 }
 
 impl Act {
-    pub const ALL: [Act; 31] = [
-        Act::BuyBid, Act::SellAsk, Act::BuyMarket, Act::SellMarket, Act::CancelAll, Act::Flatten, Act::OpenClose, Act::DialUp, Act::DialDown, Act::DialMode,
+    pub const ALL: [Act; 32] = [
+        Act::BuyBid, Act::SellAsk, Act::BuyMarket, Act::SellMarket, Act::CancelAll, Act::Flatten, Act::Kill, Act::OpenClose, Act::DialUp, Act::DialDown, Act::DialMode,
         Act::Command, Act::Help, Act::Back, Act::Picker, Act::PrevFav, Act::NextFav, Act::Star, Act::PrevVenue, Act::NextVenue,
         Act::Spot, Act::Margin, Act::Perp, Act::Option, Act::Tf1m, Act::Tf5m, Act::Tf15m, Act::Tf1h, Act::Tf4h, Act::Tf1d,
         Act::OrderPanel, Act::Settings];
 
-    pub fn trading(self) -> bool { matches!(self, Act::BuyBid | Act::SellAsk | Act::BuyMarket | Act::SellMarket | Act::CancelAll | Act::Flatten | Act::OpenClose | Act::DialUp | Act::DialDown | Act::DialMode) }
+    pub fn trading(self) -> bool { matches!(self, Act::BuyBid | Act::SellAsk | Act::BuyMarket | Act::SellMarket | Act::CancelAll | Act::Flatten | Act::Kill | Act::OpenClose | Act::DialUp | Act::DialDown | Act::DialMode) }
 
     /// English label (translated with `l`).
     pub fn name(self) -> &'static str {
@@ -32,6 +33,7 @@ impl Act {
             Act::BuyBid => "Buy: limit at the bid", Act::SellAsk => "Sell: limit at the ask",
             Act::BuyMarket => "Buy at market", Act::SellMarket => "Sell at market",
             Act::CancelAll => "Cancel all orders of this symbol on the trading venue", Act::Flatten => "Close all positions of this symbol on the trading venue at market",
+            Act::Kill => "Kill switch: cancel everything and close every position on every venue (asks first)",
             Act::Picker => "Choose pair", Act::PrevFav => "Previous favorite", Act::NextFav => "Next favorite", Act::Star => "Star the current pair",
             Act::PrevVenue => "Previous trading venue", Act::NextVenue => "Next trading venue",
             Act::Spot => "Spot mode", Act::Margin => "Margin mode", Act::Perp => "Perp mode", Act::Option => "Options mode",

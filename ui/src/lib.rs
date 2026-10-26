@@ -516,6 +516,8 @@ impl App {
                     if m != self.mode { self.pending_mode = Some(m); }
                 },
                 Act::OrderPanel => self.order_panel = !self.order_panel,
+                // in every mode, never through the order panel; it always asks first
+                Act::Kill => self.account.kill_prompt = true,
                 Act::Picker | Act::PrevFav | Act::NextFav | Act::Star => self.picker.hot.push(a),
                 Act::Spot | Act::Margin | Act::Perp | Act::Option => {
                     let m = match a { Act::Spot => Market::Spot, Act::Margin => Market::Margin, Act::Perp => Market::Perp, _ => Market::Option };

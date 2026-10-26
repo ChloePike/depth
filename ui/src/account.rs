@@ -4,7 +4,7 @@
 //! (`App::call`) as the native panels, so both hosts act identically.
 use super::kit::{self, Look, H, H_LG, H_SM};
 use super::order::{dialog, dialog_buttons, dialog_title, leak, parse, tpsl_modal, usd, Call, TpSlSheet};
-use super::{fmt_dp, fmt_px, hms, l, theme::*};
+use super::{fmt_dp, fmt_px, hms, l, lf, theme::*};
 use depth::Exchange;
 use eframe::egui::{self, Color32, Rect, RichText, Ui};
 use serde_json::{json, Value};
@@ -69,6 +69,10 @@ pub struct AccountPanel {
     pub prefill: Option<(Value, std::time::Instant)>,
     /// a position to open the options-hedge dialog for, once its base is the engine's
     pub insure: Option<(Exchange, String)>,
+    /// the kill switch's confirmation is open (button or hotkey); the report of the run started at
+    /// this time was closed
+    pub kill_prompt: bool,
+    kill_seen: i64,
 }
 
 impl Default for AccountPanel {
@@ -79,7 +83,7 @@ impl Default for AccountPanel {
             sort_orders: (0, true), sort_tpsl: (0, false), sort_oh: (0, true), sort_fills: (0, true), sort_closed: (0, true),
             sel_orders: vec![], sel_tpsl: vec![], close_px: HashMap::new(), order_px: HashMap::new(),
             confirm: None, share: None, sheet: None, xfer: None, wallets_requested: vec![], error: None, xfer_shot: false,
-            open_settings: None, prefill: None, insure: None,
+            open_settings: None, prefill: None, insure: None, kill_prompt: false, kill_seen: 0,
         }
     }
 }
@@ -492,6 +496,9 @@ impl AccountPanel {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 ui.add_space(4.0);
+                let keyed = st["keys"].as_array().is_some_and(|k| k.iter().any(|k| k["configured"] == true));
+                if kit::button(ui, l("Kill"), Look::Danger, H_SM, None, keyed).on_hover_text(l("Kill switch: cancel every order, TP/SL and algorithm on every venue with keys and close every position (asks first)")).clicked() { self.kill_prompt = true; }
+                ui.add_space(6.0);
                 self.summary(ui, st);
                 if self.tab == Tab::Positions && ui.available_width() > 170.0 {
                     ui.add_space(10.0);
@@ -526,6 +533,7 @@ impl AccountPanel {
         if !self.xfer_shot && std::env::var("T1_OPEN_TRANSFER").is_ok() && arr("wallets") > 0 { self.xfer_shot = true; acts.push(Act::Transfer(String::new())); }
         self.run(ui.ctx(), acts, st, call);
         self.confirm_modal(ui, call);
+        self.kill_modal(ui, st, call);
         self.share_modal(ui);
         tpsl_modal(&mut self.sheet, ui, st, call);
         self.transfer_modal(ui, st, call);
@@ -862,6 +870,57 @@ impl AccountPanel {
             PosAct::Move(o, x) => vec![json!({"op": "move_order", "ex": o["ex"], "id": o["id"], "price": x})],
         };
         for v in ops { if let Err(e) = call(v) { self.error = Some(e); } }
+    }
+
+    /// The kill switch: one confirmation (whatever the order confirmation setting) listing what each
+    /// keyed venue has, then the run's report, venue by venue, until closed.
+    fn kill_modal(&mut self, ui: &mut Ui, st: &Value, call: &mut Call) {
+        let rep = &st["kill"]["report"];
+        let started = rep["started_ms"].as_i64().unwrap_or(0);
+        if self.kill_prompt {
+            let mut done = None;
+            let m = dialog("kill_confirm").show(ui.ctx(), |ui| {
+                ui.set_width(420.0);
+                dialog_title(ui, l("Kill switch"), "", Some((l("Every venue"), kit::Tone::Down)));
+                ui.add_space(8.0);
+                kit::note(ui, l("Cancels every order, TP/SL and algorithm on every venue with keys, then closes every position."), fg());
+                ui.add_space(6.0);
+                for v in st["kill"]["plan"].as_array().into_iter().flatten() {
+                    let n = |k: &str| v[k].as_u64().unwrap_or(0).to_string();
+                    kit::kv(ui, s(&v["ex"]), lf("%d orders · %d TP/SL · %d algos · %d positions", &[n("orders"), n("tpsl"), n("algos"), n("positions")]), fg());
+                }
+                ui.add_space(6.0);
+                kit::note(ui, l("Positions of the symbol on screen close through the slippage cap and what is left at market; every other position at market. Nothing is undone."), WARN);
+                ui.add_space(10.0);
+                let (c, o) = dialog_buttons(ui, l("Cancel"), l("Kill"), dn(), true);
+                if c || ui.input(|i| i.key_pressed(egui::Key::Escape)) { done = Some(false); }
+                if o { done = Some(true); }
+            });
+            if m.should_close() && done.is_none() { done = Some(false); }
+            if let Some(go) = done {
+                self.kill_prompt = false;
+                if go { self.kill_seen = 0; if let Err(e) = call(json!({"op": "kill"})) { self.error = Some(e); } }
+            }
+        } else if started > self.kill_seen {
+            let mut close = false;
+            dialog("kill_report").show(ui.ctx(), |ui| {
+                ui.set_width(480.0);
+                let running = rep["venues"].as_array().is_some_and(|v| v.iter().any(|v| v["done"] != true));
+                dialog_title(ui, l("Kill switch"), &hms(started), Some(if running { (l("Running…"), kit::Tone::Warn) } else { (l("Done"), kit::Tone::Neutral) }));
+                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    for v in rep["venues"].as_array().into_iter().flatten() {
+                        ui.add_space(6.0);
+                        kit::overline(ui, &format!("{}{}", s(&v["ex"]), if v["done"] == true { "" } else { " …" }));
+                        for line in v["lines"].as_array().into_iter().flatten() {
+                            ui.add(egui::Label::new(RichText::new(s(&line["msg"])).font(prop(12.0)).color(if line["ok"] == true { fg() } else { dn() })).wrap());
+                        }
+                    }
+                });
+                ui.add_space(10.0);
+                close = kit::button(ui, l("OK"), Look::Secondary, H_LG, Some(f32::INFINITY), true).clicked();
+            });
+            if close { self.kill_seen = started; }
+        }
     }
 
     /// PnL card: the result in big type, options for what to reveal, copy as image (a window

@@ -201,3 +201,4 @@ Quit Depth = 退出 Depth
 Show in the menu bar = 在菜单栏显示
 Show in the notification area = 在通知区域显示
 The current coin's price and your positions' PnL, readable without switching to Depth. = 当前币种的价格和持仓盈亏，不用切回 Depth 也能看到。
+Kill switch: cancel everything and close every position on every venue (asks first) = 紧急停止：撤销所有交易所的全部订单并平掉所有仓位（会先确认）
