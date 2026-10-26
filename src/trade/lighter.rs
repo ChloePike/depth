@@ -1,5 +1,5 @@
 //! Lighter perps (zkLighter; USDC-margined; transactions signed with the account's API key).
-//! Same contract as the Bybit/Binance code in trade.rs: unified symbols ("BTCUSDT") and base-unit
+//! Same contract as every venue module trade.rs dispatches to: unified symbols ("BTCUSDT") and base-unit
 //! sizes in and out; native market ids and integer price/size only inside this file.
 //!
 //! Keys: key = "<account_index>:<api_key_index>", secret = the API key private key (40 bytes hex).

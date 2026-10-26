@@ -1,9 +1,10 @@
-//! Private trading APIs: Bybit v5 (unified, linear USDT perps) and Binance USD-M futures here;
-//! OKX, Bitget, Gate, Kraken Futures, Hyperliquid and Lighter each in their own `trade/<venue>.rs`
-//! behind the same functions. Public API always uses unified symbols ("BTCUSDT") and base-unit
+//! Private trading APIs: shared types and helpers, and the venue-neutral functions that dispatch to
+//! one module per venue (`trade/<venue>.rs`: Bybit v5 unified linear USDT perps, Binance USD-M
+//! futures, OKX, Bitget, Gate, Kraken Futures, Hyperliquid, Lighter), all behind the same functions.
+//! Public API always uses unified symbols ("BTCUSDT") and base-unit
 //! sizes; each venue module maps to its native symbol / contracts.
 //! Keys live in the macOS Keychain (service "depth", accounts "<venue>-key" /
-//! "<venue>-secret"). `T1_TESTNET=1` switches both venues to their testnets.
+//! "<venue>-secret"). `T1_TESTNET=1` switches the venues that have one to their testnet / demo hosts.
 //!
 //! Prices and sizes are always sent as strings rounded to the instrument's tick / step, never as
 //! raw f64 formatting.
@@ -13,7 +14,9 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
 
+pub mod binance;
 pub mod bitget;
+pub mod bybit;
 pub mod gate;
 pub mod hyperliquid;
 pub mod kraken;
@@ -21,6 +24,9 @@ pub mod lighter;
 pub mod okx;
 pub mod spot;
 pub mod tpsl;
+pub use binance::{is_pm, pm_account};
+use binance::{binance_at, binance_pm, binance_url, papi_url};
+use bybit::{bybit, bybit_url};
 
 pub const TRADABLE: [Exchange; 8] = KEY_VENUES;
 
@@ -232,105 +238,10 @@ fn side_str(ex: Exchange, s: Side) -> &'static str {
 /// Native perp symbol for a base asset on a tradable venue (both use BASEUSDT).
 pub fn symbol(base: &str) -> String { format!("{}USDT", base.to_uppercase()) }
 
-// ---------------------------------------------------------------- Bybit v5
-
-fn bybit_url() -> &'static str { if testnet() { "https://api-testnet.bybit.com" } else { "https://api.bybit.com" } }
-
-/// v5 signature: HMAC_SHA256(secret, timestamp + key + recv_window + (query | json body))
-pub fn bybit_sign(k: &Keys, ts: i64, recv: u32, payload: &str) -> String { hmac_hex(&k.secret, &format!("{ts}{}{recv}{payload}", k.key)) }
-
 /// Receive windows: reads tolerate a slow proxy hop; orders and cancels keep the venue
 /// default so an order stuck in transit for seconds is rejected rather than filled late.
 const RECV_READ: u32 = 15_000;
 const RECV_WRITE: u32 = 5_000;
-
-async fn bybit(k: &Keys, get: bool, path: &str, params: Value) -> Result<Value> {
-    let ts = crate::now_ms();
-    let recv = if get { RECV_READ } else { RECV_WRITE };
-    let (payload, req) = if get {
-        let q = params.as_object().map(|o| o.iter().map(|(a, b)| format!("{a}={}", b.as_str().map(String::from).unwrap_or(b.to_string()))).collect::<Vec<_>>().join("&")).unwrap_or_default();
-        (q.clone(), ws::http().get(format!("{}{path}?{q}", bybit_url())))
-    } else {
-        let b = params.to_string();
-        (b.clone(), ws::http().post(format!("{}{path}", bybit_url())).header("Content-Type", "application/json").body(b))
-    };
-    let url = format!("{}{path}", bybit_url());
-    ws::check_paused(&url)?;
-    let r = req.header("X-BAPI-API-KEY", &k.key).header("X-BAPI-TIMESTAMP", ts.to_string())
-        .header("X-BAPI-RECV-WINDOW", recv.to_string()).header("X-BAPI-SIGN", bybit_sign(k, ts, recv, &payload)).send().await?;
-    let st = r.status().as_u16();
-    let body = r.text().await?;
-    // Bybit answers an IP ban with 403
-    ws::note_limit(&url, if st == 403 { 418 } else { st }, None, &body);
-    let v: Value = serde_json::from_str(&body).map_err(|_| anyhow!("bybit {path}: HTTP {st}: {}", &body[..body.len().min(200)]))?;
-    if v["retCode"].as_i64() != Some(0) { bail!("bybit {path}: {} ({})", v["retMsg"].as_str().unwrap_or("?"), v["retCode"]); }
-    Ok(v["result"].clone())
-}
-
-// ---------------------------------------------------------------- Binance USD-M
-
-fn binance_url() -> &'static str { if testnet() { "https://testnet.binancefuture.com" } else { "https://fapi.binance.com" } }
-
-fn papi_url() -> &'static str { "https://papi.binance.com" }
-
-/// Portfolio Margin accounts reject /fapi and trade USD-M through /papi/v1/um. Detected once per
-/// process from /papi/v1/account; only a definite answer is cached (network errors retry).
-static BINANCE_PM: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
-
-async fn binance_pm(k: &Keys) -> Result<bool> {
-    if testnet() { return Ok(false); }
-    if let Some(pm) = *BINANCE_PM.lock().unwrap() { return Ok(pm); }
-    let pm = match binance_at(k, papi_url(), reqwest::Method::GET, "/papi/v1/account", &[]).await {
-        Ok(_) => true,
-        // only a real API refusal means "not Portfolio Margin"; network or rate-limit errors retry later
-        Err(e) if e.downcast_ref::<reqwest::Error>().is_some() || format!("{e}").contains("rate limited") => return Err(e),
-        Err(_) => false,
-    };
-    *BINANCE_PM.lock().unwrap() = Some(pm);
-    Ok(pm)
-}
-
-/// Raw Portfolio Margin account (diagnostics: `account BTC pm`).
-pub async fn pm_account(k: &Keys) -> Result<Value> { binance_at(k, papi_url(), reqwest::Method::GET, "/papi/v1/account", &[]).await }
-
-/// The Portfolio Margin equivalent of a USD-M endpoint.
-fn pm_path(fapi: &str) -> &str {
-    match fapi {
-        "/fapi/v3/account" => "/papi/v1/account",
-        "/fapi/v3/positionRisk" => "/papi/v1/um/positionRisk",
-        "/fapi/v1/openOrders" => "/papi/v1/um/openOrders",
-        "/fapi/v1/order" => "/papi/v1/um/order",
-        "/fapi/v1/positionSide/dual" => "/papi/v1/um/positionSide/dual",
-        "/fapi/v1/symbolConfig" => "/papi/v1/um/symbolConfig",
-        "/fapi/v1/algoOrder" => "/papi/v1/um/algo/order",
-        "/fapi/v1/openAlgoOrders" => "/papi/v1/um/algo/openAlgoOrders",
-        "/fapi/v1/leverage" => "/papi/v1/um/leverage",
-        "/fapi/v1/leverageBracket" => "/papi/v1/um/leverageBracket",
-        p => p,
-    }
-}
-
-async fn binance(k: &Keys, method: reqwest::Method, path: &str, params: &[(&str, String)]) -> Result<Value> {
-    if binance_pm(k).await? { binance_at(k, papi_url(), method, pm_path(path), params).await }
-    else { binance_at(k, binance_url(), method, path, params).await }
-}
-
-async fn binance_at(k: &Keys, base: &str, method: reqwest::Method, path: &str, params: &[(&str, String)]) -> Result<Value> {
-    let mut q: Vec<String> = params.iter().map(|(a, b)| format!("{a}={b}")).collect();
-    q.push(format!("recvWindow={}", if method == reqwest::Method::GET { RECV_READ } else { RECV_WRITE }));
-    q.push(format!("timestamp={}", crate::now_ms()));
-    let q = q.join("&");
-    let url = format!("{base}{path}?{q}&signature={}", hmac_hex(&k.secret, &q));
-    ws::check_paused(&url)?;
-    let r = ws::http().request(method, &url).header("X-MBX-APIKEY", &k.key).send().await?;
-    let st = r.status();
-    let retry_after = r.headers().get("retry-after").and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
-    let body = r.text().await?;
-    ws::note_limit(&url, st.as_u16(), retry_after, &body);
-    let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-    if !st.is_success() { bail!("binance {path}: {} ({})", v["msg"].as_str().unwrap_or("?"), v["code"]); }
-    Ok(v)
-}
 
 // ---------------------------------------------------------------- venue-neutral API
 
@@ -348,18 +259,8 @@ pub async fn rules(ex: Exchange, symbol: &str) -> Result<Rules> {
         None => anyhow::bail!("{ex:?}'s {base} is a different market from the one charted; not tradable here"),
     }
     match ex {
-        Exchange::Bybit => {
-            let v = ws::get_json(&format!("{}/v5/market/instruments-info?category=linear&symbol={symbol}", bybit_url())).await?;
-            let i = &v["result"]["list"][0];
-            Ok(Rules { tick: n(&i["priceFilter"]["tickSize"]), step: n(&i["lotSizeFilter"]["qtyStep"]), min_qty: n(&i["lotSizeFilter"]["minOrderQty"]),
-                       min_notional: crate::opt_num(&i["lotSizeFilter"]["minNotionalValue"]).unwrap_or(0.0) })
-        }
-        Exchange::Binance => {
-            let v = ws::get_json(&format!("{}/fapi/v1/exchangeInfo", binance_url())).await?;
-            let s = v["symbols"].as_array().into_iter().flatten().find(|s| s["symbol"] == symbol).ok_or_else(|| anyhow!("{symbol} not listed"))?;
-            let f = |t: &str| s["filters"].as_array().into_iter().flatten().find(|x| x["filterType"] == t).cloned().unwrap_or_default();
-            Ok(Rules { tick: n(&f("PRICE_FILTER")["tickSize"]), step: n(&f("LOT_SIZE")["stepSize"]), min_qty: n(&f("LOT_SIZE")["minQty"]), min_notional: n(&f("MIN_NOTIONAL")["notional"]) })
-        }
+        Exchange::Bybit => bybit::rules(symbol).await,
+        Exchange::Binance => binance::rules(symbol).await,
         Exchange::Okx => okx::rules(symbol).await,
         Exchange::Bitget => bitget::rules(symbol).await,
         Exchange::Gate => gate::rules(symbol).await,
@@ -386,112 +287,6 @@ pub fn checked(req: &OrderReq, r: &Rules, ref_px: f64) -> Result<(String, Option
     Ok((qty, px))
 }
 
-/// Bybit v5 order body. Hedge: positionIdx 1 = long, 2 = short (reduceOnly allowed);
-/// one-way: positionIdx 0.
-pub fn bybit_body(req: &OrderReq, mode: Mode, qty: &str, px: Option<&str>, ref_px: f64, tick: f64) -> Value {
-    let idx = match (mode, req.pos) { (Mode::OneWay, _) => 0, (Mode::Hedge, Side::Buy) => 1, (Mode::Hedge, Side::Sell) => 2 };
-    let mut b = json!({"category": "linear", "symbol": req.symbol, "side": side_str(Exchange::Bybit, req.side()), "qty": qty,
-                       "positionIdx": idx, "reduceOnly": req.close});
-    if let Some(id) = &req.client_id { b["orderLinkId"] = id.clone().into(); }
-    match req.kind {
-        Kind::Market => { b["orderType"] = "Market".into(); }
-        Kind::Limit { tif, .. } => {
-            b["orderType"] = "Limit".into();
-            b["price"] = px.unwrap_or_default().into();
-            b["timeInForce"] = match tif { Tif::Gtc => "GTC", Tif::Ioc => "IOC", Tif::PostOnly => "PostOnly", Tif::Fok => "FOK" }.into();
-        }
-        // conditional: triggerDirection 1 = fires when price rises to the trigger, 2 = falls to it
-        Kind::Stop { trigger, limit, by_mark } => {
-            b["orderType"] = if limit.is_some() { "Limit" } else { "Market" }.into();
-            if limit.is_some() { b["price"] = px.unwrap_or_default().into(); b["timeInForce"] = "GTC".into(); }
-            b["triggerPrice"] = fmt_step(trigger, tick, false).into();
-            b["triggerDirection"] = if trigger > ref_px { 1 } else { 2 }.into();
-            b["triggerBy"] = if by_mark { "MarkPrice" } else { "LastPrice" }.into();
-        }
-        // a trailing stop is a position setting on Bybit (see place); never sent as an order
-        Kind::Trailing { .. } => { b["orderType"] = "Market".into(); }
-        // no price: Bybit takes it from its book (bboSideType / bboLevel)
-        Kind::Bbo { queue, level } => {
-            b["orderType"] = "Limit".into();
-            b["timeInForce"] = "GTC".into();
-            b["bboSideType"] = if queue { "Queue" } else { "Counterparty" }.into();
-            b["bboLevel"] = level.to_string().into();
-        }
-    }
-    b
-}
-
-/// Binance USD-M order params. Hedge: positionSide LONG/SHORT and no reduceOnly (rejected there);
-/// one-way: reduceOnly marks a close.
-pub fn binance_params(req: &OrderReq, mode: Mode, qty: &str, px: Option<&str>) -> Vec<(&'static str, String)> {
-    let mut p = vec![("symbol", req.symbol.clone()), ("side", side_str(Exchange::Binance, req.side()).into()), ("quantity", qty.into())];
-    if let Some(id) = &req.client_id { p.push(("newClientOrderId", id.clone())); }
-    match req.kind {
-        Kind::Market => p.push(("type", "MARKET".into())),
-        Kind::Limit { tif, .. } => {
-            p.push(("type", "LIMIT".into()));
-            p.push(("price", px.unwrap_or_default().into()));
-            p.push(("timeInForce", match tif { Tif::Gtc => "GTC", Tif::Ioc => "IOC", Tif::PostOnly => "GTX", Tif::Fok => "FOK" }.into()));
-        }
-        // conditional and trailing orders go to the algo service (binance_algo_params)
-        Kind::Stop { .. } | Kind::Trailing { .. } => p.push(("type", "MARKET".into())),
-        // no price: Binance takes it from its book (priceMatch; cannot be sent with a price)
-        Kind::Bbo { queue, level } => {
-            p.push(("type", "LIMIT".into()));
-            p.push(("timeInForce", "GTC".into()));
-            let side = if queue { "QUEUE" } else { "OPPONENT" };
-            p.push(("priceMatch", if level <= 1 { side.to_string() } else { format!("{side}_{level}") }));
-        }
-    }
-    match mode {
-        Mode::Hedge => p.push(("positionSide", if req.pos == Side::Buy { "LONG" } else { "SHORT" }.into())),
-        Mode::OneWay => if req.close { p.push(("reduceOnly", "true".into())); },
-    }
-    p
-}
-
-/// Binance algo-order params for conditional and trailing orders (`POST /fapi/v1/algoOrder`).
-/// STOP / TAKE_PROFIT follows from the trigger's side of the current price and the order side:
-/// a buy triggered above the price is a stop, below it a take-profit (the reverse for a sell).
-pub fn binance_algo_params(req: &OrderReq, mode: Mode, qty: &str, px: Option<&str>, ref_px: f64, tick: f64) -> Result<Vec<(&'static str, String)>> {
-    let buy = req.side() == Side::Buy;
-    let mut p = vec![("algoType", "CONDITIONAL".to_string()), ("symbol", req.symbol.clone()), ("side", side_str(Exchange::Binance, req.side()).into()), ("quantity", qty.into())];
-    match req.kind {
-        Kind::Stop { trigger, limit, by_mark } => {
-            let stop = (trigger > ref_px) == buy;
-            let t = match (stop, limit.is_some()) { (true, false) => "STOP_MARKET", (false, false) => "TAKE_PROFIT_MARKET", (true, true) => "STOP", (false, true) => "TAKE_PROFIT" };
-            p.push(("type", t.into()));
-            p.push(("triggerPrice", fmt_step(trigger, tick, false)));
-            p.push(("workingType", if by_mark { "MARK_PRICE" } else { "CONTRACT_PRICE" }.into()));
-            if limit.is_some() { p.push(("price", px.unwrap_or_default().into())); p.push(("timeInForce", "GTC".into())); }
-        }
-        Kind::Trailing { callback_pct, activation } => {
-            p.push(("type", "TRAILING_STOP_MARKET".into()));
-            p.push(("callbackRate", format!("{callback_pct:.1}")));
-            if let Some(a) = activation { p.push(("activatePrice", fmt_step(a, tick, false))); }
-        }
-        _ => bail!("not a conditional order"),
-    }
-    match mode {
-        Mode::Hedge => p.push(("positionSide", if req.pos == Side::Buy { "LONG" } else { "SHORT" }.into())),
-        Mode::OneWay => if req.close { p.push(("reduceOnly", "true".into())); },
-    }
-    if let Some(id) = &req.client_id { p.push(("clientAlgoId", id.clone())); }
-    Ok(p)
-}
-
-/// Bybit trailing stop: a position setting (`/v5/position/trading-stop`), so only for closing.
-/// The distance is the callback percent of the current price, in price units.
-pub fn bybit_trailing_body(req: &OrderReq, mode: Mode, ref_px: f64, tick: f64) -> Result<Value> {
-    let Kind::Trailing { callback_pct, activation } = req.kind else { bail!("not a trailing order") };
-    if !req.close { bail!("bybit: a trailing stop protects an open position: use it from Close"); }
-    let idx = match (mode, req.pos) { (Mode::OneWay, _) => 0, (Mode::Hedge, Side::Buy) => 1, (Mode::Hedge, Side::Sell) => 2 };
-    let mut b = json!({"category": "linear", "symbol": req.symbol, "positionIdx": idx, "tpslMode": "Full",
-                       "trailingStop": fmt_step(ref_px * callback_pct / 100.0, tick, false)});
-    if let Some(a) = activation { b["activePrice"] = fmt_step(a, tick, false).into(); }
-    Ok(b)
-}
-
 /// Venues that run TWAP themselves (the job keeps going with the app closed): allowed duration
 /// in minutes. Others use the client-side TWAP.
 pub fn native_twap(ex: Exchange) -> Option<(u32, u32)> {
@@ -504,34 +299,13 @@ pub fn native_twap(ex: Exchange) -> Option<(u32, u32)> {
     }
 }
 
-/// Binance futures TWAP params. Hedge: positionSide, never reduceOnly; one-way close: reduceOnly.
-pub fn binance_twap_params(req: &OrderReq, mode: Mode, qty: &str, minutes: u32, limit: Option<&str>, client_id: &str) -> Vec<(&'static str, String)> {
-    let mut p = vec![("symbol", req.symbol.clone()), ("side", side_str(Exchange::Binance, req.side()).into()), ("quantity", qty.into()),
-                     ("duration", (minutes as u64 * 60).to_string()), ("clientAlgoId", client_id.into())];
-    match mode {
-        Mode::Hedge => p.push(("positionSide", if req.pos == Side::Buy { "LONG" } else { "SHORT" }.into())),
-        Mode::OneWay => if req.close { p.push(("reduceOnly", "true".into())); },
-    }
-    if let Some(l) = limit { p.push(("limitPrice", l.into())); }
-    p
-}
-
 /// Start a venue-run TWAP; returns the id to cancel it with. Binance: notional at least 1,000
 /// USDT, weight 3000 (UID), so it is placed once and never polled.
 pub async fn place_twap(ex: Exchange, k: &Keys, req: &OrderReq, r: &Rules, ref_px: f64, mode: Mode, minutes: u32, limit: Option<f64>, randomize: bool) -> Result<String> {
     let Some((lo, hi)) = native_twap(ex) else { bail!("{ex:?} has no native TWAP") };
     if !(lo..=hi).contains(&minutes) { bail!("{ex:?}: TWAP duration must be {lo} to {hi} minutes"); }
     match ex {
-        Exchange::Binance => {
-            let qty = fmt_step(req.qty, r.step, true);
-            let notional = qty.parse::<f64>().unwrap_or(0.0) * limit.unwrap_or(ref_px);
-            if notional < 1_000.0 { bail!("binance: a TWAP needs at least 1,000 USDT notional (this is {notional:.0})"); }
-            let id = format!("t1twap{}", crate::now_ms());
-            let lim = limit.map(|l| fmt_step(l, r.tick, false));
-            let v = binance_at(k, sapi_url(), reqwest::Method::POST, "/sapi/v1/algo/futures/newOrderTwap", &binance_twap_params(req, mode, &qty, minutes, lim.as_deref(), &id)).await?;
-            if v["success"] != true { bail!("binance TWAP: {}", v["msg"].as_str().unwrap_or("rejected")); }
-            Ok(v["clientAlgoId"].as_str().unwrap_or(&id).to_string())
-        }
+        Exchange::Binance => binance::place_twap(k, req, r, ref_px, mode, minutes, limit).await,
         Exchange::Hyperliquid => hyperliquid::place_twap(k, req, minutes, randomize).await,
         _ => unreachable!(),
     }
@@ -539,11 +313,7 @@ pub async fn place_twap(ex: Exchange, k: &Keys, req: &OrderReq, r: &Rules, ref_p
 
 pub async fn cancel_twap(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {
     match ex {
-        Exchange::Binance => {
-            let v = binance_at(k, sapi_url(), reqwest::Method::DELETE, "/sapi/v1/algo/futures/order", &[("clientAlgoId", id.into())]).await?;
-            if v["success"] == false { bail!("binance TWAP cancel: {}", v["msg"].as_str().unwrap_or("rejected")); }
-            Ok(())
-        }
+        Exchange::Binance => binance::cancel_twap(k, symbol, id).await,
         Exchange::Hyperliquid => hyperliquid::cancel_twap(k, symbol, id).await,
         _ => bail!("{ex:?} has no native TWAP"),
     }
@@ -552,16 +322,8 @@ pub async fn cancel_twap(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Resu
 /// Position mode of the account for `symbol` (read only; never changed from here).
 pub async fn mode(ex: Exchange, k: &Keys, symbol: &str) -> Result<Mode> {
     match ex {
-        // per-symbol query returns one row per positionIdx even when flat: 1/2 means hedge
-        Exchange::Bybit => {
-            let v = bybit(k, true, "/v5/position/list", json!({"category": "linear", "symbol": symbol})).await?;
-            let hedge = v["list"].as_array().into_iter().flatten().any(|p| p["positionIdx"].as_i64().is_some_and(|i| i > 0));
-            Ok(if hedge { Mode::Hedge } else { Mode::OneWay })
-        }
-        Exchange::Binance => {
-            let v = binance(k, reqwest::Method::GET, "/fapi/v1/positionSide/dual", &[]).await?;
-            Ok(if v["dualSidePosition"].as_bool() == Some(true) { Mode::Hedge } else { Mode::OneWay })
-        }
+        Exchange::Bybit => bybit::mode(k, symbol).await,
+        Exchange::Binance => binance::mode(k, symbol).await,
         Exchange::Okx => okx::mode(k, symbol).await,
         Exchange::Bitget => bitget::mode(k, symbol).await,
         Exchange::Gate => gate::mode(k, symbol).await,
@@ -576,16 +338,8 @@ pub async fn mode(ex: Exchange, k: &Keys, symbol: &str) -> Result<Mode> {
 /// Bybit: public instrument info. Binance: leverage brackets (signed, weight 1).
 pub async fn max_leverage(ex: Exchange, k: &Keys, symbol: &str) -> Result<f64> {
     match ex {
-        Exchange::Bybit => {
-            let v = ws::get_json(&format!("{}/v5/market/instruments-info?category=linear&symbol={symbol}", bybit_url())).await?;
-            crate::opt_num(&v["result"]["list"][0]["leverageFilter"]["maxLeverage"]).ok_or_else(|| anyhow!("bybit: no max leverage for {symbol}"))
-        }
-        Exchange::Binance => {
-            let v = binance(k, reqwest::Method::GET, "/fapi/v1/leverageBracket", &[("symbol", symbol.into())]).await?;
-            // USD-M returns an array of {symbol, brackets}; Portfolio Margin the same shape
-            let row = if v.is_array() { v[0].clone() } else { v };
-            crate::opt_num(&row["brackets"][0]["initialLeverage"]).ok_or_else(|| anyhow!("binance: no leverage brackets for {symbol}"))
-        }
+        Exchange::Bybit => bybit::max_leverage(symbol).await,
+        Exchange::Binance => binance::max_leverage(k, symbol).await,
         _ => bail!("{ex:?}: changing leverage from Depth is not supported yet"),
     }
 }
@@ -595,15 +349,8 @@ pub async fn max_leverage(ex: Exchange, k: &Keys, symbol: &str) -> Result<f64> {
 pub async fn set_leverage(ex: Exchange, k: &Keys, symbol: &str, lev: u32) -> Result<()> {
     if lev == 0 { bail!("leverage must be at least 1x"); }
     match ex {
-        Exchange::Bybit => {
-            let l = lev.to_string();
-            match bybit(k, false, "/v5/position/set-leverage", json!({"category": "linear", "symbol": symbol, "buyLeverage": l, "sellLeverage": l})).await {
-                // 110043: already at this leverage
-                Err(e) if format!("{e:#}").contains("110043") => Ok(()),
-                r => r.map(|_| ()),
-            }
-        }
-        Exchange::Binance => binance(k, reqwest::Method::POST, "/fapi/v1/leverage", &[("symbol", symbol.into()), ("leverage", lev.to_string())]).await.map(|_| ()),
+        Exchange::Bybit => bybit::set_leverage(k, symbol, lev).await,
+        Exchange::Binance => binance::set_leverage(k, symbol, lev).await,
         _ => bail!("{ex:?}: changing leverage from Depth is not supported yet"),
     }
 }
@@ -611,14 +358,8 @@ pub async fn set_leverage(ex: Exchange, k: &Keys, symbol: &str, lev: u32) -> Res
 /// The account's leverage setting for `symbol` (weight 5 on Binance; read once per symbol).
 pub async fn leverage(ex: Exchange, k: &Keys, symbol: &str) -> Result<f64> {
     match ex {
-        Exchange::Bybit => {
-            let v = bybit(k, true, "/v5/position/list", json!({"category": "linear", "symbol": symbol})).await?;
-            v["list"][0]["leverage"].as_str().and_then(|s| s.parse().ok()).ok_or_else(|| anyhow!("bybit: no leverage for {symbol}"))
-        }
-        Exchange::Binance => {
-            let v = binance(k, reqwest::Method::GET, "/fapi/v1/symbolConfig", &[("symbol", symbol.into())]).await?;
-            v[0]["leverage"].as_f64().ok_or_else(|| anyhow!("binance: no leverage for {symbol}"))
-        }
+        Exchange::Bybit => bybit::leverage(k, symbol).await,
+        Exchange::Binance => binance::leverage(k, symbol).await,
         Exchange::Okx => okx::leverage(k, symbol).await,
         Exchange::Bitget => bitget::leverage(k, symbol).await,
         Exchange::Gate => gate::leverage(k, symbol).await,
@@ -641,13 +382,12 @@ pub async fn place(ex: Exchange, k: &Keys, req: &OrderReq, r: &Rules, ref_px: f6
     }
     match ex {
         Exchange::Bybit if matches!(req.kind, Kind::Trailing { .. }) => {
-            bybit(k, false, "/v5/position/trading-stop", bybit_trailing_body(req, mode, ref_px, r.tick)?).await?;
-            Ok("trailing".into())
+            bybit::place_trailing(k, req, r, ref_px, mode).await
         }
-        Exchange::Bybit => Ok(bybit(k, false, "/v5/order/create", bybit_body(req, mode, &qty, px.as_deref(), ref_px, r.tick)).await?["orderId"].as_str().unwrap_or_default().to_string()),
+        Exchange::Bybit => bybit::place(k, req, r, ref_px, mode, &qty, px.as_deref()).await,
         Exchange::Binance if matches!(req.kind, Kind::Stop { .. } | Kind::Trailing { .. }) =>
-            tpsl::binance_place(k, &binance_algo_params(req, mode, &qty, px.as_deref(), ref_px, r.tick)?).await,
-        Exchange::Binance => Ok(binance(k, reqwest::Method::POST, "/fapi/v1/order", &binance_params(req, mode, &qty, px.as_deref())).await?["orderId"].to_string()),
+            binance::place_algo(k, req, r, ref_px, mode, &qty, px.as_deref()).await,
+        Exchange::Binance => binance::place(k, req, r, ref_px, mode, &qty, px.as_deref()).await,
         Exchange::Okx => okx::place(k, req, r, ref_px, mode).await,
         Exchange::Bitget => bitget::place(k, req, r, ref_px, mode).await,
         Exchange::Gate => gate::place(k, req, r, ref_px, mode).await,
@@ -690,27 +430,14 @@ pub fn ceil_step(qty: f64, step: f64, min: f64) -> f64 { ((qty / step - 1e-9).ce
 /// Tick, size step and minimum size of one option.
 pub async fn option_rules(ex: Exchange, symbol: &str) -> Result<Rules> {
     match ex {
-        Exchange::Bybit => {
-            let i = ws::get_json(&format!("{}/v5/market/instruments-info?category=option&symbol={symbol}", bybit_url())).await?;
-            let i = &i["result"]["list"][0];
-            let r = Rules { tick: n(&i["priceFilter"]["tickSize"]), step: n(&i["lotSizeFilter"]["qtyStep"]), min_qty: n(&i["lotSizeFilter"]["minOrderQty"]), min_notional: 0.0 };
-            if !(r.tick > 0.0 && r.step > 0.0) { bail!("{symbol}: no trading rules"); }
-            Ok(r)
-        }
+        Exchange::Bybit => bybit::option_rules(symbol).await,
         _ => bail!("{ex:?}: option orders not supported yet"),
     }
 }
 
 pub async fn option_plan(ex: Exchange, symbol: &str, qty: f64) -> Result<OptBuy> {
     match ex {
-        Exchange::Bybit => {
-            let Rules { tick, step, min_qty: min, .. } = option_rules(ex, symbol).await?;
-            let b = ws::get_json(&format!("{}/v5/market/orderbook?category=option&symbol={symbol}&limit=25", bybit_url())).await?;
-            let asks: Vec<(f64, f64)> = b["result"]["a"].as_array().into_iter().flatten().map(|l| (n(&l[0]), n(&l[1]))).filter(|(p, q)| *p > 0.0 && *q > 0.0).collect();
-            let qty = ceil_step(qty, step, min);
-            let (limit, fill, avg) = sweep(&asks, qty).ok_or_else(|| anyhow!("{symbol}: no asks"))?;
-            Ok(OptBuy { ex, symbol: symbol.into(), qty, limit, tick, step, fill, avg, cost: fill * avg })
-        }
+        Exchange::Bybit => bybit::option_plan(symbol, qty).await,
         _ => bail!("{ex:?}: option orders not supported yet"),
     }
 }
@@ -721,28 +448,10 @@ pub async fn option_plan(ex: Exchange, symbol: &str, qty: f64) -> Result<OptBuy>
 pub struct OptPos { pub ex: Exchange, pub symbol: String, pub base: String, pub expiry: String, pub strike: f64, pub call: bool,
     pub side: Side, pub qty: f64, pub avg: f64, pub mark: f64, pub upnl: f64 }
 
-/// (base, expiry, strike, call) from a Bybit option symbol.
-pub fn bybit_opt_parts(s: &str) -> Option<(String, String, f64, bool)> {
-    let p: Vec<&str> = s.split('-').collect();
-    if p.len() < 4 { return None; }
-    Some((p[0].into(), p[1].into(), p[2].parse().ok()?, p[3] == "C"))
-}
-
-/// One Bybit option position row (REST list or `position.option` push); size 0 = closed.
-fn bybit_opt_pos(p: &Value) -> Option<OptPos> {
-    let symbol = p["symbol"].as_str()?;
-    let (base, expiry, strike, call) = bybit_opt_parts(symbol)?;
-    Some(OptPos { ex: Exchange::Bybit, symbol: symbol.into(), base, expiry, strike, call,
-        side: if p["side"] == "Sell" { Side::Sell } else { Side::Buy }, qty: n(&p["size"]), avg: n(&p["avgPrice"]), mark: n(&p["markPrice"]), upnl: n(&p["unrealisedPnl"]) })
-}
-
 /// Open option positions on a venue (empty where option trading is not built).
 pub async fn option_positions(ex: Exchange, k: &Keys) -> Result<Vec<OptPos>> {
     match ex {
-        Exchange::Bybit => {
-            let v = bybit(k, true, "/v5/position/list", json!({"category": "option"})).await?;
-            Ok(v["list"].as_array().into_iter().flatten().filter_map(bybit_opt_pos).filter(|p| p.qty > 0.0).collect())
-        }
+        Exchange::Bybit => bybit::option_positions(k).await,
         _ => Ok(vec![]),
     }
 }
@@ -753,14 +462,6 @@ pub async fn buy_option(k: &Keys, p: &OptBuy) -> Result<String> {
     option_order(k, p.ex, &p.symbol, Side::Buy, p.qty, p.limit, Tif::Ioc, false, &r).await
 }
 
-/// Bybit option order body: limit only (options take no market orders through this path).
-pub fn bybit_opt_body(symbol: &str, side: Side, qty: &str, px: &str, tif: Tif, reduce_only: bool) -> Value {
-    // orderLinkId is mandatory for Bybit options
-    json!({"category": "option", "symbol": symbol, "side": side_str(Exchange::Bybit, side), "orderType": "Limit",
-        "timeInForce": match tif { Tif::Gtc => "GTC", Tif::Ioc => "IOC", Tif::Fok => "FOK", Tif::PostOnly => "PostOnly" },
-        "qty": qty, "price": px, "reduceOnly": reduce_only, "orderLinkId": format!("t1opt{}", crate::now_ms())})
-}
-
 /// One option limit order; size floored and price rounded to the venue grid.
 #[allow(clippy::too_many_arguments)]
 pub async fn option_order(k: &Keys, ex: Exchange, symbol: &str, side: Side, qty: f64, price: f64, tif: Tif, reduce_only: bool, r: &Rules) -> Result<String> {
@@ -769,14 +470,14 @@ pub async fn option_order(k: &Keys, ex: Exchange, symbol: &str, side: Side, qty:
     let px = fmt_step(price, r.tick, false);
     if px.parse::<f64>().unwrap_or(0.0) <= 0.0 { bail!("invalid price {price}"); }
     match ex {
-        Exchange::Bybit => Ok(bybit(k, false, "/v5/order/create", bybit_opt_body(symbol, side, &q, &px, tif, reduce_only)).await?["orderId"].as_str().unwrap_or_default().to_string()),
+        Exchange::Bybit => bybit::option_order(k, symbol, side, &q, &px, tif, reduce_only).await,
         _ => bail!("{ex:?}: option orders not supported yet"),
     }
 }
 
 pub async fn option_cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {
     match ex {
-        Exchange::Bybit => { bybit(k, false, "/v5/order/cancel", json!({"category": "option", "symbol": symbol, "orderId": id})).await?; Ok(()) }
+        Exchange::Bybit => bybit::option_cancel(k, symbol, id).await,
         _ => bail!("{ex:?}: option orders not supported yet"),
     }
 }
@@ -784,14 +485,7 @@ pub async fn option_cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Re
 /// Resting option orders (empty where option trading is not built).
 pub async fn option_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
     match ex {
-        Exchange::Bybit => {
-            let v = bybit(k, true, "/v5/order/realtime", json!({"category": "option", "limit": "50"})).await?;
-            Ok(v["list"].as_array().into_iter().flatten().map(|o| OpenOrder {
-                ex, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].as_str().unwrap_or_default().into(),
-                side: if o["side"] == "Sell" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["qty"]), filled: n(&o["cumExecQty"]),
-                tif: o["timeInForce"].as_str().unwrap_or_default().into(), kind: o["orderType"].as_str().unwrap_or("Limit").to_lowercase(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: n(&o["createdTime"]) as i64, pos: None,
-            }).collect())
-        }
+        Exchange::Bybit => bybit::option_orders(k).await,
         _ => Ok(vec![]),
     }
 }
@@ -801,18 +495,8 @@ pub async fn option_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
 /// Read once per key (stream start, key change), never polled.
 pub async fn can_trade(ex: Exchange, k: &Keys) -> Result<Option<bool>> {
     Ok(match ex {
-        // readOnly 1 = read-only key; linear perps need the ContractTrade permission
-        Exchange::Bybit => {
-            let v = bybit(k, true, "/v5/user/query-api", json!({})).await?;
-            let ro = v["readOnly"].as_i64() == Some(1);
-            let perms = v["permissions"]["ContractTrade"].as_array().is_some_and(|a| !a.is_empty());
-            Some(!ro && perms)
-        }
-        Exchange::Binance => {
-            let v = binance_at(k, sapi_url(), reqwest::Method::GET, "/sapi/v1/account/apiRestrictions", &[]).await?;
-            let flag = if binance_pm(k).await? { "enablePortfolioMarginTrading" } else { "enableFutures" };
-            v[flag].as_bool()
-        }
+        Exchange::Bybit => bybit::can_trade(k).await?,
+        Exchange::Binance => binance::can_trade(k).await?,
         Exchange::Okx => okx::can_trade(k).await?,
         _ => None,
     })
@@ -828,11 +512,8 @@ pub async fn amend(ex: Exchange, k: &Keys, o: &OpenOrder, price: f64, r: &Rules)
     let px = fmt_step(price, r.tick, false);
     if !(px.parse::<f64>().is_ok_and(|p| p > 0.0)) { bail!("invalid price {price}"); }
     match ex {
-        Exchange::Bybit => { bybit(k, false, "/v5/order/amend", json!({"category": "linear", "symbol": o.symbol, "orderId": o.id, "price": px})).await?; }
-        Exchange::Binance => {
-            binance(k, reqwest::Method::PUT, "/fapi/v1/order", &[("symbol", o.symbol.clone()), ("orderId", o.id.clone()),
-                ("side", side_str(Exchange::Binance, o.side).into()), ("quantity", fmt_step(o.qty, r.step, true)), ("price", px)]).await?;
-        }
+        Exchange::Bybit => { bybit::amend(k, o, px).await?; }
+        Exchange::Binance => { binance::amend(k, o, px, r).await?; }
         _ => bail!("{ex:?}: no in-place amend"),
     }
     Ok(())
@@ -840,8 +521,8 @@ pub async fn amend(ex: Exchange, k: &Keys, o: &OpenOrder, price: f64, r: &Rules)
 
 pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()> {
     match ex {
-        Exchange::Bybit => { bybit(k, false, "/v5/order/cancel", json!({"category": "linear", "symbol": symbol, "orderId": id})).await?; }
-        Exchange::Binance => { binance(k, reqwest::Method::DELETE, "/fapi/v1/order", &[("symbol", symbol.into()), ("orderId", id.into())]).await?; }
+        Exchange::Bybit => { bybit::cancel(k, symbol, id).await?; }
+        Exchange::Binance => { binance::cancel(k, symbol, id).await?; }
         Exchange::Okx => { okx::cancel(k, symbol, id).await?; }
         Exchange::Bitget => { bitget::cancel(k, symbol, id).await?; }
         Exchange::Gate => { gate::cancel(k, symbol, id).await?; }
@@ -855,25 +536,8 @@ pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str) -> Result<()
 
 pub async fn positions(ex: Exchange, k: &Keys) -> Result<Vec<Position>> {
     match ex {
-        Exchange::Bybit => {
-            let v = bybit(k, true, "/v5/position/list", json!({"category": "linear", "settleCoin": "USDT"})).await?;
-            Ok(v["list"].as_array().into_iter().flatten().filter(|p| n(&p["size"]) > 0.0).map(bybit_position).collect())
-        }
-        Exchange::Binance => {
-            let v = binance(k, reqwest::Method::GET, "/fapi/v3/positionRisk", &[]).await?;
-            Ok(v.as_array().into_iter().flatten().filter(|p| n(&p["positionAmt"]) != 0.0).map(|p| {
-                let amt = n(&p["positionAmt"]);
-                // Portfolio Margin rows carry leverage instead of initialMargin
-                let margin = crate::opt_num(&p["initialMargin"]).unwrap_or_else(|| { let l = n(&p["leverage"]); if l > 0.0 { n(&p["notional"]).abs() / l } else { 0.0 } });
-                // hedge mode reports LONG / SHORT rows; one-way reports BOTH with a signed amount
-                let side = match p["positionSide"].as_str() { Some("LONG") => Side::Buy, Some("SHORT") => Side::Sell, _ => if amt < 0.0 { Side::Sell } else { Side::Buy } };
-                Position { ex, symbol: p["symbol"].as_str().unwrap_or_default().into(), side,
-                    qty: amt.abs(), entry: n(&p["entryPrice"]), mark: n(&p["markPrice"]), liq: crate::opt_num(&p["liquidationPrice"]).filter(|x| *x > 0.0),
-                    upnl: n(&p["unRealizedProfit"]), lev: if margin > 0.0 { n(&p["notional"]).abs() / margin } else { 0.0 }, margin,
-                    // v3 USD-M rows: isolatedWallet > 0 is isolated; Portfolio Margin is always cross
-                    cross: Some(is_pm() || match p["marginType"].as_str() { Some(m) => m != "isolated", None => n(&p["isolatedWallet"]) == 0.0 }) }
-            }).collect())
-        }
+        Exchange::Bybit => bybit::positions(k).await,
+        Exchange::Binance => binance::positions(k).await,
         Exchange::Okx => okx::positions(k).await,
         Exchange::Bitget => bitget::positions(k).await,
         Exchange::Gate => gate::positions(k).await,
@@ -886,20 +550,8 @@ pub async fn positions(ex: Exchange, k: &Keys) -> Result<Vec<Position>> {
 
 pub async fn open_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
     match ex {
-        Exchange::Bybit => {
-            let v = bybit(k, true, "/v5/order/realtime", json!({"category": "linear", "settleCoin": "USDT"})).await?;
-            // TP/SL rows live in the same list; they are reported by tpsl::list instead
-            Ok(v["list"].as_array().into_iter().flatten().filter(|o| tpsl::bybit_row(o).is_none()).map(bybit_order).collect())
-        }
-        Exchange::Binance => {
-            let v = binance(k, reqwest::Method::GET, "/fapi/v1/openOrders", &[]).await?;
-            Ok(v.as_array().into_iter().flatten().map(|o| OpenOrder {
-                ex, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].to_string(),
-                side: if o["side"] == "SELL" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["origQty"]), filled: n(&o["executedQty"]),
-                tif: o["timeInForce"].as_str().unwrap_or_default().into(), kind: o["type"].as_str().unwrap_or_default().into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: o["time"].as_i64().unwrap_or(0),
-                pos: match o["positionSide"].as_str() { Some("LONG") => Some(Side::Buy), Some("SHORT") => Some(Side::Sell), _ => None },
-            }).collect())
-        }
+        Exchange::Bybit => bybit::open_orders(k).await,
+        Exchange::Binance => binance::open_orders(k).await,
         Exchange::Okx => okx::open_orders(k).await,
         Exchange::Bitget => bitget::open_orders(k).await,
         Exchange::Gate => gate::open_orders(k).await,
@@ -912,22 +564,8 @@ pub async fn open_orders(ex: Exchange, k: &Keys) -> Result<Vec<OpenOrder>> {
 
 pub async fn balance(ex: Exchange, k: &Keys) -> Result<Balance> {
     match ex {
-        Exchange::Bybit => {
-            let v = bybit(k, true, "/v5/account/wallet-balance", json!({"accountType": "UNIFIED"})).await?;
-            let a = &v["list"][0];
-            Ok(Balance { equity: n(&a["totalEquity"]), available: n(&a["totalAvailableBalance"]), uni_mmr: None, mm_rate: crate::opt_num(&a["accountMMRate"]),
-                maint_margin: crate::opt_num(&a["totalMaintenanceMargin"]), adj_equity: crate::opt_num(&a["totalMarginBalance"]) })
-        }
-        Exchange::Binance => {
-            let v = binance(k, reqwest::Method::GET, "/fapi/v3/account", &[]).await?;
-            // Portfolio Margin (/papi/v1/account) vs USD-M (/fapi/v3/account) field names
-            Ok(if v.get("accountEquity").is_some() {
-                Balance { equity: n(&v["accountEquity"]), available: n(&v["totalAvailableBalance"]), uni_mmr: crate::opt_num(&v["uniMMR"]), mm_rate: None,
-                    maint_margin: crate::opt_num(&v["accountMaintMargin"]), adj_equity: crate::opt_num(&v["actualEquity"]) }
-            } else {
-                Balance { equity: n(&v["totalMarginBalance"]), available: n(&v["availableBalance"]), ..Default::default() }
-            })
-        }
+        Exchange::Bybit => bybit::balance(k).await,
+        Exchange::Binance => binance::balance(k).await,
         Exchange::Okx => okx::balance(k).await,
         Exchange::Bitget => bitget::balance(k).await,
         Exchange::Gate => gate::balance(k).await,
@@ -935,27 +573,6 @@ pub async fn balance(ex: Exchange, k: &Keys) -> Result<Balance> {
         Exchange::Hyperliquid => hyperliquid::balance(k).await,
         Exchange::Lighter => lighter::balance(k).await,
         _ => bail!("{ex:?} trading not implemented"),
-    }
-}
-
-/// One Bybit v5 position row (REST list and the private `position` push share the shape).
-/// A closed hedge-mode row has side "" and size 0; positionIdx says which side it was.
-fn bybit_position(p: &Value) -> Position {
-    let side = match (p["side"].as_str(), p["positionIdx"].as_i64()) { (Some("Sell"), _) | (_, Some(2)) => Side::Sell, _ => Side::Buy };
-    Position {
-        ex: Exchange::Bybit, symbol: p["symbol"].as_str().unwrap_or_default().into(), side,
-        qty: n(&p["size"]), entry: crate::opt_num(&p["avgPrice"]).or(crate::opt_num(&p["entryPrice"])).unwrap_or(0.0), mark: n(&p["markPrice"]),
-        liq: crate::opt_num(&p["liqPrice"]).filter(|x| *x > 0.0), upnl: n(&p["unrealisedPnl"]), lev: n(&p["leverage"]), margin: n(&p["positionIM"]),
-        cross: p["tradeMode"].as_i64().map(|m| m == 0),
-    }
-}
-
-fn bybit_order(o: &Value) -> OpenOrder {
-    OpenOrder {
-        ex: Exchange::Bybit, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].as_str().unwrap_or_default().into(),
-        side: if o["side"] == "Sell" { Side::Sell } else { Side::Buy }, price: n(&o["price"]), qty: n(&o["qty"]), filled: n(&o["cumExecQty"]),
-        tif: o["timeInForce"].as_str().unwrap_or_default().into(), kind: o["orderType"].as_str().unwrap_or_default().into(), reduce_only: o["reduceOnly"].as_bool().unwrap_or(false), ts: n(&o["createdTime"]) as i64,
-        pos: match o["positionIdx"].as_i64() { Some(1) => Some(Side::Buy), Some(2) => Some(Side::Sell), _ => None },
     }
 }
 
@@ -994,8 +611,8 @@ pub type AccTx = tokio::sync::mpsc::UnboundedSender<(Exchange, AccEvent)>;
 /// Runs a venue's private account stream forever (reconnecting, re-snapshotting).
 pub async fn stream(ex: Exchange, k: Keys, tx: AccTx) {
     match ex {
-        Exchange::Bybit => bybit_stream(k, tx).await,
-        Exchange::Binance => binance_stream(k, tx).await,
+        Exchange::Bybit => bybit::stream(k, tx).await,
+        Exchange::Binance => binance::stream(k, tx).await,
         Exchange::Okx => okx::stream(k, tx).await,
         Exchange::Bitget => bitget::stream(k, tx).await,
         Exchange::Gate => gate::stream(k, tx).await,
@@ -1006,163 +623,7 @@ pub async fn stream(ex: Exchange, k: Keys, tx: AccTx) {
     }
 }
 
-async fn bybit_stream(k: Keys, tx: AccTx) {
-    let ex = Exchange::Bybit;
-    let url = if testnet() { "wss://stream-testnet.bybit.com/v5/private" } else { "wss://stream.bybit.com/v5/private" };
-    loop {
-        // auth: HMAC(secret, "GET/realtime" + expires), computed fresh for every connection
-        let expires = crate::now_ms() + 10_000;
-        let sig = hmac_hex(&k.secret, &format!("GET/realtime{expires}"));
-        let spec = ws::Spec::new("bybit account", url)
-            .sub(json!({"op": "auth", "args": [k.key, expires, sig]}).to_string())
-            .sub(json!({"op": "subscribe", "args": ["position.linear", "order.linear", "execution.linear", "wallet"]}).to_string())
-            // its own request: an account without options must not fail the main subscription
-            .sub(json!({"op": "subscribe", "req_id": "opt", "args": ["position.option"]}).to_string())
-            .sub(json!({"op": "subscribe", "req_id": "spot", "args": ["order.spot"]}).to_string())
-            .ping(std::time::Duration::from_secs(20), r#"{"op":"ping"}"#);
-        let mut auth_failed = false;
-        let r = ws::once(&spec, |f| {
-            let ws::Frame::Text(s) = f else { return true };
-            let Ok(v) = serde_json::from_str::<Value>(s) else { return true };
-            let send = |e: AccEvent| { let _ = tx.send((ex, e)); };
-            match (v["op"].as_str(), v["topic"].as_str()) {
-                (Some("auth"), _) if v["success"] == false => { eprintln!("[bybit account] auth failed: {}", v["ret_msg"]); auth_failed = true; return false; }
-                (Some("subscribe"), _) if v["success"] == true && v["req_id"] != "opt" && v["req_id"] != "spot" => send(AccEvent::Resync),
-                (_, Some("order.spot")) => send(AccEvent::SpotDirty),
-                (_, Some("position.option")) => for p in v["data"].as_array().into_iter().flatten().filter_map(bybit_opt_pos) { send(AccEvent::OptPos(p)); },
-                (_, Some("position.linear")) => for p in v["data"].as_array().into_iter().flatten() {
-                    send(AccEvent::Position { p: bybit_position(p), one_way: p["positionIdx"].as_i64() == Some(0) });
-                },
-                (_, Some("order.linear")) => for o in v["data"].as_array().into_iter().flatten() {
-                    // TP/SL rows are kept apart from ordinary resting orders
-                    if let Some((t, active)) = tpsl::bybit_row(o) {
-                        send(if active { AccEvent::TpSl(t) } else { AccEvent::TpSlDone { id: o["orderId"].as_str().unwrap_or_default().into() } });
-                        continue;
-                    }
-                    let open = matches!(o["orderStatus"].as_str(), Some("New" | "PartiallyFilled" | "Untriggered"));
-                    send(if open { AccEvent::Order(bybit_order(o)) } else { AccEvent::OrderDone { id: o["orderId"].as_str().unwrap_or_default().into() } });
-                },
-                (_, Some("execution.linear")) => for f in v["data"].as_array().into_iter().flatten().filter_map(bybit_fill) { send(AccEvent::Fill(f)); },
-                (_, Some("wallet")) => for w in v["data"].as_array().into_iter().flatten().filter(|w| w["accountType"] == "UNIFIED") {
-                    send(AccEvent::Wallet { equity: n(&w["totalEquity"]), available: n(&w["totalAvailableBalance"]) });
-                },
-                _ => {}
-            }
-            true
-        }).await;
-        if let Err(e) = r { eprintln!("[bybit account] {e:#}"); }
-        tokio::time::sleep(std::time::Duration::from_secs(if auth_failed { 60 } else { 2 })).await;
-    }
-}
-
-fn binance_ws() -> &'static str { if testnet() { "wss://stream.binancefuture.com" } else { "wss://fstream.binance.com" } }
-
-/// listenKey create (POST) / keepalive (PUT): API key header only, no signature.
-async fn listen_key(k: &Keys, pm: bool, method: reqwest::Method) -> Result<String> {
-    let url = if pm { format!("{}/papi/v1/listenKey", papi_url()) } else { format!("{}/fapi/v1/listenKey", binance_url()) };
-    ws::check_paused(&url)?;
-    let r = ws::http().request(method, &url).header("X-MBX-APIKEY", &k.key).send().await?;
-    let st = r.status().as_u16();
-    let body = r.text().await?;
-    ws::note_limit(&url, st, None, &body);
-    let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-    if !(200..300).contains(&st) { bail!("binance listenKey: {} ({})", v["msg"].as_str().unwrap_or(&body), v["code"]); }
-    Ok(v["listenKey"].as_str().unwrap_or_default().to_string())
-}
-
-async fn binance_stream(k: Keys, tx: AccTx) {
-    let ex = Exchange::Binance;
-    // mark prices of every USD-M symbol, for live upnl of any open position (public, no weight)
-    // ponytail: the all-symbol array (~600 rows/s); subscribe per position symbol if bandwidth matters
-    let txm = tx.clone();
-    tokio::spawn(ws::run(ws::Spec::new("binance marks", format!("{}/market/ws/!markPrice@arr@1s", binance_ws())), move |f| {
-        let ws::Frame::Text(s) = f else { return };
-        let Ok(v) = serde_json::from_str::<Value>(s) else { return };
-        for m in v.as_array().into_iter().flatten() {
-            let _ = txm.send((ex, AccEvent::Mark { symbol: m["s"].as_str().unwrap_or_default().into(), mark: n(&m["p"]) }));
-        }
-    }));
-    loop {
-        let res: Result<()> = async {
-            let pm = binance_pm(&k).await?;
-            let key = listen_key(&k, pm, reqwest::Method::POST).await?;
-            // Portfolio Margin: /pm/ws/<key>; USD-M: the routed /private endpoint (unrouted /ws
-            // URLs only carry public data since the 2026 split)
-            let url = if pm { format!("{}/pm/ws/{key}", binance_ws()) } else { format!("{}/private/ws?listenKey={key}", binance_ws()) };
-            let _ = tx.send((ex, AccEvent::Resync));
-            let k2 = k.clone();
-            let keepalive = async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
-                    if let Err(e) = listen_key(&k2, pm, reqwest::Method::PUT).await { eprintln!("[binance account] keepalive: {e:#}"); }
-                }
-            };
-            let spec = ws::Spec { idle: std::time::Duration::from_secs(3600), ..ws::Spec::new("binance account", url) };
-            let session = ws::once(&spec, |f| {
-                let ws::Frame::Text(s) = f else { return true };
-                let Ok(v) = serde_json::from_str::<Value>(s) else { return true };
-                let send = |e: AccEvent| { let _ = tx.send((ex, e)); };
-                // Portfolio Margin also streams cross-margin / coin-M events; only USD-M is traded here
-                if v["fs"].as_str().is_some_and(|fs| fs != "UM") { return true; }
-                match v["e"].as_str() {
-                    Some("ACCOUNT_UPDATE") => {
-                        for p in v["a"]["P"].as_array().into_iter().flatten() {
-                            let amt = n(&p["pa"]);
-                            let ps = p["ps"].as_str().unwrap_or("BOTH");
-                            let side = match ps { "LONG" => Side::Buy, "SHORT" => Side::Sell, _ => if amt < 0.0 { Side::Sell } else { Side::Buy } };
-                            send(AccEvent::Position { one_way: ps == "BOTH", p: Position {
-                                ex, symbol: p["s"].as_str().unwrap_or_default().into(), side, qty: amt.abs(), entry: n(&p["ep"]),
-                                mark: 0.0, liq: None, upnl: n(&p["up"]), lev: 0.0, margin: 0.0, cross: if is_pm() { Some(true) } else { p["mt"].as_str().map(|m| m != "isolated") } } });
-                        }
-                        send(AccEvent::BalanceDirty);
-                    }
-                    Some("ORDER_TRADE_UPDATE") => {
-                        let o = &v["o"];
-                        let id = o["i"].to_string();
-                        if o["x"] == "TRADE" {
-                            send(AccEvent::Fill(Fill {
-                                ex, id: o["t"].to_string(), symbol: o["s"].as_str().unwrap_or_default().into(), side: if o["S"] == "SELL" { Side::Sell } else { Side::Buy },
-                                price: n(&o["L"]), qty: n(&o["l"]), fee: n(&o["n"]), realized: crate::opt_num(&o["rp"]), ts: o["T"].as_i64().unwrap_or(0),
-                            }));
-                        }
-                        if matches!(o["X"].as_str(), Some("NEW" | "PARTIALLY_FILLED")) {
-                            send(AccEvent::Order(OpenOrder {
-                                ex, symbol: o["s"].as_str().unwrap_or_default().into(), id, side: if o["S"] == "SELL" { Side::Sell } else { Side::Buy },
-                                price: n(&o["p"]), qty: n(&o["q"]), filled: n(&o["z"]), tif: o["f"].as_str().unwrap_or_default().into(), kind: o["o"].as_str().unwrap_or_default().into(),
-                                reduce_only: o["R"].as_bool().unwrap_or(false), ts: o["T"].as_i64().unwrap_or(0),
-                                pos: match o["ps"].as_str() { Some("LONG") => Some(Side::Buy), Some("SHORT") => Some(Side::Sell), _ => None },
-                            }));
-                        } else {
-                            send(AccEvent::OrderDone { id });
-                        }
-                    }
-                    Some("balanceUpdate" | "outboundAccountPosition") => send(AccEvent::BalanceDirty),
-                    Some("ALGO_UPDATE") => if let Some((t, active)) = tpsl::binance_algo_update(&v) {
-                        send(if active { AccEvent::TpSl(t) } else { AccEvent::TpSlDone { id: t.id } });
-                    },
-                    Some("listenKeyExpired") => return false,
-                    _ => {}
-                }
-                true
-            });
-            tokio::select! { r = session => r, _ = keepalive => Ok(()) }
-        }.await;
-        if let Err(e) = res { eprintln!("[binance account] {e:#}"); }
-        // a paused host (rate limit) fails fast: wait long enough not to spin
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    }
-}
-
 // ---------------------------------------------------------------- history (on demand only)
-
-/// One Bybit execution (REST list or `execution.linear` push); funding / settlement rows are not fills.
-fn bybit_fill(f: &Value) -> Option<Fill> {
-    f["execType"].as_str().is_none_or(|t| t == "Trade").then(|| Fill {
-        ex: Exchange::Bybit, id: f["execId"].as_str().unwrap_or_default().into(), symbol: f["symbol"].as_str().unwrap_or_default().into(),
-        side: if f["side"] == "Sell" { Side::Sell } else { Side::Buy }, price: n(&f["execPrice"]), qty: n(&f["execQty"]),
-        fee: n(&f["execFee"]), realized: crate::opt_num(&f["execPnl"]), ts: n(&f["execTime"]) as i64,
-    })
-}
 
 /// Own fills of one symbol since `since` (ms), for the chart's buy / sell marks. Called once per
 /// symbol per session; pushes keep it current after that. Both venues cap a query at 7 days, so
@@ -1179,30 +640,9 @@ pub async fn fills_since(ex: Exchange, k: &Keys, symbol: &str, since: i64) -> Re
     while t0 < now {
         let t1 = (t0 + 7 * 86_400_000 - 1).min(now);
         if let Some((base, path)) = binance {
-            // pages of 1000 (weight 5 each), the next one from the last fill's time (repeats are deduped by id)
-            let mut s = t0;
-            loop {
-                let t = binance_at(k, base, reqwest::Method::GET, path, &[("symbol", symbol.to_string()), ("startTime", s.to_string()), ("endTime", t1.to_string()), ("limit", "1000".into())]).await?;
-                let rows: Vec<Fill> = t.as_array().into_iter().flatten().map(|f| Fill {
-                    ex, id: f["id"].to_string(), symbol: symbol.into(), side: if f["side"] == "SELL" { Side::Sell } else { Side::Buy },
-                    price: n(&f["price"]), qty: n(&f["qty"]), fee: n(&f["commission"]), realized: crate::opt_num(&f["realizedPnl"]), ts: f["time"].as_i64().unwrap_or(0),
-                }).collect();
-                let last = rows.iter().map(|f| f.ts).max().unwrap_or(s);
-                let full = rows.len() >= 1000;
-                out.extend(rows);
-                if !full || last <= s { break; }
-                s = last;
-            }
+            binance::fills_window(k, symbol, base, path, t0, t1, &mut out).await?;
         } else {
-            let mut cursor = String::new();
-            loop {
-                let mut q = json!({"category": "linear", "symbol": symbol, "startTime": t0.to_string(), "endTime": t1.to_string(), "limit": "100"});
-                if !cursor.is_empty() { q["cursor"] = cursor.clone().into(); }
-                let e = bybit(k, true, "/v5/execution/list", q).await?;
-                out.extend(e["list"].as_array().into_iter().flatten().filter_map(bybit_fill));
-                cursor = e["nextPageCursor"].as_str().unwrap_or_default().into();
-                if cursor.is_empty() || e["list"].as_array().is_none_or(|l| l.is_empty()) { break; }
-            }
+            bybit::fills_window(k, symbol, t0, t1, &mut out).await?;
         }
         t0 = t1 + 1;
     }
@@ -1229,47 +669,8 @@ pub async fn history(ex: Exchange, k: &Keys, symbols: &[String]) -> Result<Histo
     let side = |s: &Value| if s.as_str().is_some_and(|x| x.eq_ignore_ascii_case("sell")) { Side::Sell } else { Side::Buy };
     let mut h = History::default();
     match ex {
-        Exchange::Bybit => {
-            let o = bybit(k, true, "/v5/order/history", json!({"category": "linear", "settleCoin": "USDT", "limit": "50"})).await?;
-            h.orders = o["list"].as_array().into_iter().flatten().map(|o| HistOrder {
-                ex, symbol: o["symbol"].as_str().unwrap_or_default().into(), side: side(&o["side"]), kind: o["orderType"].as_str().unwrap_or_default().into(),
-                price: n(&o["price"]), avg: n(&o["avgPrice"]), qty: n(&o["qty"]), filled: n(&o["cumExecQty"]), status: o["orderStatus"].as_str().unwrap_or_default().into(), ts: n(&o["createdTime"]) as i64,
-            }).collect();
-            let e = bybit(k, true, "/v5/execution/list", json!({"category": "linear", "settleCoin": "USDT", "limit": "100"})).await?;
-            h.fills = e["list"].as_array().into_iter().flatten().filter_map(bybit_fill).collect();
-            let c = bybit(k, true, "/v5/position/closed-pnl", json!({"category": "linear", "limit": "100"})).await?;
-            // the row's side is the closing order's side: Sell closed a long
-            h.closed = c["list"].as_array().into_iter().flatten().map(|c| ClosedPnl {
-                ex, symbol: c["symbol"].as_str().unwrap_or_default().into(), long: Some(side(&c["side"]) == Side::Sell), qty: crate::opt_num(&c["closedSize"]),
-                entry: crate::opt_num(&c["avgEntryPrice"]), exit: crate::opt_num(&c["avgExitPrice"]), pnl: n(&c["closedPnl"]), ts: n(&c["updatedTime"]) as i64,
-            }).collect();
-        }
-        Exchange::Binance => {
-            let pm = binance_pm(k).await?;
-            let (base, (orders, trades, income)) = if pm { (papi_url(), ("/papi/v1/um/allOrders", "/papi/v1/um/userTrades", "/papi/v1/um/income")) }
-                else { (binance_url(), ("/fapi/v1/allOrders", "/fapi/v1/userTrades", "/fapi/v1/income")) };
-            for sym in symbols.iter().take(6) {
-                let q = [("symbol", sym.clone()), ("limit", "50".to_string())];
-                let o = binance_at(k, base, reqwest::Method::GET, orders, &q).await?;
-                h.orders.extend(o.as_array().into_iter().flatten().map(|o| HistOrder {
-                    ex, symbol: sym.clone(), side: side(&o["side"]), kind: o["type"].as_str().unwrap_or_default().into(), price: n(&o["price"]), avg: n(&o["avgPrice"]),
-                    qty: n(&o["origQty"]), filled: n(&o["executedQty"]), status: o["status"].as_str().unwrap_or_default().into(), ts: o["time"].as_i64().unwrap_or(0),
-                }));
-                let t = binance_at(k, base, reqwest::Method::GET, trades, &q).await?;
-                h.fills.extend(t.as_array().into_iter().flatten().map(|f| Fill {
-                    ex, id: f["id"].to_string(), symbol: sym.clone(), side: side(&f["side"]), price: n(&f["price"]), qty: n(&f["qty"]), fee: n(&f["commission"]),
-                    realized: crate::opt_num(&f["realizedPnl"]), ts: f["time"].as_i64().unwrap_or(0),
-                }));
-            }
-            // closes reconstructed from fills that realized PnL (side, size, exit VWAP, entry implied);
-            // symbols whose fills weren't fetched fall back to the income ledger (PnL only)
-            h.closed = closes_from_fills(&h.fills);
-            let c = binance_at(k, base, reqwest::Method::GET, income, &[("incomeType", "REALIZED_PNL".into()), ("limit", "100".into())]).await?;
-            let rows: Vec<ClosedPnl> = c.as_array().into_iter().flatten().map(|c| ClosedPnl {
-                ex, symbol: c["symbol"].as_str().unwrap_or_default().into(), long: None, qty: None, entry: None, exit: None, pnl: n(&c["income"]), ts: c["time"].as_i64().unwrap_or(0),
-            }).filter(|c| !symbols.contains(&c.symbol)).collect();
-            h.closed.extend(merge_same_second(rows));
-        }
+        Exchange::Bybit => bybit::history(k, side, &mut h).await?,
+        Exchange::Binance => binance::history(k, symbols, side, &mut h).await?,
         _ => bail!("{ex:?} history not implemented"),
     }
     crate::db::fills_put(&h.fills);
@@ -1303,30 +704,6 @@ pub fn open_time(cur: f64, fills: &[(i64, f64)]) -> Option<(i64, bool)> {
     fills.last().map(|f| (f.0, true))
 }
 
-/// Binance userTrades rows as signed fills, newest first. Hedge mode: only the position's own
-/// positionSide counts (one-way rows say BOTH).
-fn binance_fills(rows: &Value, side: Side) -> Vec<(i64, f64)> {
-    let want = if side == Side::Buy { "LONG" } else { "SHORT" };
-    let mut v: Vec<(i64, i64, f64)> = rows.as_array().into_iter().flatten()
-        .filter(|f| matches!(f["positionSide"].as_str(), None | Some("BOTH")) || f["positionSide"] == want)
-        .map(|f| (f["time"].as_i64().unwrap_or(0), f["id"].as_i64().unwrap_or(0), if f["side"] == "SELL" { -n(&f["qty"]) } else { n(&f["qty"]) })).collect();
-    v.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
-    v.into_iter().map(|(t, _, q)| (t, q)).collect()
-}
-
-/// Bybit execution rows (newest first) as signed fills of the `side` position. Rows carry no
-/// positionIdx, so closedSize splits each fill: a same-side fill adds execQty - closedSize, an
-/// opposite one removes closedSize. That holds in hedge mode (a fill only opens or only closes, the
-/// other side's fills count 0) and one-way (a flip closes closedSize, opens the rest).
-fn bybit_fills(rows: &[Value], side: Side) -> Vec<(i64, f64)> {
-    rows.iter().filter(|f| !matches!(f["execType"].as_str(), Some("Funding" | "Settle"))).map(|f| {
-        let (q, closed) = (n(&f["execQty"]), n(&f["closedSize"]));
-        let same = (f["side"] == "Sell") == (side == Side::Sell);
-        let delta = if same { q - closed } else { -closed };
-        (n(&f["execTime"]) as i64, if side == Side::Buy { delta } else { -delta })
-    }).collect()
-}
-
 const WEEK_MS: i64 = 7 * 86_400_000;
 
 /// Funding paid / received by an open position since it opened. Never on a timer: the engine
@@ -1338,87 +715,8 @@ pub async fn funding_paid(ex: Exchange, k: &Keys, p: &Position, known: Option<i6
     let cur = if p.side == Side::Buy { p.qty } else { -p.qty };
     let now = crate::now_ms();
     match ex {
-        Exchange::Binance => {
-            let pm = binance_pm(k).await?;
-            let (base, trades, income) = if pm { (papi_url(), "/papi/v1/um/userTrades", "/papi/v1/um/income") } else { (binance_url(), "/fapi/v1/userTrades", "/fapi/v1/income") };
-            // the fill walk back to the open, a 7-day window at a time (the most userTrades allows, weight 5
-            // each), up to 26 weeks; a full page continues inside the same window
-            let (since, lower) = match known {
-                Some(t) => (t, false),
-                None => {
-                    let mut fills: Vec<(i64, f64)> = vec![];
-                    let mut found = None;
-                    'w: for w in 0..26 {
-                        let lo = now - (w + 1) * WEEK_MS + 1;
-                        let mut hi = now - w * WEEK_MS;
-                        loop {
-                            let t = binance_at(k, base, reqwest::Method::GET, trades, &[("symbol", p.symbol.clone()), ("startTime", lo.to_string()),
-                                ("endTime", hi.to_string()), ("limit", "1000".into())]).await?;
-                            let page = binance_fills(&t, p.side);
-                            let full = t.as_array().is_some_and(|a| a.len() == 1000);
-                            let oldest = t.as_array().and_then(|a| a.iter().filter_map(|f| f["time"].as_i64()).min());
-                            fills.extend(page);
-                            if let Some((t, false)) = open_time(cur, &fills) { found = Some(t); break 'w; }
-                            match oldest { Some(o) if full && o > lo => hi = o - 1, _ => break }
-                        }
-                    }
-                    match found { Some(t) => (t, false), None => (fills.last().map_or(now - 26 * WEEK_MS, |f| f.0), true) }
-                }
-            };
-            // ponytail: hedge mode sums both sides' FUNDING_FEE rows (income rows carry no positionSide)
-            let (mut amount, mut start) = (0.0, since);
-            for _ in 0..5 {
-                let v = binance_at(k, base, reqwest::Method::GET, income, &[("symbol", p.symbol.clone()), ("incomeType", "FUNDING_FEE".into()),
-                    ("startTime", start.to_string()), ("limit", "1000".into())]).await?;
-                let rows = v.as_array().cloned().unwrap_or_default();
-                // income is signed for the account: positive = received
-                amount += rows.iter().map(|r| n(&r["income"])).sum::<f64>();
-                match rows.iter().filter_map(|r| r["time"].as_i64()).max() { Some(t) if rows.len() == 1000 => start = t + 1, _ => break }
-            }
-            Ok(Some(FundingPaid { amount, since, lower }))
-        }
-        Exchange::Bybit => {
-            let mut fills = vec![];
-            let mut found = known;
-            'w: for w in 0..if known.is_some() { 0 } else { 4 } {
-                let end = now - w * WEEK_MS;
-                let mut cursor = String::new();
-                for _ in 0..10 {
-                    let mut q = json!({"category": "linear", "symbol": p.symbol, "startTime": (end - WEEK_MS).to_string(), "endTime": end.to_string(), "limit": "100"});
-                    if !cursor.is_empty() { q["cursor"] = cursor.clone().into(); }
-                    let v = bybit(k, true, "/v5/execution/list", q).await?;
-                    let rows = v["list"].as_array().cloned().unwrap_or_default();
-                    fills.extend(bybit_fills(&rows, p.side));
-                    if let Some((t, false)) = open_time(cur, &fills) { found = Some(t); break 'w; }
-                    cursor = v["nextPageCursor"].as_str().unwrap_or_default().into();
-                    if cursor.is_empty() || rows.is_empty() { break; }
-                }
-            }
-            let (since, lower) = match found { Some(t) => (t, false), None => (fills.last().map_or(now - 4 * WEEK_MS, |f| f.0), true) };
-            let mut amount = 0.0;
-            let mut start = since;
-            while start < now {
-                let end = (start + WEEK_MS).min(now);
-                let mut cursor = String::new();
-                for _ in 0..20 {
-                    let mut q = json!({"accountType": "UNIFIED", "category": "linear", "type": "SETTLEMENT", "startTime": start.to_string(), "endTime": end.to_string(), "limit": "50"});
-                    if let Some(b) = p.symbol.strip_suffix("USDT") { q["baseCoin"] = b.into(); }
-                    if !cursor.is_empty() { q["cursor"] = cursor.clone().into(); }
-                    let v = bybit(k, true, "/v5/account/transaction-log", q).await?;
-                    let rows = v["list"].as_array().cloned().unwrap_or_default();
-                    // `change` is the wallet movement (positive = received) whatever sign convention `funding`
-                    // uses; settlement rows carry no cashFlow or fee. Assumption: `side` is the position's
-                    // side (Buy = long), so hedge mode keeps its own side; rows without a side count.
-                    amount += rows.iter().filter(|r| r["symbol"] == p.symbol.as_str())
-                        .filter(|r| match r["side"].as_str() { Some("Buy") => p.side == Side::Buy, Some("Sell") => p.side == Side::Sell, _ => true })
-                        .map(|r| n(&r["change"])).sum::<f64>();
-                    cursor = v["nextPageCursor"].as_str().unwrap_or_default().into();
-                    if cursor.is_empty() || rows.is_empty() { break; }
-                }
-                start = end;
-            }
-            Ok(Some(FundingPaid { amount, since, lower }))
-        }
+        Exchange::Binance => binance::funding_paid(k, p, known, cur, now).await,
+        Exchange::Bybit => bybit::funding_paid(k, p, known, cur, now).await,
         Exchange::Okx => okx::funding_paid(k, p).await,
         Exchange::Gate => gate::funding_paid(k, p).await,
         Exchange::Hyperliquid => hyperliquid::funding_paid(k, p).await,
@@ -1494,98 +792,8 @@ pub async fn wallets(ex: Exchange, k: &Keys) -> (Vec<Wallet>, Vec<String>) {
         Err(e) => notes.push(format!("{id}: {e:#}")),
     };
     match ex {
-        Exchange::Bybit => {
-            let px = bybit_usd_prices().await.unwrap_or_default();
-            // UNIFIED: holdings from wallet-balance, then transferable amounts 10 coins per query
-            // (the coin-balance endpoint refuses to list a unified account wholesale)
-            let r: Result<Vec<Coin>> = async {
-                let v = bybit(k, true, "/v5/account/wallet-balance", json!({"accountType": "UNIFIED"})).await?;
-                let mut cs: Vec<Coin> = v["list"][0]["coin"].as_array().into_iter().flatten().map(|c| Coin {
-                    coin: c["coin"].as_str().unwrap_or_default().into(), qty: n(&c["walletBalance"]), ..Default::default()
-                }).filter(|c| c.qty > 0.0).collect();
-                let names: Vec<String> = cs.iter().map(|c| c.coin.clone()).collect();
-                for chunk in names.chunks(10) {
-                    let v = bybit(k, true, "/v5/asset/transfer/query-account-coins-balance", json!({"accountType": "UNIFIED", "coin": chunk.join(",")})).await?;
-                    for b in v["balance"].as_array().into_iter().flatten() {
-                        if let Some(c) = cs.iter_mut().find(|c| b["coin"] == c.coin.as_str()) { c.free = n(&b["transferBalance"]); }
-                    }
-                }
-                Ok(cs)
-            }.await;
-            add("UNIFIED", r, &px);
-            let r = bybit(k, true, "/v5/asset/transfer/query-account-coins-balance", json!({"accountType": "FUND"})).await.map(|v| {
-                v["balance"].as_array().into_iter().flatten().map(|c| Coin {
-                    coin: c["coin"].as_str().unwrap_or_default().into(), qty: n(&c["walletBalance"]), free: n(&c["transferBalance"]), ..Default::default()
-                }).collect()
-            });
-            add("FUND", r, &px);
-            let mut earn: Result<Vec<Coin>> = Ok(vec![]);
-            for cat in ["FlexibleSaving", "OnChain"] {
-                match bybit(k, true, "/v5/earn/position", json!({"category": cat})).await {
-                    Ok(v) => if let Ok(list) = earn.as_mut() {
-                        for p in v["list"].as_array().into_iter().flatten() {
-                            // on-chain redemptions take days and need a position id: shown, not redeemable here
-                            let flex = cat == "FlexibleSaving";
-                            let amt = n(&p["amount"]);
-                            list.push(Coin { coin: p["coin"].as_str().unwrap_or_default().into(), qty: amt, free: if flex { amt } else { 0.0 },
-                                product: flex.then(|| p["productId"].as_str().unwrap_or_default().to_string()), ..Default::default() });
-                        }
-                    },
-                    Err(e) => { earn = Err(e); break; }
-                }
-            }
-            add("EARN", earn, &px);
-        }
-        Exchange::Binance => {
-            let px = binance_usd_prices().await.unwrap_or_default();
-            let pm = binance_pm(k).await.unwrap_or(false);
-            if pm {
-                let r = binance_at(k, papi_url(), reqwest::Method::GET, "/papi/v1/balance", &[]).await.map(|v| {
-                    v.as_array().into_iter().flatten().map(|c| Coin {
-                        coin: c["asset"].as_str().unwrap_or_default().into(), qty: n(&c["totalWalletBalance"]), free: n(&c["crossMarginFree"]), ..Default::default()
-                    }).collect::<Vec<_>>()
-                });
-                // what can actually leave PM for the stablecoins is the margin max-withdraw
-                let r = match r {
-                    Ok(mut cs) => {
-                        for c in cs.iter_mut().filter(|c| matches!(c.coin.as_str(), "USDT" | "USDC") && c.qty > 0.0) {
-                            if let Ok(v) = binance_at(k, papi_url(), reqwest::Method::GET, "/papi/v1/margin/maxWithdraw", &[("asset", c.coin.clone())]).await { c.free = n(&v["amount"]); }
-                        }
-                        Ok(cs)
-                    }
-                    Err(e) => Err(e),
-                };
-                add("PM", r, &px);
-            } else {
-                let r = binance_at(k, binance_url(), reqwest::Method::GET, "/fapi/v3/account", &[]).await.map(|v| {
-                    v["assets"].as_array().into_iter().flatten().map(|c| Coin {
-                        coin: c["asset"].as_str().unwrap_or_default().into(), qty: n(&c["walletBalance"]), free: n(&c["maxWithdrawAmount"]), ..Default::default()
-                    }).collect()
-                });
-                add("USDM", r, &px);
-            }
-            let r = binance_at(k, sapi_url(), reqwest::Method::POST, "/sapi/v3/asset/getUserAsset", &[]).await.map(|v| {
-                v.as_array().into_iter().flatten().map(|c| Coin {
-                    coin: c["asset"].as_str().unwrap_or_default().into(), qty: n(&c["free"]) + n(&c["locked"]), free: n(&c["free"]), ..Default::default()
-                }).collect()
-            });
-            add("SPOT", r, &px);
-            let r = binance_at(k, sapi_url(), reqwest::Method::POST, "/sapi/v1/asset/get-funding-asset", &[]).await.map(|v| {
-                v.as_array().into_iter().flatten().map(|c| Coin {
-                    coin: c["asset"].as_str().unwrap_or_default().into(), qty: n(&c["free"]) + n(&c["locked"]) + n(&c["freeze"]), free: n(&c["free"]), ..Default::default()
-                }).collect()
-            });
-            add("FUNDING", r, &px);
-            let r = binance_at(k, sapi_url(), reqwest::Method::GET, "/sapi/v1/simple-earn/flexible/position", &[("size", "100".into())]).await.map(|v| {
-                v["rows"].as_array().into_iter().flatten().map(|c| {
-                    let amt = n(&c["totalAmount"]);
-                    let can = c["canRedeem"].as_bool().unwrap_or(false);
-                    Coin { coin: c["asset"].as_str().unwrap_or_default().into(), qty: amt, free: if can { amt } else { 0.0 },
-                        product: can.then(|| c["productId"].as_str().unwrap_or_default().to_string()), ..Default::default() }
-                }).collect()
-            });
-            add("EARN", r, &px);
-        }
+        Exchange::Bybit => bybit::wallets(k, &mut add).await,
+        Exchange::Binance => binance::wallets(k, &mut add).await,
         _ => notes.push(format!("{ex:?}: wallets not implemented")),
     }
     (out, notes)
@@ -1606,22 +814,10 @@ pub fn destinations(ex: Exchange, from: &str, pm: bool) -> Vec<&'static str> {
     }
 }
 
-pub fn is_pm() -> bool { BINANCE_PM.lock().unwrap().unwrap_or(false) }
-
 /// Amount as the venues want it: at most 8 decimals, rounded DOWN so it never exceeds `free`.
 fn amount_str(x: f64) -> String {
     let s = format!("{:.8}", (x * 1e8).floor() / 1e8);
     s.trim_end_matches('0').trim_end_matches('.').to_string()
-}
-
-fn binance_universal(from: &str, to: &str) -> Option<&'static str> {
-    Some(match (from, to) {
-        ("SPOT", "PM") => "MAIN_PORTFOLIO_MARGIN", ("PM", "SPOT") => "PORTFOLIO_MARGIN_MAIN",
-        ("SPOT", "USDM") => "MAIN_UMFUTURE", ("USDM", "SPOT") => "UMFUTURE_MAIN",
-        ("SPOT", "FUNDING") => "MAIN_FUNDING", ("FUNDING", "SPOT") => "FUNDING_MAIN",
-        ("FUNDING", "USDM") => "FUNDING_UMFUTURE", ("USDM", "FUNDING") => "UMFUTURE_FUNDING",
-        _ => return None,
-    })
 }
 
 /// Move `amount` of `coin` from one account to another on the same venue. Never withdraws.
@@ -1632,47 +828,8 @@ pub async fn transfer(ex: Exchange, k: &Keys, from: &str, to: &str, coin: &str, 
     let amt = amount_str(amount);
     let mut log = vec![];
     match ex {
-        Exchange::Bybit => {
-            if from == "EARN" {
-                let pid = product.ok_or_else(|| anyhow!("not redeemable here (on-chain or unknown product)"))?;
-                let link = format!("t1-{}", crate::now_ms());
-                let v = bybit(k, false, "/v5/earn/place-order", json!({"category": "FlexibleSaving", "orderType": "Redeem", "accountType": to,
-                    "amount": amt, "coin": coin, "productId": pid, "orderLinkId": link})).await?;
-                log.push(format!("Bybit redeem {amt} {coin} -> {to}: order {}", v["orderId"].as_str().unwrap_or("?")));
-            } else {
-                let id = uuid_v4();
-                let v = bybit(k, false, "/v5/asset/transfer/inter-transfer", json!({"transferId": id, "coin": coin, "amount": amt,
-                    "fromAccountType": from, "toAccountType": to})).await?;
-                let st = v["status"].as_str().unwrap_or("?");
-                if st == "FAILED" { bail!("Bybit transfer {from} -> {to} {amt} {coin}: FAILED"); }
-                log.push(format!("Bybit {from} -> {to} {amt} {coin}: {st}"));
-            }
-        }
-        Exchange::Binance => {
-            let mut at = from.to_string();
-            if from == "EARN" {
-                let pid = product.ok_or_else(|| anyhow!("not redeemable now"))?;
-                let dest = if to == "FUNDING" { "FUND" } else { "SPOT" };
-                binance_at(k, sapi_url(), reqwest::Method::POST, "/sapi/v1/simple-earn/flexible/redeem",
-                    &[("productId", pid.into()), ("amount", amt.clone()), ("destAccount", dest.into())]).await?;
-                at = if dest == "FUND" { "FUNDING".into() } else { "SPOT".into() };
-                log.push(format!("Binance redeem {amt} {coin} -> {at}"));
-                if at == to { return Ok(log); }
-                // the redemption credits asynchronously; give it a moment before moving on
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
-            let hops: Vec<(String, String)> = if binance_universal(&at, to).is_some() { vec![(at.clone(), to.into())] }
-                else { vec![(at.clone(), "SPOT".into()), ("SPOT".into(), to.into())] };
-            for (a, b) in hops {
-                let ty = binance_universal(&a, &b).ok_or_else(|| anyhow!("no transfer route {a} -> {b}"))?;
-                let r = binance_at(k, sapi_url(), reqwest::Method::POST, "/sapi/v1/asset/transfer",
-                    &[("type", ty.into()), ("asset", coin.into()), ("amount", amt.clone())]).await;
-                match r {
-                    Ok(v) => log.push(format!("Binance {a} -> {b} {amt} {coin}: tran {}", v["tranId"])),
-                    Err(e) => bail!("{}{e:#} (funds are in {a})", log.iter().map(|l| format!("{l}; ")).collect::<String>()),
-                }
-            }
-        }
+        Exchange::Bybit => bybit::transfer(k, from, to, coin, amt, product, &mut log).await?,
+        Exchange::Binance => binance::transfer(k, from, to, coin, amt, product, &mut log).await?,
         _ => bail!("{ex:?} transfers not implemented"),
     }
     Ok(log)
@@ -1688,24 +845,7 @@ fn uuid_v4() -> String {
     format!("{}-{}-4{}-a{}-{}", &h[0..8], &h[8..12], &h[13..16], &h[17..20], &h[20..32])
 }
 
-fn sapi_url() -> &'static str { "https://api.binance.com" }
-
-/// Spot last prices in USDT per asset from Binance (weight 4).
-async fn binance_usd_prices() -> Result<std::collections::HashMap<String, f64>> {
-    let v = ws::get_json(&format!("{}/api/v3/ticker/price", sapi_url())).await?;
-    Ok(v.as_array().into_iter().flatten().filter_map(|t| Some((t["symbol"].as_str()?.strip_suffix("USDT")?.to_string(), n(&t["price"])))).collect())
-}
-
 fn is_usd(coin: &str) -> bool { matches!(coin, "USDT" | "USDC" | "USD" | "USDE" | "FDUSD" | "DAI" | "PYUSD") }
-
-/// Spot last prices in USDT per coin from Bybit, for valuing non-margin accounts.
-async fn bybit_usd_prices() -> Result<std::collections::HashMap<String, f64>> {
-    let v = ws::get_json(&format!("{}/v5/market/tickers?category=spot", bybit_url())).await?;
-    Ok(v["result"]["list"].as_array().into_iter().flatten().filter_map(|t| {
-        let coin = t["symbol"].as_str()?.strip_suffix("USDT")?;
-        Some((coin.to_string(), n(&t["lastPrice"])))
-    }).collect())
-}
 
 #[cfg(test)]
 mod tests {
@@ -1716,13 +856,6 @@ mod tests {
         assert_eq!((b["category"].as_str(), b["side"].as_str(), b["orderType"].as_str(), b["timeInForce"].as_str()), (Some("option"), Some("Sell"), Some("Limit"), Some("PostOnly")));
         assert!(b["reduceOnly"] == true && b["orderLinkId"].as_str().is_some_and(|s| s.starts_with("t1opt")));
         assert_eq!(spot::effect_str(spot::Effect::Borrow), "MARGIN_BUY");
-    }
-
-    #[test]
-    fn bybit_option_symbol() {
-        assert_eq!(bybit_opt_parts("HYPE-30OCT26-72-P-USDT"), Some(("HYPE".into(), "30OCT26".into(), 72.0, false)));
-        assert_eq!(bybit_opt_parts("BTC-25DEC26-105000-C"), Some(("BTC".into(), "25DEC26".into(), 105000.0, true)));
-        assert_eq!(bybit_opt_parts("BTCUSDT"), None);
     }
 
     #[test]
@@ -1740,6 +873,8 @@ mod tests {
     }
 
     use super::*;
+    use super::binance::{binance_algo_params, binance_fills, binance_params, binance_universal};
+    use super::bybit::{bybit_body, bybit_fills, bybit_opt_body, bybit_trailing_body};
 
     #[test]
     fn transfer_amounts_routes_and_ids() {
@@ -1797,14 +932,6 @@ mod tests {
     }
 
     #[test]
-    fn bybit_signature_layout() {
-        // reference computed independently with Python's hmac module
-        let k = Keys { key: "XXXXKEY".into(), secret: "YYYYSECRET".into(), extra: None };
-        assert_eq!(bybit_sign(&k, 1_700_000_000_000, 5000, r#"{"category":"linear","symbol":"BTCUSDT"}"#),
-                   "136ba24b5260b0829ea5217d7be22cff536e12d72edc8f9e72238c026fbaee4f");
-    }
-
-    #[test]
     fn rounding_and_minimums() {
         assert_eq!(fmt_step(0.123456, 0.001, true), "0.123");
         assert_eq!(fmt_step(86123.46, 0.1, false), "86123.5");
@@ -1848,19 +975,6 @@ mod tests {
         // BBO orders have no own price: the minimum-notional check falls back to the reference price
         let rules = Rules { tick: 0.1, step: 0.001, min_qty: 0.001, min_notional: 5.0 };
         assert!(checked(&OrderReq { qty: 0.001, ..r(true, 1) }, &rules, 84_000.0).is_ok());
-    }
-
-    #[test]
-    fn binance_twap_params_by_mode() {
-        let get = |v: &[(&str, String)], k: &str| v.iter().find(|(a, _)| *a == k).map(|(_, b)| b.clone());
-        let o = |pos: Side, close: bool| OrderReq { symbol: "BTCUSDT".into(), pos, close, kind: Kind::Market, qty: 1.0, client_id: None };
-        let h = binance_twap_params(&o(Side::Buy, true), Mode::Hedge, "0.5", 15, Some("90000"), "t1twap1");
-        assert_eq!((get(&h, "side").as_deref(), get(&h, "positionSide").as_deref(), get(&h, "reduceOnly"), get(&h, "duration").as_deref(), get(&h, "limitPrice").as_deref()),
-                   (Some("SELL"), Some("LONG"), None, Some("900"), Some("90000")));
-        let w = binance_twap_params(&o(Side::Sell, true), Mode::OneWay, "0.5", 5, None, "t1twap2");
-        assert_eq!((get(&w, "side").as_deref(), get(&w, "reduceOnly").as_deref(), get(&w, "positionSide")), (Some("BUY"), Some("true"), None));
-        assert_eq!(native_twap(Exchange::Bybit), None);
-        assert_eq!(native_twap(Exchange::Binance), Some((5, 1440)));
     }
 
     #[test]

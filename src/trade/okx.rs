@@ -1,5 +1,5 @@
 //! OKX v5 USDT-margined perpetual swaps (instType SWAP, e.g. BTC-USDT-SWAP; sizes in contracts via ctVal).
-//! Same contract as the Bybit/Binance code in trade.rs: unified symbols ("BTCUSDT") and base-unit
+//! Same contract as every venue module trade.rs dispatches to: unified symbols ("BTCUSDT") and base-unit
 //! sizes in and out; native symbols / contracts only inside this file.
 //! Orders use tdMode cross (valid for swaps in Futures, Multi-currency and Portfolio margin modes).
 use super::*;

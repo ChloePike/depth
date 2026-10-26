@@ -1,5 +1,5 @@
 //! Kraken Futures (futures.kraken.com, multi-collateral linear perps like PF_XBTUSD; BTC is XBT).
-//! Same contract as the Bybit/Binance code in trade.rs: unified symbols ("BTCUSDT") and base-unit
+//! Same contract as every venue module trade.rs dispatches to: unified symbols ("BTCUSDT") and base-unit
 //! sizes in and out; native symbols only inside this file. PF contracts are one unit of base, so
 //! sizes pass through; prices are USD and pass through as-is (venue-native).
 //! Kraken Futures is net (one-way) only: a close is a reduceOnly order.

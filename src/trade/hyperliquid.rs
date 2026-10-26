@@ -1,5 +1,5 @@
 //! Hyperliquid perps (main dex, USDC-margined; orders signed with an API/agent wallet, EIP-712 + msgpack action hash).
-//! Same contract as the Bybit/Binance code in trade.rs: unified symbols ("BTCUSDT") and base-unit
+//! Same contract as every venue module trade.rs dispatches to: unified symbols ("BTCUSDT") and base-unit
 //! sizes in and out; native coins ("BTC") and asset indices only inside this file.
 //! `Keys.key` = account (main wallet) address, used for every /info query and the private stream;
 //! `Keys.secret` = API wallet private key (hex), used only to sign /exchange actions.
