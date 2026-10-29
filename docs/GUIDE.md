@@ -33,8 +33,12 @@ reach stays red in the status bar; the others keep working.
 - **Window**: drag the title bar to move, any edge to resize. Position and size are remembered, as are
   the chart, book choices, layout and every setting.
 - **Pair**: click the pair (⌘K), type to search, Enter to open. ★ (⌘D) keeps it in Favorites, ⌘[ / ⌘]
-  step through them. The list covers everything listed on Binance, Bybit, OKX and Hyperliquid and is
-  cached, so it is there instantly at launch.
+  step through them. The list covers every perp on Binance, Bybit, OKX, Bitget, Gate, MEXC and Hyperliquid
+  (venues switched off in the status bar are left out of it) and is cached, so it is there instantly at launch.
+  Categories: Crypto, Stocks, ETFs & Indices, Commodities, FX, Pre-IPO. Stocks show the exchange ticker and the
+  company name (*Tickers* / *Names*); search finds a market by its ticker, company name or any venue's own name
+  (BB finds BlackBerry, GOLD finds XAU). Columns: last, 24h change, volume, open interest (summed over the venues
+  on) and hourly funding with its APR.
 - **Stocks and commodities**: pick them by their Binance name (XAU, BZ, CL, AAPL…). Depth finds the
   same market on the other venues under their own names (Hyperliquid `xyz:GOLD`, Lighter `BRENTOIL`,
   MEXC `UKOIL`, `AAPLSTOCK`…) and aggregates them. A venue whose same-name market is a different
