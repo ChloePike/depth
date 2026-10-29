@@ -319,6 +319,12 @@ const PERP: &[(&str, Exchange, Option<&str>)] = &[
     ("ZM", Exchange::Mexc, Some("ZMSTOCK")),
     ("ZM", Exchange::Hyperliquid, Some("xyz:ZM")),
     ("ZS", Exchange::Mexc, Some("ZSSTOCK")),
+    ("PURRSTOCK", Exchange::Okx, Some("PURR")),
+    ("PURR", Exchange::Okx, None),
+    ("PURRSTOCK", Exchange::Bitget, Some("PURR")),
+    ("PURR", Exchange::Bitget, None),
+    ("PURRSTOCK", Exchange::Gate, Some("PURR")),
+    ("PURR", Exchange::Gate, None),
     // END GENERATED PERP
 ];
 

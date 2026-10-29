@@ -78,6 +78,22 @@ for b in tradfi:
             # listed under the same name, but another asset or another scale
             rows.append((b, v, None))
 
+# stocks Binance lacks, MEXC's XSTOCK (PURRSTOCK = Hyperliquid Strategies): a same-name X elsewhere at
+# MEXC's price is that stock, so it is not the coin X (Hyperliquid's PURR)
+seen = set(tradfi) | {n for _, v, n in rows if v == "Mexc"}
+for d in mexc_info:
+    b = d["symbol"][:-5]
+    if not d["symbol"].endswith("STOCK_USDT") or b in seen: continue
+    if not {"mc-trade-zone-tradfi", "mc-trade-zone-Stock"} & set(d.get("conceptPlate") or []): continue
+    x, ref = b.removesuffix("STOCK"), px.get("Mexc", {}).get(b)
+    if not ref or x in seen: continue
+    for v, dv in px.items():
+        if v == "Mexc": continue
+        for n in [x, "xyz:" + x] if v == "Hyperliquid" else [x]:
+            if n in dv and abs(dv[n] / ref - 1) <= TOL:
+                rows.append((b, v, n))
+                if n == x: rows.append((x, v, None))
+
 # the exchange ticker where Binance renamed a stock to avoid a coin's name; MEXC names it lacks
 REAL = {"BBX": "BB", "STXX": "STX", "QNTX": "QNT"}
 NAME = {"AAPL": "Apple Inc.", "SPCX": "SpaceX", "CL": "WTI Crude Oil", "BZ": "Brent Crude Oil", "MOONSHOT": "Moonshot AI"}
