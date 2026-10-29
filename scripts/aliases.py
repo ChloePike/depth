@@ -15,7 +15,7 @@ KIOXIASTOCK). Category from Binance's underlyingType, refined by MEXC's zones (E
     python3 scripts/aliases.py        # rewrites the tables between the markers in src/alias.rs
     (behind a proxy: HTTPS_PROXY=http://host:port python3 scripts/aliases.py)
 """
-import json, re, sys, urllib.request
+import json, re, statistics, sys, urllib.request
 from pathlib import Path
 
 def get(u, data=None):
@@ -93,6 +93,16 @@ for d in mexc_info:
             if n in dv and abs(dv[n] / ref - 1) <= TOL:
                 rows.append((b, v, n))
                 if n == x: rows.append((x, v, None))
+
+# any other same-name market far from the rest is another asset (Gate's EDGE, Lighter's PRL, OKX's BB = the
+# stock BBX). Reference: Binance's live market, else the median; of two that disagree the first venue keeps it
+live = {s["symbol"][:-4] for s in info["symbols"] if s["status"] == "TRADING"}
+done = {(b, v) for b, v, _ in rows}
+for b in sorted({n for d in px.values() for n in d if ":" not in n}):
+    d = {v: dv[b] for v, dv in px.items() if b in dv and (b, v) not in done and (v != "Binance" or b in live)}
+    if len(d) < 2: continue
+    ref = d.get("Binance") or (statistics.median(d.values()) if len(d) > 2 else next(iter(d.values())))
+    rows += [(b, v, None) for v, p in d.items() if abs(p / ref - 1) > 0.1]
 
 # the exchange ticker where Binance renamed a stock to avoid a coin's name; MEXC names it lacks
 REAL = {"BBX": "BB", "STXX": "STX", "QNTX": "QNT"}
