@@ -25,6 +25,9 @@ jobs:
           - { name: linux, os: ubuntu-24.04, asset: Depth-linux-x64.tar.gz }
     steps:
       - uses: actions/checkout@v4
+        with:
+          # the macOS bundle's build number is the commit count
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -102,10 +105,12 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # releases are immutable once published: build the release as a draft (a draft written beforehand with
+      # the notes is reused, this table goes underneath), attach the files, then publish it
       - uses: softprops/action-gh-release@v2
         with:
+          draft: true
           files: dist/*
-          # a release created first with its notes keeps them: this table goes underneath
           append_body: true
           body: |
             | File | App | OS |
@@ -117,3 +122,10 @@ jobs:
 
             macOS builds are ad-hoc signed: on first launch, right-click the app and choose Open.
             Windows builds are unsigned: SmartScreen asks once.
+
+      # only a complete release is published; after a failed build it stays a draft to look at
+      - name: Publish
+        if: needs.build.result == 'success' && needs.firmware.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${{ github.ref_name }}" --repo "${{ github.repository }}" --draft=false
