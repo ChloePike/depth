@@ -1370,11 +1370,13 @@ mod tests {
             assert!(is_unknown_outcome(&anyhow!("{e}").context("place leg 2")), "context on top: {e}");
         }
         let c = reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_millis(300)).build().unwrap();
-        // nothing listens: connect refused
+        // nothing listens: connect refused (Windows retries a refused connect for about 2 s, so this one
+        // waits longer than the 300 ms of the others or it would end as a timeout)
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/", closed.local_addr().unwrap());
         drop(closed);
-        let e: anyhow::Error = c.get(&url).send().await.unwrap_err().into();
+        let slow = reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(10)).build().unwrap();
+        let e: anyhow::Error = slow.get(&url).send().await.unwrap_err().into();
         assert!(!is_unknown_outcome(&e), "{e:#}");
         // connected, no answer in time: the venue may have the order
         let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
