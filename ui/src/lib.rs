@@ -477,9 +477,8 @@ impl App {
             ui.spacing_mut().item_spacing.x = 14.0;
             // macOS: traffic lights on the left; Windows / Linux get their buttons on the right
             if cfg!(target_os = "macos") { window_buttons(ui, maximized); }
-            let mut tickers = self.eng.tickers.lock().unwrap().clone();
-            // pairs listed only on venues switched off are hidden (an old cache without venues is kept)
-            tickers.retain(|t| t.venues.is_empty() || t.venues.iter().any(|v| !self.eng.off.contains(v)));
+            // over the venues switched on: a pair listed only on venues switched off is hidden
+            let tickers: Vec<_> = self.eng.tickers.lock().unwrap().iter().filter_map(|t| t.clone().on(&self.eng.off)).collect();
             if !self.coins_preloaded && !tickers.is_empty() {
                 let mut by_vol: Vec<_> = tickers.iter().map(|t| (t.quote_vol, t.base.clone())).collect();
                 by_vol.sort_by(|a, b| b.0.total_cmp(&a.0));

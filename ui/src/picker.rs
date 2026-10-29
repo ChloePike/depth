@@ -267,7 +267,7 @@ impl Picker {
                     let mx = p.text(pos2(x0, y1), Align2::LEFT_CENTER, &main, prop_m(13.0), if sel { fg_strong() } else { fg() }).right();
                     if t.base == base { check(&p, pos2(mx + 10.0, y1), accent()); }
                     let mut x = x0;
-                    for &e in &t.venues { icon(&p, e, Rect::from_min_size(pos2(x, y2 - 6.0), vec2(12.0, 12.0)), false); x += 14.0; }
+                    for e in t.per.iter().map(|s| s.ex) { icon(&p, e, Rect::from_min_size(pos2(x, y2 - 6.0), vec2(12.0, 12.0)), false); x += 14.0; }
                     p.text(pos2(x + 4.0, y2), Align2::LEFT_CENTER, sub, prop(11.0), mu());
                     let p = ui.painter();
                     p.text(pos2(rect.left() + X_LAST, y), Align2::RIGHT_CENTER, fmt_px(t.last), mono_m(13.0), fg());
@@ -339,7 +339,23 @@ fn search_glyph(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn tk(b: &str, v: f64) -> Ticker { Ticker { base: b.into(), last: 1.0, chg_pct: 0.0, quote_vol: v, high: 0.0, low: 0.0, base_vol: 0.0, venues: vec![], oi_usd: 0.0, funding_h: None } }
+    fn tk(b: &str, v: f64) -> Ticker { Ticker { base: b.into(), last: 1.0, chg_pct: 0.0, quote_vol: v, high: 0.0, low: 0.0, base_vol: 0.0, per: vec![], oi_usd: 0.0, funding_h: None } }
+
+    #[test]
+    fn venues_switched_off() {
+        use crate::engine::Share;
+        use depth::Exchange as E;
+        let mut t = tk("BTC", 13.0);
+        t.per = vec![Share { ex: E::Binance, vol: 10.0, oi_usd: 5.0, funding_h: None }, Share { ex: E::Mexc, vol: 3.0, oi_usd: 2.0, funding_h: Some(0.1) }];
+        let off = |v: &[E]| v.iter().copied().collect::<std::collections::HashSet<_>>();
+        let a = t.clone().on(&off(&[E::Mexc])).unwrap();
+        assert_eq!((a.quote_vol, a.oi_usd, a.funding_h), (10.0, 5.0, None));
+        let b = t.clone().on(&off(&[E::Binance])).unwrap();
+        assert_eq!((b.quote_vol, b.oi_usd, b.funding_h), (3.0, 2.0, Some(0.1)));
+        assert!(t.clone().on(&off(&[E::Binance, E::Mexc])).is_none());
+        // an older cache row without the split stays
+        assert!(tk("ETH", 1.0).on(&off(&[E::Binance])).is_some());
+    }
 
     #[test]
     fn ranked_search() {

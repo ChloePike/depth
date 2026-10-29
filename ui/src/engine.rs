@@ -465,12 +465,30 @@ pub struct FillNote { pub ex: Exchange, pub symbol: String, pub buy: bool, pub q
 pub struct Ticker { pub base: String, pub last: f64, pub chg_pct: f64, pub quote_vol: f64,
     /// 24h high / low from the first venue listing it; base volume summed across venues
     pub high: f64, pub low: f64, pub base_vol: f64,
-    /// the venues listing it (the picker hides a pair whose venues are all switched off)
-    #[serde(default)] pub venues: Vec<Exchange>,
+    /// the venues listing it, in `all_tickers` order (`Ticker::on` drops the ones switched off)
+    #[serde(default)] pub per: Vec<Share>,
     /// open interest in USD(T), one side, summed across venues (Binance from `BIN_OI`, which trails by up to ~15 min)
     #[serde(default)] pub oi_usd: f64,
     /// hourly funding of the first venue with a known interval (Binance, Bybit, Hyperliquid)
     #[serde(default)] pub funding_h: Option<f64> }
+
+/// One venue's part of a picker row.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Share { pub ex: Exchange, pub vol: f64, pub oi_usd: f64, pub funding_h: Option<f64> }
+
+impl Ticker {
+    /// The row over the venues switched on (volume, OI and funding from those only); None when every venue
+    /// listing it is off. A row without the split (an older cache) is kept as it is.
+    pub fn on(mut self, off: &std::collections::HashSet<Exchange>) -> Option<Ticker> {
+        if self.per.is_empty() { return Some(self); }
+        self.per.retain(|s| !off.contains(&s.ex));
+        if self.per.is_empty() { return None; }
+        self.quote_vol = self.per.iter().map(|s| s.vol).sum();
+        self.oi_usd = self.per.iter().map(|s| s.oi_usd).sum();
+        self.funding_h = self.per.iter().find_map(|s| s.funding_h);
+        Some(self)
+    }
+}
 
 /// A client-side execution job (TWAP) as shown in the Algos tab.
 #[derive(Clone, Debug)]
@@ -3066,13 +3084,18 @@ async fn all_tickers() -> (Vec<Ticker>, HashMap<(Exchange, String), VenueFunding
     }
     let mut by_base: std::collections::HashMap<String, Ticker> = Default::default();
     for (ex, b, last, chg, vol, hi, lo, bvol, oi, fh) in rows {
-        let t = by_base.entry(b.clone()).or_insert(Ticker { base: b, last, chg_pct: chg, quote_vol: 0.0, high: hi, low: lo, base_vol: 0.0, venues: vec![], oi_usd: 0.0, funding_h: None });
+        let t = by_base.entry(b.clone()).or_insert(Ticker { base: b, last, chg_pct: chg, quote_vol: 0.0, high: hi, low: lo, base_vol: 0.0, per: vec![], oi_usd: 0.0, funding_h: None });
         t.quote_vol += vol;
         t.base_vol += bvol;
-        if oi.is_finite() && oi > 0.0 { t.oi_usd += oi * last; }
+        let oi = if oi.is_finite() && oi > 0.0 { oi * last } else { 0.0 };
+        t.oi_usd += oi;
         if t.funding_h.is_none() { t.funding_h = fh; }
         if t.high <= 0.0 { t.high = hi; t.low = lo; }
-        if !t.venues.contains(&ex) { t.venues.push(ex); }
+        // Binance futures and spot share one entry
+        match t.per.iter_mut().find(|s| s.ex == ex) {
+            Some(s) => { s.vol += vol; s.oi_usd += oi; if s.funding_h.is_none() { s.funding_h = fh; } }
+            None => t.per.push(Share { ex, vol, oi_usd: oi, funding_h: fh }),
+        }
     }
     let mut t: Vec<Ticker> = by_base.into_values().collect();
     t.sort_by(|a, b| b.quote_vol.total_cmp(&a.quote_vol));
