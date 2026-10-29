@@ -259,13 +259,21 @@ impl Picker {
                     let y = rect.center().y;
                     ui.painter().text(pos2(rect.left() + 18.0, y), Align2::RIGHT_CENTER, (i + 1).to_string(), mono(11.0), dim());
                     coin_icon(ui, &t.base, Rect::from_center_size(pos2(rect.left() + 40.0, y), vec2(24.0, 24.0)));
-                    let (tick, name, _) = alias::display(&t.base);
+                    let (tick, name, cat) = alias::display(&t.base);
                     // main line: ticker (or the company name), the sub line: venue logos and the other one
                     let (main, sub) = match name { Some(n) if names => (n.to_string(), tick), _ => (format!("{tick}/USDT"), name.unwrap_or("")) };
                     let p = ui.painter().with_clip_rect(Rect::from_min_max(rect.min, pos2(rect.left() + X_LAST - 110.0, rect.bottom())).intersect(ui.clip_rect()));
                     let (x0, y1, y2) = (rect.left() + X_PAIR, y - 8.0, y + 9.0);
                     let mx = p.text(pos2(x0, y1), Align2::LEFT_CENTER, &main, prop_m(13.0), if sel { fg_strong() } else { fg() }).right();
-                    if t.base == base { check(&p, pos2(mx + 10.0, y1), accent()); }
+                    let mx = if t.base == base { check(&p, pos2(mx + 10.0, y1), accent()); mx + 20.0 } else { mx };
+                    // non-crypto markets carry their category, so a stock never passes for the same-name coin
+                    let tag = match cat { Cat::Crypto => None, Cat::Stock => Some("Stock"), Cat::Etf => Some("ETF"), Cat::Commodity => Some("Commodity"), Cat::Fx => Some("FX"), Cat::PreIpo => Some("Pre-IPO") };
+                    if let Some(tag) = tag {
+                        let g = p.layout_no_wrap(l(tag).to_string(), prop(10.0), mu());
+                        let r = Rect::from_min_size(pos2(mx + 8.0, y1 - g.size().y / 2.0 - 1.0), g.size() + vec2(8.0, 2.0));
+                        p.rect_stroke(r, kit::rad(), egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside);
+                        p.galley(r.min + vec2(4.0, 1.0), g, mu());
+                    }
                     let mut x = x0;
                     for e in t.per.iter().map(|s| s.ex) { icon(&p, e, Rect::from_min_size(pos2(x, y2 - 6.0), vec2(12.0, 12.0)), false); x += 14.0; }
                     p.text(pos2(x + 4.0, y2), Align2::LEFT_CENTER, sub, prop(11.0), mu());
