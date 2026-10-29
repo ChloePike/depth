@@ -464,7 +464,13 @@ pub struct FillNote { pub ex: Exchange, pub symbol: String, pub buy: bool, pub q
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ticker { pub base: String, pub last: f64, pub chg_pct: f64, pub quote_vol: f64,
     /// 24h high / low from the first venue listing it; base volume summed across venues
-    pub high: f64, pub low: f64, pub base_vol: f64 }
+    pub high: f64, pub low: f64, pub base_vol: f64,
+    /// the venues listing it (the picker hides a pair whose venues are all switched off)
+    #[serde(default)] pub venues: Vec<Exchange>,
+    /// open interest in USD(T), one side, summed across venues (Binance from `BIN_OI`, which trails by up to ~15 min)
+    #[serde(default)] pub oi_usd: f64,
+    /// hourly funding of the first venue with a known interval (Binance, Bybit, Hyperliquid)
+    #[serde(default)] pub funding_h: Option<f64> }
 
 /// A client-side execution job (TWAP) as shown in the Algos tab.
 #[derive(Clone, Debug)]
@@ -2922,8 +2928,8 @@ mod tests {
 }
 
 /// Every USDT/USDC-quoted base on the major venues (Binance futures + spot, Bybit linear, OKX swaps,
-/// Hyperliquid perps), merged by base: price and 24h change from the first venue that lists it,
-/// quote volume summed. A venue that fails is skipped.
+/// Hyperliquid, Bitget, Gate and MEXC perps), merged by base: price and 24h change from the first venue that lists it,
+/// quote volume and open interest summed. A venue that fails is skipped.
 async fn all_tickers() -> (Vec<Ticker>, HashMap<(Exchange, String), VenueFunding>) {
     use depth::{num, ws};
     let ok = |b: &str| !b.is_empty() && !b.contains('_') && !b.contains('-') && b.is_ascii();
@@ -2951,12 +2957,30 @@ async fn all_tickers() -> (Vec<Ticker>, HashMap<(Exchange, String), VenueFunding
         shared(url(Src::OkxPerp), 90_000, ws::get_json(url(Src::OkxPerp))),
         shared(url(Src::HlPerp), 90_000, ws::post_json(url(Src::HlPerp), &hl_req)),
     );
-    // (base, last, change %, quote vol, high, low, base vol)
-    let mut rows: Vec<(String, f64, f64, f64, f64, f64, f64)> = vec![];
-    let mut push = |base: &str, last: f64, chg: f64, vol: f64, hi: f64, lo: f64, bvol: f64| if ok(base) && last > 0.0 { rows.push((base.to_string(), last, chg, vol, hi, lo, bvol)); };
+    let (bg, gt, mx, oo, mm) = tokio::join!(
+        shared(url(Src::BitgetPerp), 90_000, ws::get_json(url(Src::BitgetPerp))),
+        shared(url(Src::GatePerp), 90_000, ws::get_json(url(Src::GatePerp))),
+        shared(url(Src::MexcPerp), 90_000, ws::get_json(url(Src::MexcPerp))),
+        shared(url(Src::OkxOi), 90_000, ws::get_json(url(Src::OkxOi))),
+        // contract sizes (MEXC OI is in contracts): 2 MB, read once an hour
+        shared(url(Src::MexcMeta), 3_600_000, ws::get_json(url(Src::MexcMeta))),
+    );
+    // OKX oiCcy and MEXC contractSize per native symbol
+    let okx_oi: HashMap<String, f64> = oo.iter().flat_map(|(_, v)| v["data"].as_array().cloned().unwrap_or_default())
+        .filter_map(|x| Some((x["instId"].as_str()?.to_string(), num(&x["oiCcy"])))).collect();
+    let mexc_ct: HashMap<String, f64> = mm.iter().flat_map(|(_, v)| v["data"].as_array().cloned().unwrap_or_default())
+        .filter_map(|x| Some((x["symbol"].as_str()?.to_string(), num(&x["contractSize"])))).collect();
+    if let Ok(v) = &bf { binance_oi(v).await; }
+    let bin_oi = BIN_OI.lock().unwrap().1.clone();
+    // (venue, base, last, change %, quote vol, high, low, base vol, OI in base units, hourly funding)
+    let mut rows: Vec<(Exchange, String, f64, f64, f64, f64, f64, f64, f64, Option<f64>)> = vec![];
+    let mut push = |ex: Exchange, base: &str, last: f64, chg: f64, vol: f64, hi: f64, lo: f64, bvol: f64, oi: f64, fh: Option<f64>| if ok(base) && last > 0.0 { rows.push((ex, base.to_string(), last, chg, vol, hi, lo, bvol, oi, fh)); };
+    let bin_fh = |sym: &str| fund.get(&(Exchange::Binance, sym.to_string())).map(|f| f.rate / f.interval_h);
     match bf {
         Ok(v) => for x in v.as_array().into_iter().flatten() {
-            if let Some(b) = x["symbol"].as_str().and_then(|s| s.strip_suffix("USDT")) { push(b, num(&x["lastPrice"]), num(&x["priceChangePercent"]), num(&x["quoteVolume"]), num(&x["highPrice"]), num(&x["lowPrice"]), num(&x["volume"])); }
+            if let Some(s) = x["symbol"].as_str() {
+                if let Some(b) = s.strip_suffix("USDT") { push(Exchange::Binance, b, num(&x["lastPrice"]), num(&x["priceChangePercent"]), num(&x["quoteVolume"]), num(&x["highPrice"]), num(&x["lowPrice"]), num(&x["volume"]), bin_oi.get(s).copied().unwrap_or(0.0), bin_fh(s)); }
+            }
         },
         Err(e) => eprintln!("[tickers binance futures] {e:#}"),
     }
@@ -2965,7 +2989,7 @@ async fn all_tickers() -> (Vec<Ticker>, HashMap<(Exchange, String), VenueFunding
         Ok((_, v)) => for x in v.as_array().into_iter().flatten() {
             if let Some(b) = x["symbol"].as_str().and_then(|s| s.strip_suffix("USDT")) {
                 let (l, o) = (num(&x["lastPrice"]), num(&x["openPrice"]));
-                push(b, l, if o > 0.0 { (l / o - 1.0) * 100.0 } else { 0.0 }, num(&x["quoteVolume"]), num(&x["highPrice"]), num(&x["lowPrice"]), num(&x["volume"]));
+                push(Exchange::Binance, b, l, if o > 0.0 { (l / o - 1.0) * 100.0 } else { 0.0 }, num(&x["quoteVolume"]), num(&x["highPrice"]), num(&x["lowPrice"]), num(&x["volume"]), 0.0, None);
             }
         },
         Err(e) => eprintln!("[tickers binance spot] {e:#}"),
@@ -2977,16 +3001,23 @@ async fn all_tickers() -> (Vec<Ticker>, HashMap<(Exchange, String), VenueFunding
                     fund.insert((Exchange::Bybit, sym.into()), VenueFunding { rate: num(&x["fundingRate"]), interval_h: { let h = num(&x["fundingIntervalHour"]); if h > 0.0 { h } else { 8.0 } }, next_ms: num(&x["nextFundingTime"]) as i64 });
                 }
             }
-            if let Some(b) = x["symbol"].as_str().and_then(|s| s.strip_suffix("USDT")).and_then(|b| unify(Exchange::Bybit, b)) { push(&b, num(&x["lastPrice"]), num(&x["price24hPcnt"]) * 100.0, num(&x["turnover24h"]), num(&x["highPrice24h"]), num(&x["lowPrice24h"]), num(&x["volume24h"])); }
+            if let Some(b) = x["symbol"].as_str().and_then(|s| s.strip_suffix("USDT")).and_then(|b| unify(Exchange::Bybit, b)) { 
+                // `openInterest` counts both sides
+                let oi = depth::opt_num(&x["singleOpenInterest"]).unwrap_or(num(&x["openInterest"]) / 2.0);
+                let h = num(&x["fundingIntervalHour"]);
+                push(Exchange::Bybit, &b, num(&x["lastPrice"]), num(&x["price24hPcnt"]) * 100.0, num(&x["turnover24h"]), num(&x["highPrice24h"]), num(&x["lowPrice24h"]), num(&x["volume24h"]), oi,
+                    depth::opt_num(&x["fundingRate"]).filter(|_| h > 0.0).map(|r| r / h));
+            }
         },
         Err(e) => eprintln!("[tickers bybit] {e:#}"),
     }
     match ox {
         Ok((_, v)) => for x in v["data"].as_array().into_iter().flatten() {
-            if let Some(b) = x["instId"].as_str().and_then(|s| s.strip_suffix("-USDT-SWAP")).and_then(|b| unify(Exchange::Okx, b)) {
+            let id = x["instId"].as_str().unwrap_or_default();
+            if let Some(b) = id.strip_suffix("-USDT-SWAP").and_then(|b| unify(Exchange::Okx, b)) {
                 let (l, o) = (num(&x["last"]), num(&x["open24h"]));
-                // volCcy24h is in base units for USDT swaps
-                push(&b, l, if o > 0.0 { (l / o - 1.0) * 100.0 } else { 0.0 }, num(&x["volCcy24h"]) * l, num(&x["high24h"]), num(&x["low24h"]), num(&x["volCcy24h"]));
+                // volCcy24h and oiCcy are in base units for USDT swaps
+                push(Exchange::Okx, &b, l, if o > 0.0 { (l / o - 1.0) * 100.0 } else { 0.0 }, num(&x["volCcy24h"]) * l, num(&x["high24h"]), num(&x["low24h"]), num(&x["volCcy24h"]), okx_oi.get(id).copied().unwrap_or(0.0), None);
             }
         },
         Err(e) => eprintln!("[tickers okx] {e:#}"),
@@ -2999,21 +3030,76 @@ async fn all_tickers() -> (Vec<Ticker>, HashMap<(Exchange, String), VenueFunding
                 // Hyperliquid funds hourly
                 if let Some(b) = u["name"].as_str().and_then(|b| unify(Exchange::Hyperliquid, b)) {
                     fund.insert((Exchange::Hyperliquid, format!("{b}USDT")), VenueFunding { rate: num(&c["funding"]), interval_h: 1.0, next_ms: (depth::now_ms() / 3_600_000 + 1) * 3_600_000 });
-                    push(&b, l, if p > 0.0 { (l / p - 1.0) * 100.0 } else { 0.0 }, num(&c["dayNtlVlm"]), 0.0, 0.0, num(&c["dayBaseVlm"]));
+                    push(Exchange::Hyperliquid, &b, l, if p > 0.0 { (l / p - 1.0) * 100.0 } else { 0.0 }, num(&c["dayNtlVlm"]), 0.0, 0.0, num(&c["dayBaseVlm"]), num(&c["openInterest"]), depth::opt_num(&c["funding"]));
                 }
             }
         }
         Err(e) => eprintln!("[tickers hyperliquid] {e:#}"),
     }
+    match bg {
+        Ok((_, v)) => for x in v["data"].as_array().into_iter().flatten() {
+            if let Some(b) = x["symbol"].as_str().and_then(|s| s.strip_suffix("USDT")).and_then(|b| unify(Exchange::Bitget, b)) {
+                push(Exchange::Bitget, &b, num(&x["lastPr"]), num(&x["change24h"]) * 100.0, num(&x["quoteVolume"]), num(&x["high24h"]), num(&x["low24h"]), num(&x["baseVolume"]), num(&x["holdingAmount"]), None);
+            }
+        },
+        Err(e) => eprintln!("[tickers bitget] {e:#}"),
+    }
+    match gt {
+        Ok((_, v)) => for x in v.as_array().into_iter().flatten() {
+            if let Some(b) = x["contract"].as_str().and_then(|s| s.strip_suffix("_USDT")).and_then(|b| unify(Exchange::Gate, b)) {
+                push(Exchange::Gate, &b, num(&x["last"]), num(&x["change_percentage"]), num(&x["volume_24h_quote"]), num(&x["high_24h"]), num(&x["low_24h"]), num(&x["volume_24h_base"]), num(&x["total_size"]) * num(&x["quanto_multiplier"]), None);
+            }
+        },
+        Err(e) => eprintln!("[tickers gate] {e:#}"),
+    }
+    match mx {
+        // volume24 is in contracts: base volume from the quote amount
+        Ok((_, v)) => for x in v["data"].as_array().into_iter().flatten() {
+            let sym = x["symbol"].as_str().unwrap_or_default();
+            if let Some(b) = sym.strip_suffix("_USDT").and_then(|b| unify(Exchange::Mexc, b)) {
+                let (l, q) = (num(&x["lastPrice"]), num(&x["amount24"]));
+                let oi = num(&x["holdVol"]) * mexc_ct.get(sym).copied().unwrap_or(0.0);
+                push(Exchange::Mexc, &b, l, num(&x["riseFallRate"]) * 100.0, q, num(&x["high24Price"]), num(&x["lower24Price"]), if l > 0.0 { q / l } else { 0.0 }, oi, None);
+            }
+        },
+        Err(e) => eprintln!("[tickers mexc] {e:#}"),
+    }
     let mut by_base: std::collections::HashMap<String, Ticker> = Default::default();
-    for (b, last, chg, vol, hi, lo, bvol) in rows {
-        by_base.entry(b.clone())
-            .and_modify(|t| { t.quote_vol += vol; t.base_vol += bvol; if t.high <= 0.0 { t.high = hi; t.low = lo; } })
-            .or_insert(Ticker { base: b, last, chg_pct: chg, quote_vol: vol, high: hi, low: lo, base_vol: bvol });
+    for (ex, b, last, chg, vol, hi, lo, bvol, oi, fh) in rows {
+        let t = by_base.entry(b.clone()).or_insert(Ticker { base: b, last, chg_pct: chg, quote_vol: 0.0, high: hi, low: lo, base_vol: 0.0, venues: vec![], oi_usd: 0.0, funding_h: None });
+        t.quote_vol += vol;
+        t.base_vol += bvol;
+        if oi.is_finite() && oi > 0.0 { t.oi_usd += oi * last; }
+        if t.funding_h.is_none() { t.funding_h = fh; }
+        if t.high <= 0.0 { t.high = hi; t.low = lo; }
+        if !t.venues.contains(&ex) { t.venues.push(ex); }
     }
     let mut t: Vec<Ticker> = by_base.into_values().collect();
     t.sort_by(|a, b| b.quote_vol.total_cmp(&a.quote_vol));
     (t, fund)
+}
+
+/// Binance perp open interest (symbol -> base units) and the rotation cursor: Binance has no all-symbol OI,
+/// so each minute's poll reads `BIN_OI_BATCH` symbols (weight 1 each) in volume order, round and round.
+/// ponytail: about 15 minutes for a full lap; a per-symbol stream if the picker needs it live
+static BIN_OI: Mutex<(usize, std::collections::BTreeMap<String, f64>)> = Mutex::new((0, std::collections::BTreeMap::new()));
+const BIN_OI_BATCH: usize = 40;
+
+async fn binance_oi(tickers: &serde_json::Value) {
+    let mut syms: Vec<(f64, String)> = tickers.as_array().into_iter().flatten()
+        .filter_map(|x| Some((depth::num(&x["quoteVolume"]), x["symbol"].as_str().filter(|s| s.ends_with("USDT"))?.to_string()))).collect();
+    if syms.is_empty() { return; }
+    syms.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let start = BIN_OI.lock().unwrap().0 % syms.len();
+    let mut set = tokio::task::JoinSet::new();
+    for (_, s) in syms.iter().cycle().skip(start).take(BIN_OI_BATCH.min(syms.len())) {
+        let s = s.clone();
+        set.spawn(async move { (depth::ws::get_json(&format!("https://fapi.binance.com/fapi/v1/openInterest?symbol={s}")).await.ok().map(|v| depth::num(&v["openInterest"])), s) });
+    }
+    let got = set.join_all().await;
+    let mut g = BIN_OI.lock().unwrap();
+    g.0 = start + BIN_OI_BATCH;
+    for (oi, s) in got { if let Some(oi) = oi.filter(|o| *o > 0.0) { g.1.insert(s, oi); } }
 }
 
 /// The newest all-symbol payloads read by the picker's minute poll (`all_tickers`) or the Hunter

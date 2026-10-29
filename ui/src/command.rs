@@ -214,7 +214,7 @@ pub fn help(ctx: &egui::Context, open: &mut bool, binds: &[Binding]) {
 mod tests {
     use super::*;
 
-    fn tk(b: &str, v: f64) -> Ticker { Ticker { base: b.into(), last: 1.0, chg_pct: 0.0, quote_vol: v, high: 0.0, low: 0.0, base_vol: 0.0 } }
+    fn tk(b: &str, v: f64) -> Ticker { Ticker { base: b.into(), last: 1.0, chg_pct: 0.0, quote_vol: v, high: 0.0, low: 0.0, base_vol: 0.0, venues: vec![], oi_usd: 0.0, funding_h: None } }
     fn base(b: &str) -> Cmd { Cmd::Base(b.into()) }
 
     #[test]

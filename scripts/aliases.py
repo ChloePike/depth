@@ -8,7 +8,12 @@ same name, an `XSTOCK` name or a known synonym (GOLD, BRENTOIL, WTI, ...), Hyper
 same-name market at another price (Lighter's KRW-priced SAMSUNG, MEXC's crypto CAT) is written as
 "not listed" so the venue is skipped instead of poisoning the aggregate.
 
-    python3 scripts/aliases.py        # rewrites the table between the markers in src/alias.rs
+It also writes NAMES: the real ticker, company name and category of every stock / ETF / commodity / FX /
+pre-IPO market on Binance or MEXC, keyed by the picker's base (the unified name, else the venue's own like
+KIOXIASTOCK). Category from Binance's underlyingType, refined by MEXC's zones (ETF / index); names from MEXC.
+
+    python3 scripts/aliases.py        # rewrites the tables between the markers in src/alias.rs
+    (behind a proxy: HTTPS_PROXY=http://host:port python3 scripts/aliases.py)
 """
 import json, re, sys, urllib.request
 from pathlib import Path
@@ -37,6 +42,7 @@ for t in get("https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-
     if t["symbol"].endswith("USDT"): put("Bitget", t["symbol"][:-4], t["markPrice"])
 for t in get("https://api.gateio.ws/api/v4/futures/usdt/tickers"):
     if t["contract"].endswith("_USDT"): put("Gate", t["contract"][:-5], t["mark_price"])
+mexc_info = get("https://contract.mexc.com/api/v1/contract/detail")["data"]
 for t in get("https://contract.mexc.com/api/v1/contract/ticker")["data"]:
     if t["symbol"].endswith("_USDT"): put("Mexc", t["symbol"][:-5], t["lastPrice"])
 for dex in ("", "xyz"):
@@ -72,10 +78,43 @@ for b in tradfi:
             # listed under the same name, but another asset or another scale
             rows.append((b, v, None))
 
+# the exchange ticker where Binance renamed a stock to avoid a coin's name; MEXC names it lacks
+REAL = {"BBX": "BB", "STXX": "STX", "QNTX": "QNT"}
+NAME = {"AAPL": "Apple Inc.", "SPCX": "SpaceX", "CL": "WTI Crude Oil", "BZ": "Brent Crude Oil", "MOONSHOT": "Moonshot AI"}
+unified = {(v, n): b for b, v, n in rows if n}
+def mexc_cat(plates):
+    z = {p.removeprefix("mc-trade-zone-") for p in plates}
+    if "preipo" in z: return "PreIpo"
+    if z & {"Commodities", "metals", "metalsfutures", "OIL"}: return "Commodity"
+    if z & {"ETF", "stockindex"}: return "Etf"
+    if "forex" in z: return "Fx"
+    return "Stock"
+names = {}
+for d in mexc_info:
+    if not d["symbol"].endswith("_USDT"): continue
+    plates = d.get("conceptPlate") or []
+    if not {"mc-trade-zone-tradfi", "mc-trade-zone-Stock"} & set(plates): continue
+    b = unified.get(("Mexc", d["baseCoin"]), d["baseCoin"])
+    fn = d.get("fn") or ""
+    # "AAPL_USDT<perpetual in Chinese>Apple Inc.": the company name follows the Chinese word
+    name = NAME.get(b, fn.split("\u6c38\u7eed", 1)[1].strip() if "\u6c38\u7eed" in fn else "")
+    if not name.isascii(): name = ""
+    names[b] = (REAL.get(b, b.removesuffix("STOCK") or b), name, mexc_cat(plates))
+BIN = {"COMMODITY": "Commodity", "FX": "Fx", "PREMARKET": "PreIpo"}
+for x in info["symbols"]:
+    b = x["symbol"][:-4]
+    if b not in tradfi or x["symbol"] != b + "USDT": continue
+    t, n, c = names.get(b, (REAL.get(b, b), NAME.get(b, ""), "Stock"))
+    names[b] = (t, n, BIN.get(x.get("underlyingType"), "Etf" if c == "Etf" else "Stock"))
+
 def lit(x): return "None" if x is None else f'Some("{x}")'
-body = "\n".join(f'    ("{b}", Exchange::{v}, {lit(n)}),' for b, v, n in rows)
+def esc(x): return x.replace("\\", "\\\\").replace('"', '\\"')
 p = Path(__file__).resolve().parent.parent / "src/alias.rs"
 src = p.read_text()
-src = re.sub(r"(// BEGIN GENERATED[^\n]*\n).*?([ \t]*// END GENERATED)", lambda m: m.group(1) + body + "\n" + m.group(2), src, flags=re.S)
+def put_block(tag, body):
+    global src
+    src = re.sub(r"(// BEGIN GENERATED " + tag + r"[^\n]*\n).*?([ \t]*// END GENERATED " + tag + ")", lambda m: m.group(1) + body + "\n" + m.group(2), src, count=1, flags=re.S)
+put_block("PERP", "\n".join(f'    ("{b}", Exchange::{v}, {lit(n)}),' for b, v, n in rows))
+put_block("NAMES", "\n".join(f'    ("{b}", "{esc(t)}", "{esc(n)}", Cat::{c}),' for b, (t, n, c) in sorted(names.items())))
 p.write_text(src)
-print(f"{len(rows)} aliases written to {p}", file=sys.stderr)
+print(f"{len(rows)} aliases, {len(names)} names written to {p}", file=sys.stderr)
