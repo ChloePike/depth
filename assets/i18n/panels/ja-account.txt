@@ -245,6 +245,11 @@ Bids / asks ±0.5% = 買い板 / 売り板 ±0.5%
 Carry = キャリー
 Predicted funding, annualized; basis: perp over spot = 予想ファンディングレート（年率）。ベーシス = 無期限の現物比
 Expected move cone (volatility model) = 想定変動幅コーン（ボラティリティモデル）
+Polymarket odds (price markets) = Polymarket 確率（価格予測市場）
+median = 中央値
+touch by = タッチ期限
+options = オプション
+Polymarket probability / option-implied probability (N(d2) at the strike's IV; a touch counts as twice the chance of ending beyond the strike), then the difference in points = Polymarket 確率 / オプション示唆確率（行使価格の IV で N(d2)、タッチは満期に超えている確率の 2 倍）、その差（ポイント）
 Book depth ±0.5% and 5 min aggressor flow; describes now, not a forecast = 板の厚み ±0.5% と直近5分のアグレッサーフロー。現状を示すもので予測ではありません
 Show PnL amount = 損益額を表示
 Show entry and mark price = 建値とマーク価格を表示

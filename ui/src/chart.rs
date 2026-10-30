@@ -184,11 +184,15 @@ pub struct Chart {
     style: u32,
     /// expected-move cone from the volatility model (+-1 / +-2 sigma over the next bars)
     cone: bool,
+    /// Polymarket odds at their strikes (read-only reference)
+    pub poly: bool,
     scale: Scale,
     /// positions / orders of the current symbol, set by the app every frame
     #[serde(skip)] pub lines: Vec<ChartLine>,
     /// an option-data pane is on: the app subscribes the option chains
     #[serde(skip)] pub wants_options: bool,
+    /// Polymarket odds of the current base, set by the app every frame while `poly`
+    #[serde(skip)] pub odds: Vec<depth::poly::Odds>,
     /// own fills of the current symbol (perp), oldest first, set by the app when they change
     #[serde(skip)] pub fills: Vec<depth::trade::Fill>,
     #[serde(skip)] base_unit: String,
@@ -258,7 +262,7 @@ impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], older_req: None, confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: true, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, fills_on: true, algos: true, whale_usd: 100_000.0, cone: false, style: 2, lines: vec![], wants_options: false, fills: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], older_req: None, confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: true, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, fills_on: true, algos: true, whale_usd: 100_000.0, cone: false, poly: false, odds: vec![], style: 2, lines: vec![], wants_options: false, fills: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
             panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, false), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false), (Pane::Delta, false), (Pane::Iv, false), (Pane::Skew, false)],
         }
     }
@@ -412,7 +416,7 @@ impl Chart {
 
         let (lo, hi) = self.price_range(ui, &resp, vis, main, base, on_axis, editing, dt, y_wheel);
         // legend rows sit above the plot: OHLC, MAs, then the overlays' key values when any is on
-        let overlays = self.sr || self.vwap || self.cone || self.bb || ((self.mark || self.liqmap) && smarket == Market::Perp);
+        let overlays = self.sr || self.vwap || self.cone || self.poly || self.bb || ((self.mark || self.liqmap) && smarket == Market::Perp);
         let main_plot = Rect::from_min_max(pos2(main.left(), main.top() + if overlays && self.ma && self.mas.iter().any(|m| m.on) { 70.0 } else if overlays { 52.0 } else { 48.0 }), pos2(main.right(), main.bottom() - 6.0));
         let ps = PScale { lo, hi, log: self.scale == Scale::Log && lo > 0.0, r: main_plot };
         let y = |v: f64| ps.y(v);

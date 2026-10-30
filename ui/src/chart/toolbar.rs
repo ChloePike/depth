@@ -83,7 +83,7 @@ impl Chart {
     fn indicators_menu(&mut self, ui: &mut Ui, market: Market) {
         let perp = market == Market::Perp;
         let n_on = self.panes.iter().filter(|(p, on)| *on && (!p.perp_only() || perp)).count()
-            + [self.heat, self.ma, self.bb, self.liqmap && perp, self.sr, self.breakouts, self.vwap, self.cone, self.walls, self.mark && perp].iter().filter(|x| **x).count();
+            + [self.heat, self.ma, self.bb, self.liqmap && perp, self.sr, self.breakouts, self.vwap, self.cone, self.poly, self.walls, self.mark && perp].iter().filter(|x| **x).count();
         let resp = tb_button(ui, t("chart.indicators"), Tb::Outline, n_on, false);
         egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             menu_rows(ui, 260.0);
@@ -147,6 +147,7 @@ impl Chart {
             ui.checkbox(&mut self.breakouts, super::l("Breakouts (closes through VAH / VAL / HVN)"));
             ui.checkbox(&mut self.vwap, super::l("Session VWAP ±1σ ±2σ"));
             ui.checkbox(&mut self.cone, super::l("Expected move cone (volatility model)"));
+            ui.checkbox(&mut self.poly, super::l("Polymarket odds (price markets)"));
             ui.checkbox(&mut self.walls, super::l("Liquidity walls"));
             if perp { ui.checkbox(&mut self.mark, super::l("Mark price")); }
             menu_sep(ui);

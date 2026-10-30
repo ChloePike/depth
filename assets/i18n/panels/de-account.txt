@@ -245,6 +245,11 @@ Bids / asks ±0.5% = Bids / Asks ±0,5 %
 Carry = Carry
 Predicted funding, annualized; basis: perp over spot = Prognostizierte Funding-Rate, annualisiert; Basis = Perp über Spot
 Expected move cone (volatility model) = Erwartete-Bewegung-Kegel (Volatilitätsmodell)
+Polymarket odds (price markets) = Polymarket-Quoten (Preismärkte)
+median = Median
+touch by = Berührung bis
+options = Optionen
+Polymarket probability / option-implied probability (N(d2) at the strike's IV; a touch counts as twice the chance of ending beyond the strike), then the difference in points = Polymarket-Wahrscheinlichkeit / optionsimplizite Wahrscheinlichkeit (N(d2) zur IV des Strikes; Berührung = doppelte Chance, jenseits zu enden), dann die Differenz in Punkten
 Book depth ±0.5% and 5 min aggressor flow; describes now, not a forecast = Buchtiefe ±0,5 % und 5-Min.-Aggressor-Flow; beschreibt das Jetzt, keine Prognose
 Show PnL amount = PnL-Betrag anzeigen
 Show entry and mark price = Einstiegs- und Mark-Preis anzeigen

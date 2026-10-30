@@ -245,6 +245,11 @@ Bids / asks ±0.5% = 매수 / 매도 호가 ±0.5%
 Carry = 캐리
 Predicted funding, annualized; basis: perp over spot = 예상 펀딩비(연환산). 베이시스 = 무기한 대비 현물
 Expected move cone (volatility model) = 예상 변동폭 콘(변동성 모델)
+Polymarket odds (price markets) = Polymarket 확률(가격 예측 시장)
+median = 중앙값
+touch by = 터치 기한
+options = 옵션
+Polymarket probability / option-implied probability (N(d2) at the strike's IV; a touch counts as twice the chance of ending beyond the strike), then the difference in points = Polymarket 확률 / 옵션 내재 확률(행사가 IV 기준 N(d2), 터치는 만기에 넘어설 확률의 2배), 그 차이(포인트)
 Book depth ±0.5% and 5 min aggressor flow; describes now, not a forecast = 호가 깊이 ±0.5%와 최근 5분 공격적 체결 흐름. 현재 상태를 설명하며 예측이 아닙니다
 Show PnL amount = 손익 금액 표시
 Show entry and mark price = 진입가와 마크 가격 표시

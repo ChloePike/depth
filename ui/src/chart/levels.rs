@@ -86,6 +86,12 @@ fn broken_levels(bars: &[Bar], levels: &[SrLevel], within: usize) -> Vec<(SrLeve
     v.into_iter().map(|(_, l, up, failed)| (l, up, failed)).collect()
 }
 
+/// A strike as the market names it: "80,000", "3.5", not fmt_px's padded "88.0000".
+fn strike_txt(v: f64) -> String {
+    let s = fmt_px(v);
+    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s }
+}
+
 impl Chart {
     /// Context levels on the price plot: volume profile (POC, value area, S / R), breakouts, the
     /// expected-move cone, session VWAP and liquidity walls.
@@ -197,6 +203,27 @@ impl Chart {
                     clip.text(pos2(end.x - 4.0, at(n, 2.0).y - 8.0), Align2::RIGHT_BOTTOM, format!("±1σ {:.2}%", s * 100.0), mono(10.0), accent());
                 }
             }
+        }
+        // Polymarket odds (reference only): the nearest settle ladder and touch window, a short dotted
+        // line and a small label per strike on screen; labels that would overlap others are dropped
+        if self.poly && !self.odds.is_empty() {
+            let (settle, touch) = depth::poly::pick(&self.odds, depth::now_ms());
+            let violet = Color32::from_rgb(0x9b, 0x87, 0xf5);
+            let x0 = main.right() - main.width() * 0.22;
+            for o in settle.iter().chain(&touch).filter(|o| o.strike > lo && o.strike < hi) {
+                let ly = y(o.strike);
+                painter.extend(egui::Shape::dashed_line(&[pos2(x0, ly), pos2(main.right(), ly)], Stroke::new(1.0, violet.gamma_multiply(0.5)), 1.5, 3.0));
+                let sym = match o.kind { depth::poly::Kind::Above => ">", depth::poly::Kind::Below => "<", depth::poly::Kind::Reach => "↑", depth::poly::Kind::Dip => "↓" };
+                let g = painter.layout_no_wrap(format!("PM {sym}{} {:.0}% {}", strike_txt(o.strike), o.p * 100.0, local_date(o.end_ms)), mono_m(10.0), violet);
+                if let Some(r) = try_place(Rect::from_min_size(pos2(x0 - g.size().x - 10.0, ly - 8.0), g.size() + vec2(8.0, 3.0)), &mut taken) {
+                    painter.rect(r, 2, panel().gamma_multiply(0.9), Stroke::new(1.0, violet.gamma_multiply(0.5)), egui::StrokeKind::Inside);
+                    painter.galley(r.min + vec2(4.0, 1.5), g, violet);
+                }
+            }
+            let mut v = vec![];
+            if let (Some(m), Some(o)) = (depth::poly::median(&settle), settle.first()) { v.push(format!("{} {} {}", local_date(o.end_ms), super::l("median"), fmt_px(m))); }
+            if let Some(o) = touch.first() { v.push(format!("{} {}", super::l("touch by"), local_date(o.end_ms))); }
+            if !v.is_empty() { legend3.push(("Polymarket".into(), v.join("  ·  "), violet)); }
         }
 
         // session VWAP (from 00:00 UTC, 1m bars) with +-1 / +-2 sigma bands, sampled at each chart bar's close

@@ -245,6 +245,11 @@ Bids / asks ±0.5% = Bid / Ask ±0,5%
 Carry = Carry
 Predicted funding, annualized; basis: perp over spot = Funding dự kiến quy năm; basis = perp so với spot
 Expected move cone (volatility model) = Hình nón biên độ kỳ vọng (mô hình biến động)
+Polymarket odds (price markets) = Xác suất Polymarket (thị trường giá)
+median = trung vị
+touch by = chạm trước
+options = quyền chọn
+Polymarket probability / option-implied probability (N(d2) at the strike's IV; a touch counts as twice the chance of ending beyond the strike), then the difference in points = Xác suất Polymarket / xác suất hàm ý từ quyền chọn (N(d2) theo IV của strike; chạm = gấp đôi khả năng kết thúc vượt strike), rồi chênh lệch theo điểm
 Book depth ±0.5% and 5 min aggressor flow; describes now, not a forecast = Độ sâu sổ lệnh ±0,5% và dòng lệnh chủ động 5 phút; mô tả hiện tại, không phải dự báo
 Show PnL amount = Hiện số tiền PnL
 Show entry and mark price = Hiện giá vào và giá đánh dấu

@@ -1012,6 +1012,12 @@ impl App {
         self.chart.layout = self.layout.clone();
         for o in self.others.iter_mut() { o.1.layout = self.layout.clone(); if let Some(l) = o.1.layout_req.take() { self.layout = l; } }
         if let Some(l) = self.chart.layout_req.take() { self.layout = l; }
+        // Polymarket odds, cloned only while some chart shows them (a few hundred small rows)
+        if self.chart.poly || self.others.iter().any(|o| o.1.poly) {
+            let odds = self.eng.poly.lock().unwrap().clone();
+            for o in self.others.iter_mut() { o.1.odds = odds.clone(); }
+            self.chart.odds = odds;
+        }
         let cells = layout_cells(&self.layout, ui.available_rect_before_wrap());
         if cells.len() == 1 { self.chart.multi = false; return self.chart.show(ui, a, self.mode, &base); }
         self.fill_cells(cells.len());
@@ -1249,7 +1255,7 @@ impl App {
                         self.pending_mode = Some(Market::Perp);
                         self.chart.hunter_view();
                     }
-                } else if self.mode == Market::Option { self.opt.show(ui, &a) } else { self.charts(ui, &a) }
+                } else if self.mode == Market::Option { self.opt.odds = self.eng.poly.lock().unwrap().clone(); self.opt.show(ui, &a) } else { self.charts(ui, &a) }
             });
             self.chart_actions(&ctx);
         }
@@ -1316,6 +1322,8 @@ impl App {
         }
         // option panes on the chart need the chains too (ensure is a no-op once started)
         if self.eng.wants_options.swap(false, std::sync::atomic::Ordering::Relaxed) || self.chart.wants_options { self.eng.ensure(Market::Option); }
+        let poly = self.chart.poly || self.others.iter().any(|o| o.1.poly) || self.mode == Market::Option;
+        self.eng.wants_poly.store(poly, std::sync::atomic::Ordering::Relaxed);
         if self.eng.wants_l3.swap(false, std::sync::atomic::Ordering::Relaxed) { self.eng.ensure_l3(); }
     }
 }

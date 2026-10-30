@@ -748,6 +748,9 @@ pub struct Engine {
     pub funding: Arc<Mutex<HashMap<(Exchange, String), VenueFunding>>>,
     /// alternative.me crypto Fear & Greed (0 fear .. 100 greed, daily) and its label
     pub fng: Arc<Mutex<Option<(f64, String)>>>,
+    /// Polymarket price-market odds of the current base, fetched while `wants_poly` (a chart overlay is on)
+    pub poly: Arc<Mutex<Vec<depth::poly::Odds>>>,
+    pub wants_poly: Arc<std::sync::atomic::AtomicBool>,
     /// detected signals for the current base (quant::detect every 5 s, per-kind cooldown)
     pub signals: Arc<Mutex<depth::quant::Feed>>,
     /// private trading state (kept across base switches)
@@ -815,7 +818,7 @@ fn active_keys(demo: bool, real: &HashMap<Exchange, Keys>, ex: Exchange) -> Opti
 impl Engine {
     pub fn new() -> Self {
         let real_keys: HashMap<Exchange, Keys> = trade::KEY_VENUES.into_iter().filter_map(|ex| Some((ex, trade::keychain(ex)?))).collect();
-        Engine { agg: Default::default(), stats: Default::default(), base: String::new(), rt: None, tx: None, started: vec![], tfs: vec![], venue_tasks: HashMap::new(), tickers: Default::default(), funding: Default::default(), fng: Default::default(), signals: Default::default(), account: {
+        Engine { agg: Default::default(), stats: Default::default(), base: String::new(), rt: None, tx: None, started: vec![], tfs: vec![], venue_tasks: HashMap::new(), tickers: Default::default(), funding: Default::default(), fng: Default::default(), poly: Default::default(), wants_poly: Default::default(), signals: Default::default(), account: {
             let mut a = Account::default();
             a.keys = trade::KEY_VENUES.into_iter().filter_map(|ex| Some((ex, active_keys(depth::demo::on(), &real_keys, ex)?))).collect();
             Arc::new(Mutex::new(a))
@@ -830,6 +833,8 @@ impl Engine {
         self.base = base.to_uppercase();
         self.agg = Arc::new(Mutex::new(Agg::default()));
         self.agg.lock().unwrap().load_opt_hist(&self.base);
+        // fresh per base: a fetch still in flight for the old base writes into the old one
+        self.poly = Default::default();
         depth::demo::set_market(self.agg.clone(), &self.base, self.watched.clone());
         self.stats = Arc::new(Mutex::new(Stats { hist_pending: self.venues().len() * HISTORY_MARKETS.len(), hist_total: self.venues().len() * HISTORY_MARKETS.len(), ..Default::default() }));
         self.started = vec![];
@@ -1034,6 +1039,22 @@ impl Engine {
                 Ok(())
             }
         }));
+
+        // Polymarket odds: only while an overlay shows them, every 2 minutes (two ~1 MB searches)
+        let (poly, wants, base_p) = (self.poly.clone(), self.wants_poly.clone(), self.base.clone());
+        rt.spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(5));
+            let mut last: Option<std::time::Instant> = None;
+            loop {
+                tick.tick().await;
+                if !wants.load(std::sync::atomic::Ordering::Relaxed) || last.is_some_and(|t| t.elapsed() < Duration::from_secs(120)) { continue; }
+                last = Some(std::time::Instant::now());
+                match depth::poly::fetch(&base_p).await {
+                    Ok(v) => *poly.lock().unwrap() = v,
+                    Err(e) => eprintln!("[polymarket] {e:#}"),
+                }
+            }
+        });
 
         // live last / 24h change between REST refreshes (the Hunter's Binance stream does this while it runs)
         if self.hunter_rt.is_none() { self.mini = Some(rt.spawn(picker_mini(self.tickers.clone()))); }

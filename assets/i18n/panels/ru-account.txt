@@ -245,6 +245,11 @@ Bids / asks ±0.5% = Биды / аски ±0,5%
 Carry = Carry
 Predicted funding, annualized; basis: perp over spot = Прогноз фандинга в годовых; базис = бессрочный к споту
 Expected move cone (volatility model) = Конус ожидаемого движения (модель волатильности)
+Polymarket odds (price markets) = Вероятности Polymarket (ценовые рынки)
+median = медиана
+touch by = касание до
+options = опционы
+Polymarket probability / option-implied probability (N(d2) at the strike's IV; a touch counts as twice the chance of ending beyond the strike), then the difference in points = Вероятность Polymarket / вероятность по опционам (N(d2) по IV страйка; касание = удвоенный шанс закрыться за страйком), затем разница в пунктах
 Book depth ±0.5% and 5 min aggressor flow; describes now, not a forecast = Глубина стакана ±0,5% и 5-минутный поток агрессоров; описывает текущий момент, не прогноз
 Show PnL amount = Показывать сумму PnL
 Show entry and mark price = Показывать цену входа и маркировочную цену

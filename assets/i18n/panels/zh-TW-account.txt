@@ -245,6 +245,11 @@ Bids / asks ±0.5% = 買盤 / 賣盤 ±0.5%
 Carry = 資金成本
 Predicted funding, annualized; basis: perp over spot = 預測資金費率（年化）；基差 = 合約相對現貨
 Expected move cone (volatility model) = 預期波動區間（波動率模型）
+Polymarket odds (price markets) = Polymarket 機率（價格預測盤）
+median = 中位數
+touch by = 觸及截止
+options = 期權
+Polymarket probability / option-implied probability (N(d2) at the strike's IV; a touch counts as twice the chance of ending beyond the strike), then the difference in points = Polymarket 機率 / 期權隱含機率（按該行權價 IV 計算 N(d2)；觸及按到期越過該價機率的兩倍計），然後是差值（百分點）
 Book depth ±0.5% and 5 min aggressor flow; describes now, not a forecast = 盤口 ±0.5% 深度與 5 分鐘主動成交；描述當前，不是預測
 Show PnL amount = 顯示盈虧金額
 Show entry and mark price = 顯示開倉價和標記價

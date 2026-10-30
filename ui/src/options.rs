@@ -27,11 +27,13 @@ pub struct OptView {
     confirm: Option<OptTicket>,
     /// venues whose option orders were fetched once (later: resyncs and our own orders)
     asked: Vec<Exchange>,
+    /// Polymarket odds of this base, set by the app every frame on this page
+    pub odds: Vec<depth::poly::Odds>,
 }
 
 impl Default for OptView {
     fn default() -> Self {
-        OptView { venue: None, expiry: None, pick: None, buy: true, px: String::new(), qty: "1".into(), tif: Tif::Gtc, reduce: false, confirm: None, asked: vec![] }
+        OptView { venue: None, expiry: None, pick: None, buy: true, px: String::new(), qty: "1".into(), tif: Tif::Gtc, reduce: false, confirm: None, asked: vec![], odds: vec![] }
     }
 }
 
@@ -105,6 +107,7 @@ impl OptView {
             ui.label(RichText::new(t("opt.atm_iv")).font(prop(11.0)).color(dim()));
             ui.label(RichText::new(info.atm_iv.map(|v| format!("{:.2}%", v * 100.0)).unwrap_or("-".into())).font(mono(12.5)).color(WARN));
         });
+        self.poly_row(ui, venue, chain, &exps);
         ui.add_space(4.0);
 
         let mut rows: Vec<(&str, &Opt)> = chain.opts.iter().filter(|(_, o)| o.has_info && o.expiry_ms == exp && (o.strike / fwd - 1.0).abs() < 0.25).map(|(k, o)| (&**k, o)).collect();
@@ -127,6 +130,39 @@ impl OptView {
             self.px = px.and_then(|p| venue_px(venue, &symbol, p, index)).map(|p| px_text(venue, &symbol, p)).unwrap_or_default();
             self.pick = Some(Pick { ex: venue, symbol });
             self.reduce = false;
+        }
+    }
+
+    /// Polymarket's odds beside the same events priced by this venue's options: per strike "PM % / options %
+    /// difference in points". The smile and forward come from the option expiry nearest the market's deadline.
+    fn poly_row(&self, ui: &mut Ui, venue: Exchange, chain: &depth::agg::Chain, exps: &[depth::agg::Expiry]) {
+        let now = now_ms();
+        let (settle, touch) = depth::poly::pick(&self.odds, now);
+        for set in [settle, touch] {
+            let Some(end) = set.first().map(|o| o.end_ms) else { continue };
+            // ponytail: the nearest expiry's smile and forward with the deadline's own time; interpolating total
+            // variance between the two expiries around the deadline would close the gap on far-apart expiries
+            let Some(e) = exps.iter().filter(|e| e.forward.is_some()).min_by_key(|e| (e.expiry_ms - end).abs()) else { continue };
+            let f = e.forward.unwrap_or_default();
+            let mut smile: Vec<(f64, f64)> = chain.opts.values().filter(|o| o.has_info && o.expiry_ms == e.expiry_ms).filter_map(|o| Some((o.strike, o.iv.filter(|v| *v > 0.0)?))).collect();
+            if smile.is_empty() { continue; }
+            smile.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let years = (end - now) as f64 / (365.0 * 86_400_000.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                let head = format!("Polymarket {}  ·  {venue:?} {} {:.0}{}", crate::chart::local_date(end), super::l("options"), days(e.expiry_ms).max(0.0), t("opt.days"));
+                ui.label(RichText::new(head).font(prop(11.0)).color(dim()))
+                    .on_hover_text(super::l("Polymarket probability / option-implied probability (N(d2) at the strike's IV; a touch counts as twice the chance of ending beyond the strike), then the difference in points"));
+                for o in &set {
+                    let Some(q) = depth::poly::implied(o.kind, f, o.strike, iv_at(&smile, o.strike), years) else { continue };
+                    let d = (o.p - q) * 100.0;
+                    let sym = match o.kind { depth::poly::Kind::Above => ">", depth::poly::Kind::Below => "<", depth::poly::Kind::Reach => "↑", depth::poly::Kind::Dip => "↓" };
+                    let k = fmt_px(o.strike);
+                    let k = if k.contains('.') { k.trim_end_matches('0').trim_end_matches('.') } else { &k };
+                    let txt = format!("{sym}{k}  {:.0}% / {:.0}%  {d:+.0}", o.p * 100.0, q * 100.0);
+                    ui.label(RichText::new(txt).font(mono(11.5)).color(if d.abs() >= 5.0 { WARN } else { fg() }));
+                }
+            });
         }
     }
 
@@ -413,11 +449,28 @@ impl OptView {
     }
 }
 
+/// IV at strike `k` from (strike, iv) points sorted by strike: linear between neighbours, flat beyond the ends.
+fn iv_at(smile: &[(f64, f64)], k: f64) -> f64 {
+    let i = smile.partition_point(|p| p.0 < k);
+    if i == 0 { return smile[0].1; }
+    if i == smile.len() { return smile[i - 1].1; }
+    let ((x0, y0), (x1, y1)) = (smile[i - 1], smile[i]);
+    if x1 > x0 { y0 + (y1 - y0) * (k - x0) / (x1 - x0) } else { y0 }
+}
+
 fn parse(s: &str) -> Option<f64> { s.trim().replace(',', "").parse().ok().filter(|x: &f64| x.is_finite() && *x > 0.0) }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iv_interpolates_and_clamps() {
+        let s = [(90.0, 0.6), (100.0, 0.5), (100.0, 0.52), (110.0, 0.55)];
+        assert_eq!(iv_at(&s, 80.0), 0.6);
+        assert!((iv_at(&s, 95.0) - 0.55).abs() < 1e-12);
+        assert_eq!(iv_at(&s, 120.0), 0.55);
+    }
 
     #[test]
     fn coin_quoted_prices_and_premiums() {
