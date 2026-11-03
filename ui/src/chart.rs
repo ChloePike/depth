@@ -193,6 +193,8 @@ pub struct Chart {
     #[serde(skip)] pub wants_options: bool,
     /// Polymarket odds of the current base, set by the app every frame while `poly`
     #[serde(skip)] pub odds: Vec<depth::poly::Odds>,
+    /// the order venue (the header's mark): the aggregate chart's Mark line is that venue's mark, like the header
+    #[serde(skip)] pub mark_ex: Option<Exchange>,
     /// own fills of the current symbol (perp), oldest first, set by the app when they change
     #[serde(skip)] pub fills: Vec<depth::trade::Fill>,
     #[serde(skip)] base_unit: String,
@@ -262,7 +264,7 @@ impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], older_req: None, confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: true, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, fills_on: true, algos: true, whale_usd: 100_000.0, cone: false, poly: false, odds: vec![], style: 2, lines: vec![], wants_options: false, fills: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], older_req: None, confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: true, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, fills_on: true, algos: true, whale_usd: 100_000.0, cone: false, poly: false, odds: vec![], mark_ex: None, style: 2, lines: vec![], wants_options: false, fills: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
             panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, false), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false), (Pane::Delta, false), (Pane::Iv, false), (Pane::Skew, false)],
         }
     }
@@ -454,13 +456,9 @@ impl Chart {
         let mark = if self.mark && smarket == Market::Perp && live {
             match self.src {
                 Some(e) => a.venues.get(&(e, Market::Perp)).and_then(|v| v.mark),
-                None => {
-                    let (mut num, mut den) = (0.0, 0.0);
-                    for ((e, m), v) in a.venues.iter().filter(|((_, m), _)| *m == Market::Perp) {
-                        if let (Some(mk), Some(oi)) = (v.mark, v.oi) { let w = oi.max(1e-9); num += mk * a.usdt(*e, *m) * w; den += w; }
-                    }
-                    (den > 0.0).then(|| num / den)
-                }
+                // the aggregate chart: the order venue's mark, the one the header shows (user choice 2026-11-03; an
+                // OI-weighted mean across venues sat a few bp off it, Hyperliquid / Lighter premiums pulling it)
+                None => self.mark_ex.and_then(|e| a.venues.get(&(e, Market::Perp))).and_then(|v| v.mark),
             }
         } else { None };
         let mark_ax = mark.filter(|m| *m > lo && *m < hi).map(|mk| place(Rect::from_min_size(pos2(main.right() + 2.0, y(mk) - 9.0), vec2(AXIS_W - 4.0, 18.0)), &mut taken));

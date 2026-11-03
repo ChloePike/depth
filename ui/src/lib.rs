@@ -1019,6 +1019,8 @@ impl App {
             self.chart.odds = odds;
         }
         let cells = layout_cells(&self.layout, ui.available_rect_before_wrap());
+        self.chart.mark_ex = Some(self.trade.ex);
+        for o in self.others.iter_mut() { o.1.mark_ex = Some(self.trade.ex); }
         if cells.len() == 1 { self.chart.multi = false; return self.chart.show(ui, a, self.mode, &base); }
         self.fill_cells(cells.len());
         if let Some(p) = ui.input(|i| i.pointer.primary_pressed().then(|| i.pointer.interact_pos()).flatten()) {
