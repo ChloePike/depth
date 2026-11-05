@@ -202,11 +202,13 @@ impl Chart {
                         painter.rect_filled(Rect::from_min_max(pos2(x - bw / 2.0, base - h), pos2(x + bw / 2.0, base)), 0, dim());
                     }
                 }
-                let vols: Vec<f64> = vis.iter().map(|b| b.vol).collect();
+                // over every loaded bar, like the oscillators: over the visible ones the left edge had no average and
+                // the line started wherever the view did
+                let vols: Vec<f64> = bars.iter().map(|b| b.vol).collect();
                 // volume averages follow the MA toggle: off by default, the bars speak for themselves
                 for (n, col) in [(5usize, accent()), (10, dn())].into_iter().filter(|_| self.ma) {
                     let m = sma(&vols, n);
-                    line(m.iter().enumerate().filter_map(|(k, v)| Some((k, (*v)?))).collect(), 0.0, max, col.linear_multiply(0.9), false);
+                    line(m[i0..=i1].iter().enumerate().filter_map(|(k, v)| Some((k, (*v)?))).collect(), 0.0, max, col.linear_multiply(0.9), false);
                 }
                 lx = label(format!("{} {}", fmt_big(hb.vol), self.base_unit), fg(), lx);
                 lx = label(format!("≈{} USDT", fmt_big(hb.vol * hb.c)), mu(), lx);
