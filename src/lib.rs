@@ -17,7 +17,6 @@ pub mod sys;
 pub mod trade;
 pub mod ws;
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -160,29 +159,53 @@ impl Emit {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, PartialOrd)]
-struct Px(f64);
-impl Eq for Px {}
-impl Ord for Px { fn cmp(&self, o: &Self) -> std::cmp::Ordering { self.0.total_cmp(&o.0) } }
+/// One side of a book as a sorted array with the best level last: bids by ascending price, asks by descending.
+/// Updates land near the touch, so an insert or a removal moves a few levels at the end and the touch is the last
+/// element. Was a BTreeMap: its node allocations and pointer walks cost more per update, at about twice the bytes per level.
+#[derive(Default, Clone)]
+struct BookSide<const BID: bool>(Vec<(f64, f64)>);
+
+impl<const BID: bool> BookSide<BID> {
+    /// the sort key: ascending toward the best price
+    fn key(p: f64) -> f64 { if BID { p } else { -p } }
+    fn find(&self, p: f64) -> Result<usize, usize> { self.0.binary_search_by(|l| Self::key(l.0).total_cmp(&Self::key(p))) }
+    /// qty > 0 sets the level, else removes it; the qty it had (0 when absent)
+    fn set(&mut self, p: f64, q: f64) -> f64 {
+        match self.find(p) {
+            Ok(i) => { let was = self.0[i].1; if q > 0.0 { self.0[i].1 = q } else { self.0.remove(i); } was }
+            Err(i) => { if q > 0.0 { self.0.insert(i, (p, q)) } 0.0 }
+        }
+    }
+    fn get(&self, p: f64) -> f64 { self.find(p).map_or(0.0, |i| self.0[i].1) }
+    fn best(&self) -> Option<(f64, f64)> { self.0.last().copied() }
+    /// a snapshot: these levels (qty > 0) and no others; best first (what venues send) is copied in one pass
+    fn replace(&mut self, lv: &[(f64, f64)]) {
+        self.0.clear();
+        if lv.windows(2).all(|w| Self::key(w[0].0).total_cmp(&Self::key(w[1].0)).is_gt()) {
+            self.0.extend(lv.iter().rev().filter(|l| l.1 > 0.0));
+        } else {
+            for &(p, q) in lv { self.set(p, q); }
+        }
+    }
+}
 
 /// local order book fed by Event::Book
-#[derive(Default)]
-pub struct Book { bids: BTreeMap<Px, f64>, asks: BTreeMap<Px, f64> }
+#[derive(Default, Clone)]
+pub struct Book { bids: BookSide<true>, asks: BookSide<false> }
 
 impl Book {
     pub fn apply(&mut self, snapshot: bool, bids: &[(f64, f64)], asks: &[(f64, f64)]) {
-        if snapshot { self.bids.clear(); self.asks.clear(); }
-        for (side, lv) in [(&mut self.bids, bids), (&mut self.asks, asks)] {
-            for &(p, q) in lv { if q > 0.0 { side.insert(Px(p), q); } else { side.remove(&Px(p)); } }
-        }
+        if snapshot { self.bids.replace(bids); self.asks.replace(asks); return }
+        for &(p, q) in bids { self.bids.set(p, q); }
+        for &(p, q) in asks { self.asks.set(p, q); }
     }
     /// Size resting at exactly `px` on one side (0 when absent).
-    pub fn qty_at(&self, bid: bool, px: f64) -> f64 { (if bid { &self.bids } else { &self.asks }).get(&Px(px)).copied().unwrap_or(0.0) }
-    pub fn best_bid(&self) -> Option<(f64, f64)> { self.bids.iter().next_back().map(|(p, q)| (p.0, *q)) }
-    pub fn best_ask(&self) -> Option<(f64, f64)> { self.asks.iter().next().map(|(p, q)| (p.0, *q)) }
-    pub fn depth(&self) -> (usize, usize) { (self.bids.len(), self.asks.len()) }
-    pub fn bids(&self) -> impl Iterator<Item = (f64, f64)> + '_ { self.bids.iter().rev().map(|(p, q)| (p.0, *q)) }
-    pub fn asks(&self) -> impl Iterator<Item = (f64, f64)> + '_ { self.asks.iter().map(|(p, q)| (p.0, *q)) }
+    pub fn qty_at(&self, bid: bool, px: f64) -> f64 { if bid { self.bids.get(px) } else { self.asks.get(px) } }
+    pub fn best_bid(&self) -> Option<(f64, f64)> { self.bids.best() }
+    pub fn best_ask(&self) -> Option<(f64, f64)> { self.asks.best() }
+    pub fn depth(&self) -> (usize, usize) { (self.bids.0.len(), self.asks.0.len()) }
+    pub fn bids(&self) -> impl Iterator<Item = (f64, f64)> + '_ { self.bids.0.iter().rev().copied() }
+    pub fn asks(&self) -> impl Iterator<Item = (f64, f64)> + '_ { self.asks.0.iter().rev().copied() }
 }
 
 /// "2026-10-06T09:44:54.387165186Z" -> unix ms (UTC only); 0 if malformed
@@ -389,5 +412,22 @@ mod tests {
         assert_eq!(b.best_ask(), Some((100.5, 1.0)));
         b.apply(true, &[(1.0, 1.0)], &[]);
         assert_eq!(b.depth(), (1, 0));
+    }
+
+    #[test]
+    fn book_sides_sorted_best_last() {
+        let mut b = Book::default();
+        b.apply(true, &[(99.0, 2.0), (100.0, 1.0), (98.0, 0.0), (99.0, 5.0)], &[(103.0, 1.0), (101.0, 4.0), (102.0, 2.0)]);
+        assert_eq!(b.bids().collect::<Vec<_>>(), [(100.0, 1.0), (99.0, 5.0)]);
+        assert_eq!(b.asks().collect::<Vec<_>>(), [(101.0, 4.0), (102.0, 2.0), (103.0, 1.0)]);
+        b.apply(true, &[(100.0, 1.0), (99.0, 2.0), (97.0, 3.0)], &[(101.0, 1.0), (104.0, 2.0)]); // best first: one pass
+        assert_eq!(b.bids().collect::<Vec<_>>(), [(100.0, 1.0), (99.0, 2.0), (97.0, 3.0)]);
+        b.apply(false, &[(99.0, 0.0), (98.0, 7.0), (50.0, 0.0)], &[(101.0, 0.0), (100.5, 9.0)]);
+        assert_eq!(b.bids().collect::<Vec<_>>(), [(100.0, 1.0), (98.0, 7.0), (97.0, 3.0)]);
+        assert_eq!(b.asks().collect::<Vec<_>>(), [(100.5, 9.0), (104.0, 2.0)]);
+        assert_eq!((b.qty_at(true, 98.0), b.qty_at(true, 99.0), b.qty_at(false, 104.0)), (7.0, 0.0, 2.0));
+        assert_eq!(b.bids.set(100.0, 0.0), 1.0);
+        assert_eq!(b.best_bid(), Some((98.0, 7.0)));
+        assert_eq!(b.depth(), (2, 2));
     }
 }
