@@ -81,13 +81,14 @@ the bars is aligned to the last bar.
 
 | File | Shows |
 |---|---|
-| `ofi_strength.ts` | Order flow imbalance per unit of traded volume |
-| `funding_zscore.ts` | Funding against its recent range, with ±2 lines |
-| `oi_vs_price.ts` | Open interest and price change over 24 bars, in % |
-| `liquidation_skew.ts` | Shorts minus longs liquidated over 10 bars |
-| `book_pressure.ts` | Net liquidity added near the price, bids minus asks |
+| [`ofi_strength.ts`](../assets/indicators/ofi_strength.ts) | Order flow imbalance per unit of traded volume |
+| [`funding_zscore.ts`](../assets/indicators/funding_zscore.ts) | Funding against its recent range, with ±2 lines |
+| [`oi_vs_price.ts`](../assets/indicators/oi_vs_price.ts) | Open interest and price change over 24 bars, in % |
+| [`liquidation_skew.ts`](../assets/indicators/liquidation_skew.ts) | Shorts minus longs liquidated over 10 bars |
+| [`book_pressure.ts`](../assets/indicators/book_pressure.ts) | Net liquidity added near the price, bids minus asks |
 
-They are yours to change; Depth writes them only when it creates the folder. `depth.d.ts` is Depth's and is
+The same files are in this repository under [assets/indicators](../assets/indicators), with
+[depth.d.ts](../assets/indicators/depth.d.ts). They are yours to change; Depth writes them only when it creates the folder. `depth.d.ts` is Depth's and is
 replaced when a new version changes it.
 
 ## Errors

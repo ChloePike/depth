@@ -227,122 +227,16 @@ globalThis.ta = {
 globalThis.plot = (values, opts = {}) => ({ ...opts, values });
 "#;
 
-const DTS: &str = r##"// Types for Depth custom indicators. Written by Depth: edits here are replaced on the next start.
-// A script is a module whose default export takes the chart's bars and returns plots:
-//
-//   /// <reference path="./depth.d.ts" />
-//   export const meta = { name: "My indicator" };
-//   export default function (d: Data): Plot[] { return [plot(ta.ema(d.close, 20))]; }
-//
-// Every column has one value per chart bar, oldest first, at the chart's interval and source (one venue or the
-// aggregate). NaN = no data for that bar. Missing values in a plot leave a gap.
+const DTS: &str = include_str!("../../assets/indicators/depth.d.ts");
 
-interface Data {
-  /** bar open time, ms since 1970 (UTC) */ t: Float64Array;
-  open: Float64Array; high: Float64Array; low: Float64Array; close: Float64Array;
-  /** traded volume, base units; buy / sell = taker (aggressor) side */ vol: Float64Array; buy: Float64Array; sell: Float64Array;
-  /** cumulative volume delta, base units */ cvd: Float64Array;
-  /** open interest, base units, one side (perp) */ oi: Float64Array;
-  /** predicted funding rate per HOUR (perp; 0.0001 = 1 bp) */ funding: Float64Array;
-  /** last settled funding rate per hour (perp) */ funding_settled: Float64Array;
-  /** perp vs spot, bp */ basis: Float64Array;
-  /** accounts long / short ratio */ ls: Float64Array;
-  /** top-of-book order flow imbalance, base units */ ofi: Float64Array;
-  /** liquidity added / removed within 0.25% of mid, base units */ add_bid: Float64Array; add_ask: Float64Array; rm_bid: Float64Array; rm_ask: Float64Array;
-  /** liquidated longs / shorts, base units */ liq_long: Float64Array; liq_short: Float64Array;
-}
-
-type Series = ArrayLike<number>;
-
-interface PlotOptions {
-  title?: string;
-  /** "#rrggbb", or a theme color: "up" | "down" | "accent" | "warn" | "purple" | "fg" | "muted" */
-  color?: string;
-  /** "line" (default) or "hist" (bars from zero, up / down colored unless a color is given) */
-  style?: "line" | "hist";
-}
-
-interface Plot extends PlotOptions { values: Series; }
-
-declare const ta: {
-  sma(a: Series, n: number): Float64Array;
-  ema(a: Series, n: number): Float64Array;
-  /** Wilder's moving average (RSI, ATR) */ rma(a: Series, n: number): Float64Array;
-  stdev(a: Series, n: number): Float64Array;
-  highest(a: Series, n: number): Float64Array;
-  lowest(a: Series, n: number): Float64Array;
-  /** a[i] - a[i - n] */ change(a: Series, n?: number): Float64Array;
-  /** running sum, NaN counted as 0 */ cum(a: Series): Float64Array;
-  rsi(a: Series, n: number): Float64Array;
-  /** (a - sma) / stdev over n */ zscore(a: Series, n: number): Float64Array;
-};
-
-declare function plot(values: Series, opts?: PlotOptions): Plot;
-"##;
-
-/// Written into a new indicators folder: one per kind of data only Depth has, as starting points.
-const EXAMPLES: [(&str, &str); 5] = [("ofi_strength.ts", r#"/// <reference path="./depth.d.ts" />
-// Order flow imbalance against traded volume: how hard the book leans, per unit traded.
-// Edit and save: Depth reloads it. Turn it on with the chart's Scripts button.
-export const meta = { name: "OFI strength" };
-
-export default function (d: Data): Plot[] {
-  const ofi = ta.ema(d.ofi, 20);
-  const vol = ta.ema(d.vol, 20);
-  return [plot(ofi.map((x, i) => (vol[i] > 0 ? x / vol[i] : NaN)), { title: "OFI / vol", style: "hist" })];
-}
-"#), ("funding_zscore.ts", r#"/// <reference path="./depth.d.ts" />
-// Funding against its own recent range: |z| above 2 marks a crowded side (perp). The predicted rate where the
-// chart has it (live), else the last settled one (venue history).
-export const meta = { name: "Funding z-score" };
-
-export default function (d: Data): Plot[] {
-  const n = 200;
-  const f = d.funding.map((x, i) => (Number.isFinite(x) ? x : d.funding_settled[i]));
-  const z = ta.zscore(f, n);
-  const two = z.map(() => 2), minusTwo = z.map(() => -2);
-  return [
-    plot(z, { title: "z", style: "hist" }),
-    plot(two, { title: "+2", color: "muted" }),
-    plot(minusTwo, { title: "-2", color: "muted" }),
-  ];
-}
-"#), ("oi_vs_price.ts", r#"/// <reference path="./depth.d.ts" />
-// Open interest and price change over the last n bars, in %. Price up with OI down = shorts covering;
-// price down with OI up = new shorts (perp).
-export const meta = { name: "OI vs price" };
-
-export default function (d: Data): Plot[] {
-  const n = 24;
-  const pct = (a: Float64Array) => ta.change(a, n).map((x, i) => (100 * x) / a[i - n]);
-  return [
-    plot(pct(d.close), { title: "price %", color: "fg" }),
-    plot(pct(d.oi), { title: "OI %", color: "warn" }),
-  ];
-}
-"#), ("liquidation_skew.ts", r#"/// <reference path="./depth.d.ts" />
-// Shorts liquidated minus longs liquidated, summed over n bars (base units): positive = shorts being squeezed.
-export const meta = { name: "Liquidation skew" };
-
-export default function (d: Data): Plot[] {
-  const n = 10;
-  const net = d.liq_short.map((x, i) => x - d.liq_long[i]);
-  const sum = ta.sma(net, n).map((x) => x * n);
-  return [plot(sum, { title: "shorts - longs", style: "hist" })];
-}
-"#), ("book_pressure.ts", r#"/// <reference path="./depth.d.ts" />
-// Net liquidity each side gained near the price (added minus removed), bids minus asks, smoothed:
-// resting buyers building up vs sellers pulling out.
-export const meta = { name: "Book pressure" };
-
-export default function (d: Data): Plot[] {
-  const net = d.add_bid.map((x, i) => x - d.rm_bid[i] - (d.add_ask[i] - d.rm_ask[i]));
-  return [
-    plot(net, { title: "bar", style: "hist" }),
-    plot(ta.ema(net, 20), { title: "EMA 20", color: "accent" }),
-  ];
-}
-"#)];
+/// Written into a new indicators folder (sources in assets/indicators): one per kind of data only Depth has.
+const EXAMPLES: [(&str, &str); 5] = [
+    ("ofi_strength.ts", include_str!("../../assets/indicators/ofi_strength.ts")),
+    ("funding_zscore.ts", include_str!("../../assets/indicators/funding_zscore.ts")),
+    ("oi_vs_price.ts", include_str!("../../assets/indicators/oi_vs_price.ts")),
+    ("liquidation_skew.ts", include_str!("../../assets/indicators/liquidation_skew.ts")),
+    ("book_pressure.ts", include_str!("../../assets/indicators/book_pressure.ts")),
+];
 
 #[cfg(test)]
 mod tests {
