@@ -61,11 +61,13 @@ pub struct Prefs {
     /// TP / SL typed as PnL % of the margin (ROE) instead of a price: the last choice of each (order panel, TP/SL sheet)
     pub tp_roe: bool,
     pub sl_roe: bool,
+    /// custom indicator scripts run (`crate::script`); off: none executes and their panes are hidden
+    pub scripts: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into(), risk: Default::default(), demo: false, demo_balance: depth::demo::START_BALANCE, hunter: true, hunter_notify: false, tp_roe: false, sl_roe: false }
+        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into(), risk: Default::default(), demo: false, demo_balance: depth::demo::START_BALANCE, hunter: true, hunter_notify: false, tp_roe: false, sl_roe: false, scripts: true }
     }
 }
 
@@ -124,7 +126,7 @@ impl Prefs {
 }
 
 /// Sidebar panes (painted monochrome glyphs, design: neutral sidebar).
-const PANES: [&str; 6] = ["General", "Appearance", "Trading", "API Keys", "Hotkeys", "About"];
+const PANES: [&str; 7] = ["General", "Appearance", "Trading", "API Keys", "Hotkeys", "Scripts", "About"];
 const W: f32 = 800.0;
 const H: f32 = 580.0;
 const SIDE: f32 = 196.0;
@@ -184,6 +186,7 @@ impl SettingsView {
                                 2 => trading(ui, st, call, &mut self.resetting),
                                 3 => self.api_keys(ui, st, call),
                                 4 => self.hotkeys(ui, st, call),
+                                5 => scripts(ui, st, call),
                                 _ => self.about(ui),
                             }
                         });
@@ -585,6 +588,37 @@ fn set_prefs(before: &Prefs, p: &Prefs, call: &mut Call) {
     if p != before { let _ = call(json!({"op": "set_prefs", "prefs": p})); }
 }
 
+// ---------------------------------------------------------------------- Scripts
+
+/// Custom indicators (`crate::script`): the master switch, the scripts found with their errors, the folder.
+fn scripts(ui: &mut Ui, st: &Value, call: &mut Call) {
+    let mut p = prefs(st);
+    let before = p.clone();
+    section(ui, "", l("Custom indicators: TypeScript files in the indicators folder, shown as panes with the chart's Scripts button. They see only chart data: no network, files, keys or orders. Off: no script runs and their panes are hidden."), |ui| {
+        row(ui, l("Run scripts"), |ui| { kit::switch(ui, &mut p.scripts); });
+    });
+    set_prefs(&before, &p, call);
+    let all = crate::script::list();
+    section(ui, l("Installed"), l("A script's error shows here and in its pane: fix the file and save, Depth reloads it. The guide is docs/SCRIPTS.md in the Depth repository."), |ui| {
+        if all.is_empty() { row(ui, l("No scripts yet"), |_| {}); }
+        for (stem, name, err) in &all {
+            row(ui, name, |ui| match err {
+                Some(e) => { ui.label(RichText::new(e.chars().take(70).collect::<String>()).font(prop(12.0)).color(WARN)).on_hover_text(e.as_str()); }
+                None => { ui.label(RichText::new(stem.as_str()).font(mono(12.0)).color(mu())); }
+            });
+        }
+    });
+    section(ui, "", l("Restore examples adds the examples that are missing; files you edited are kept."), |ui| {
+        row(ui, l("Indicators folder"), |ui| {
+            if kit::button(ui, l("Restore examples"), kit::Look::Secondary, kit::H, None, true).clicked() { crate::script::restore_examples(); }
+            ui.add_space(6.0);
+            if kit::button(ui, l("Open folder"), kit::Look::Secondary, kit::H, None, true).clicked() {
+                if let Some(d) = crate::script::dir() { reveal(&d.join("depth.d.ts")); }
+            }
+        });
+    });
+}
+
 // ---------------------------------------------------------------------- Appearance
 
 fn appearance(ui: &mut Ui, st: &Value, call: &mut Call) {
@@ -858,6 +892,14 @@ fn pane_icon(p: &egui::Painter, r: egui::Rect, i: usize, col: Color32) {
             p.rect_stroke(egui::Rect::from_center_size(c, v(15.0, 10.0)), 2, s, egui::StrokeKind::Middle);
             for k in 0..4 { p.circle_filled(c + v(-4.5 + k as f32 * 3.0, -2.2), 0.9, col); }
             p.line_segment([c + v(-3.5, 2.3), c + v(3.5, 2.3)], s);
+        }
+        5 => {
+            // scripts: </>
+            p.line_segment([c + v(-3.0, -4.0), c + v(-7.0, 0.0)], s);
+            p.line_segment([c + v(-7.0, 0.0), c + v(-3.0, 4.0)], s);
+            p.line_segment([c + v(3.0, -4.0), c + v(7.0, 0.0)], s);
+            p.line_segment([c + v(7.0, 0.0), c + v(3.0, 4.0)], s);
+            p.line_segment([c + v(1.5, -6.0), c + v(-1.5, 6.0)], s);
         }
         _ => {
             p.circle_stroke(c, 6.8, s);

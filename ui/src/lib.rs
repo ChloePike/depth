@@ -1318,6 +1318,7 @@ impl App {
         let tfs: Vec<i64> = self.others.iter().filter(|o| o.0 < n).map(|o| o.1.tf).collect();
         for tf in tfs { self.eng.ensure_tf(chart::native_tf(tf) as u32, &ctx); }
         self.book.show_tape = self.prefs.book_tape;
+        script::set_on(self.prefs.scripts);
         if self.eng.l3_flowscan != self.prefs.hl_flowscan {
             self.eng.l3_flowscan = self.prefs.hl_flowscan;
             // a running Hyperliquid L3 feed switches source now

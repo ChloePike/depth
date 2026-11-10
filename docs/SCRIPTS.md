@@ -18,6 +18,10 @@ Depth reloads a script as soon as you save it.
 
 A new `.ts` or `.js` file in the folder shows up in the menu within a second; a deleted one drops out.
 
+**Settings > Scripts** lists every script with its error, opens the folder, restores examples you deleted (edited
+files are kept) and has the master switch **Run scripts**: off, no script runs and every script pane is hidden.
+The command palette opens it with `scripts`.
+
 ## A script
 
 ```ts
@@ -93,8 +97,9 @@ replaced when a new version changes it.
 
 ## Errors
 
-A script that fails to compile or throws shows its error in its pane, and as a `!` with the message in the
-**Scripts** menu. Fix the file and save.
+A script that fails to compile or throws shows its error in its pane, as a `!` with the message in the chart's
+**Scripts** menu, and in **Settings > Scripts**. Fix the file and save. An error that depends on the data (a
+column that does not exist, a division you did not guard) appears once the script has run on a chart.
 
 ## Limits and safety
 

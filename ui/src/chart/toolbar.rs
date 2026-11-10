@@ -89,6 +89,7 @@ impl Chart {
         egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             menu_rows(ui, 240.0);
             menu_head(ui, super::l("Scripts"));
+            if !crate::script::on() { ui.label(RichText::new(super::l("Scripts are off in Settings")).font(prop(12.0)).color(WARN)); }
             if all.is_empty() { ui.label(RichText::new(super::l("No scripts yet")).font(prop(12.0)).color(mu())); }
             for (stem, name, err) in &all {
                 let mut on = self.scripts.contains(stem);

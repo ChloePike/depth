@@ -34,6 +34,16 @@ struct Engine {
 }
 
 thread_local! { static ENGINE: RefCell<Engine> = RefCell::default(); }
+/// Settings > Scripts > Run scripts: off, `run` executes nothing and every script pane is hidden.
+static ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+pub fn set_on(on: bool) { ON.store(on, std::sync::atomic::Ordering::Relaxed); }
+pub fn on() -> bool { ON.load(std::sync::atomic::Ordering::Relaxed) }
+
+/// Writes the examples missing from the indicators folder (an edited or renamed one is left alone); how many.
+pub fn restore_examples() -> usize {
+    let Some(d) = dir() else { return 0 };
+    EXAMPLES.iter().filter(|(f, _)| !d.join(f).exists()).filter(|(f, src)| std::fs::write(d.join(f), src).is_ok()).count()
+}
 
 /// The indicators folder; created on first use with the type declarations and one example.
 pub fn dir() -> Option<PathBuf> {
@@ -51,7 +61,9 @@ pub fn dir() -> Option<PathBuf> {
 pub fn list() -> Vec<(String, String, Option<String>)> {
     ENGINE.with_borrow_mut(|e| {
         e.scan();
-        let mut v: Vec<_> = e.scripts.iter().map(|(k, s)| (k.clone(), s.name.clone(), s.js.as_ref().err().cloned())).collect();
+        // a load error, else the last run's (a script can compile and still throw on the chart's data)
+        let ran = |k: &str| e.cache.iter().filter(|((s, _), _)| s == k).max_by_key(|(_, c)| c.3).and_then(|(_, c)| c.4.err.clone());
+        let mut v: Vec<_> = e.scripts.iter().map(|(k, s)| (k.clone(), s.name.clone(), s.js.as_ref().err().cloned().or_else(|| ran(k)))).collect();
         v.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
         v
     })
@@ -60,6 +72,7 @@ pub fn list() -> Vec<(String, String, Option<String>)> {
 /// Script `stem` over `bars` (the chart's, oldest first); `key` names the chart's data (base, interval, source, market)
 /// so the same bars are not recomputed every frame. None when the file is gone.
 pub fn run(stem: &str, key: &str, bars: &[Bar]) -> Option<Arc<Out>> {
+    if !on() { return None; }
     ENGINE.with_borrow_mut(|e| {
         e.scan();
         let s = e.scripts.get(stem)?;
