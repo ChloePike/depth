@@ -78,6 +78,10 @@ edited inline; the legend's third row names each overlay with its current value)
 | Whale bubbles | Large prints on the candles, sized by value (threshold in the menu). |
 | Panes | Volume, Delta, CVD, open interest, funding, basis, premium, order-flow imbalance, book flow, long / short ratio, RSI, MACD. |
 
+**Scripts** (the *Scripts* menu): your own panes written in TypeScript, one file each in the indicators folder
+(*Open folder* in the menu). Tick a script to show it; save the file to reload it. Five examples come with the
+folder. The data, helpers and limits are in [SCRIPTS.md](SCRIPTS.md).
+
 **Axis tags**: last price (with the candle countdown) and bid / ask come first, then mark price and your
 own position / order lines. Context levels (POC, VA, S/R, VWAP, breakouts) keep their tag only when it
 fits next to its price; otherwise the line and the legend still show it.

@@ -5,7 +5,9 @@ use super::fmt::{fmt_big, fmt_time, fmt_time_full};
 use super::ind::{macd, rsi, sma};
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(super) enum Pane { Vol, Cvd, Oi, Funding, Basis, Ls, Premium, Ofi, BookFlow, Rsi, Macd, Delta, Iv, Skew }
+pub(super) enum Pane { Vol, Cvd, Oi, Funding, Basis, Ls, Premium, Ofi, BookFlow, Rsi, Macd, Delta, Iv, Skew,
+    /// a custom indicator: `Chart::script_out[i]`, never persisted (the enabled scripts are `Chart::scripts`)
+    #[serde(skip)] Script(u16) }
 
 impl Pane {
     pub(super) fn key(self) -> &'static str {
@@ -14,7 +16,7 @@ impl Pane {
             Pane::Funding => "chart.funding", Pane::Basis => "chart.basis", Pane::Ls => "chart.ls",
             Pane::Premium => "chart.premium", Pane::Ofi => "chart.ofi", Pane::BookFlow => "chart.bookflow",
             Pane::Rsi => "chart.rsi", Pane::Macd => "chart.macd", Pane::Delta => "chart.delta",
-            Pane::Iv => "chart.iv", Pane::Skew => "chart.skew",
+            Pane::Iv => "chart.iv", Pane::Skew => "chart.skew", Pane::Script(_) => "",
         }
     }
     pub(super) fn perp_only(self) -> bool { matches!(self, Pane::Oi | Pane::Funding | Pane::Basis | Pane::Ls) }
@@ -168,7 +170,8 @@ impl Chart {
         let inner = Rect::from_min_max(pos2(r.left(), r.top() + 18.0), pos2(r.right(), r.bottom() - 4.0));
         let label = |s: String, col: Color32, x: f32| painter.text(pos2(x, r.top() + 10.0), Align2::LEFT_CENTER, s, mono_m(11.5), col).right() + 12.0;
         // design: pane name 12 medium grey, values tabular
-        let mut lx = painter.text(pos2(r.left() + 6.0, r.top() + 10.0), Align2::LEFT_CENTER, t(p.key()), prop_m(12.0), mu()).right() + 8.0;
+        let title = match p { Pane::Script(i) => self.script_out[i as usize].name.as_str(), _ => t(p.key()) };
+        let mut lx = painter.text(pos2(r.left() + 6.0, r.top() + 10.0), Align2::LEFT_CENTER, title, prop_m(12.0), mu()).right() + 8.0;
         let scale = std::cell::Cell::new(None);
         let axis = |lo: f64, hi: f64, fmt: &dyn Fn(f64) -> String| {
             scale.set(Some((lo, hi)));
@@ -340,6 +343,38 @@ impl Chart {
                 if let Some(v) = hb.funding_settled { label(format!("{} {:+.4} bp/h", t("chart.funding_settled"), v * 1e4), WARN, lx); }
                 axis(lo, hi, &|v| format!("{v:+.3}"));
             }
+            Pane::Script(i) => {
+                let (o, hov) = (&self.script_out[i as usize], hi);
+                if let Some(e) = &o.err { label(e.clone(), WARN, lx); return None; }
+                let seen: Vec<f64> = o.plots.iter().flat_map(|p| p.vals[i0..=i1].iter().copied().filter(|v| v.is_finite())).collect();
+                if seen.is_empty() { return None; }
+                let (lo, hi) = range(&seen, o.plots.iter().any(|p| p.hist));
+                zero_line(lo, hi);
+                let zy = y_of(0.0, lo, hi, inner);
+                let bw = (self.bar_w * 0.7).max(1.0);
+                for (k, pl) in o.plots.iter().enumerate() {
+                    let col = pl.color.as_deref().and_then(script_color).unwrap_or_else(|| [accent(), WARN, PURPLE, up(), dn()][k % 5]);
+                    if pl.hist {
+                        for (j, v) in pl.vals[i0..=i1].iter().enumerate().filter(|(_, v)| v.is_finite() && **v != 0.0) {
+                            let (x, yv) = (fr.x((i0 + j) as f32), y_of(*v, lo, hi, inner));
+                            let c = if pl.color.is_some() { col } else if *v > 0.0 { up() } else { dn() };
+                            painter.rect_filled(Rect::from_min_max(pos2(x - bw / 2.0, zy.min(yv)), pos2(x + bw / 2.0, zy.max(yv))), 0, c.linear_multiply(0.7));
+                        }
+                    } else {
+                        // a NaN breaks the line
+                        let mut run: Vec<(usize, f64)> = vec![];
+                        for (j, v) in pl.vals[i0..=i1].iter().enumerate() {
+                            if v.is_finite() { run.push((j, *v)); } else if !run.is_empty() { line(std::mem::take(&mut run), lo, hi, col, false); }
+                        }
+                        line(run, lo, hi, col, false);
+                    }
+                    if let Some(v) = pl.vals.get(hov).filter(|v| v.is_finite()) {
+                        let s = if pl.title.is_empty() { fmt_big(*v) } else { format!("{} {}", pl.title, fmt_big(*v)) };
+                        lx = label(s, if pl.hist && pl.color.is_none() { if *v >= 0.0 { up() } else { dn() } } else { col }, lx);
+                    }
+                }
+                axis(lo, hi, &fmt_big);
+            }
             // option-implied, sampled live from the chains (saved across restarts): the last minute
             // sample inside each bar, in vol points
             Pane::Iv | Pane::Skew => {
@@ -357,4 +392,15 @@ impl Chart {
         }
         scale.get()
     }
+}
+
+/// A script's color: "#rrggbb" or a theme name (follows light / dark).
+fn script_color(s: &str) -> Option<Color32> {
+    Some(match s {
+        "up" => up(), "down" => dn(), "accent" => accent(), "warn" => WARN, "purple" => PURPLE, "fg" => fg(), "muted" => mu(),
+        _ => {
+            let h = u32::from_str_radix(s.strip_prefix('#')?, 16).ok().filter(|_| s.len() == 7)?;
+            Color32::from_rgb((h >> 16) as u8, (h >> 8) as u8, h as u8)
+        }
+    })
 }

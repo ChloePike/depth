@@ -36,6 +36,7 @@ impl Chart {
             for e in venues { if menu_row(ui, self.src == Some(e), &format!("{e:?}"), None).clicked() { self.src = Some(e); ui.close(); } }
         });
         self.indicators_menu(ui, market);
+        self.scripts_menu(ui);
         self.layout_menu(ui);
         self.alerts_menu(ui, base);
         if tb_button(ui, t("replay.title"), if self.replay.is_some() { Tb::Tint } else { Tb::Ghost }, 0, false).on_hover_text(super::l("Bar replay: pick a bar, then play forward")).clicked() {
@@ -75,6 +76,29 @@ impl Chart {
             });
             if (self.right.abs() > 0.5 || self.bar_w != 7.0 || self.y_range.is_some()) && tb_button(ui, t("chart.reset"), Tb::Ghost, 0, false).on_hover_text(super::l("Back to the live edge and default zoom")).clicked() {
                 self.right = 0.0; self.bar_w = 7.0; self.y_range = None;
+            }
+        });
+    }
+
+    /// Custom indicators (`crate::script`): one row per file in the indicators folder, its own menu so a long list
+    /// never crowds the built-in indicators.
+    fn scripts_menu(&mut self, ui: &mut Ui) {
+        let all = crate::script::list();
+        self.scripts.retain(|s| all.iter().any(|x| &x.0 == s));
+        let resp = tb_button(ui, super::l("Scripts"), Tb::Outline, self.scripts.len(), false);
+        egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            menu_rows(ui, 240.0);
+            menu_head(ui, super::l("Scripts"));
+            if all.is_empty() { ui.label(RichText::new(super::l("No scripts yet")).font(prop(12.0)).color(mu())); }
+            for (stem, name, err) in &all {
+                let mut on = self.scripts.contains(stem);
+                let r = ui.checkbox(&mut on, name.as_str());
+                let r = match err { Some(e) => { ui.label(RichText::new("!").color(WARN)); r.on_hover_text(e.as_str()) } None => r.on_hover_text(format!("{stem}.ts")) };
+                if r.changed() { if on { self.scripts.push(stem.clone()) } else { self.scripts.retain(|s| s != stem) } }
+            }
+            menu_sep(ui);
+            if ui.button(super::l("Open folder")).on_hover_text(super::l("TypeScript files; Depth reloads them on save")).clicked() {
+                if let Some(d) = crate::script::dir() { crate::settings::reveal(&d.join("depth.d.ts")); }
             }
         });
     }

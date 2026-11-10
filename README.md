@@ -32,6 +32,9 @@ liquidation heatmap over time (Coinglass-style, estimated across all ten venues)
 bubbles, RSI / MACD / delta panes, expected-move cone, drawing tools with alerts, bar replay, and
 trading on the chart (drag orders and TP / SL).
 
+**Custom indicators**: write your own panes in TypeScript over every column the chart has (price, CVD, OI,
+funding, order flow, liquidations), reloaded on save, sandboxed; see [docs/SCRIPTS.md](docs/SCRIPTS.md).
+
 **Signals and models** (all thresholds relative to the instrument's own history):
 volume spikes, liquidation cascades, OI vs price divergence, crowded funding, spot vs perp flow,
 basis extremes, whale prints, cross-venue dislocations; EWMA volatility forecast, book/flow

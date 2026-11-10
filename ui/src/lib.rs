@@ -20,6 +20,7 @@ mod kbd;
 mod tray;
 mod native;
 mod hunter;
+mod script;
 
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Ui};
 use std::collections::HashMap;

@@ -254,6 +254,10 @@ pub struct Chart {
     /// set by the app: its chart layout; the toolbar's choice goes back through `layout_req`
     #[serde(skip)] pub layout: String,
     #[serde(skip)] pub layout_req: Option<String>,
+    /// custom indicators shown as panes: file stems in the indicators folder (`crate::script`)
+    scripts: Vec<String>,
+    /// their output for this frame's bars, `Pane::Script(i)` = `script_out[i]`
+    #[serde(skip)] script_out: Vec<std::sync::Arc<crate::script::Out>>,
 }
 
 /// Defaults: an order-flow set. Heatmap + liquidity walls (where size rests), VWAP with bands and the
@@ -264,7 +268,7 @@ impl Default for Chart {
     fn default() -> Self {
         Chart {
             tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], older_req: None, confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: true, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, fills_on: true, algos: true, whale_usd: 100_000.0, cone: false, poly: false, odds: vec![], mark_ex: None, style: 2, lines: vec![], wants_options: false, fills: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, line_hot: None, line_drag: None, pending_move: None, actions: vec![], older_req: None, confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, scripts: vec![], script_out: vec![], ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: true, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, fills_on: true, algos: true, whale_usd: 100_000.0, cone: false, poly: false, odds: vec![], mark_ex: None, style: 2, lines: vec![], wants_options: false, fills: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
             panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, false), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false), (Pane::Delta, false), (Pane::Iv, false), (Pane::Skew, false)],
         }
     }
@@ -394,7 +398,11 @@ impl Chart {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0, panel());
 
-        let panes: Vec<Pane> = self.panes.iter().filter(|(p, on)| *on && (!p.perp_only() || smarket == Market::Perp)).map(|(p, _)| *p).collect();
+        let mut panes: Vec<Pane> = self.panes.iter().filter(|(p, on)| *on && (!p.perp_only() || smarket == Market::Perp)).map(|(p, _)| *p).collect();
+        // custom indicators under the built-in panes; a deleted file just drops out
+        let key = format!("{}|{}|{:?}|{:?}", self.base_unit, self.tf, self.src, smarket);
+        self.script_out = self.scripts.iter().filter_map(|s| crate::script::run(s, &key, &bars)).collect();
+        panes.extend((0..self.script_out.len()).map(|i| Pane::Script(i as u16)));
         let subs_h = panes.len() as f32 * SUB_H;
         let main_h = (rect.height() - TIME_H - subs_h).max(120.0);
         let plot_w = rect.width() - AXIS_W;

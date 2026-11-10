@@ -558,7 +558,7 @@ fn os(mac: &'static str, win: &'static str, other: &'static str) -> &'static str
 }
 
 /// Reveal `p` in the file manager.
-fn reveal(p: &std::path::Path) {
+pub(crate) fn reveal(p: &std::path::Path) {
     #[cfg(target_os = "macos")]
     let r = std::process::Command::new("open").arg("-R").arg(p).spawn();
     #[cfg(target_os = "windows")]
