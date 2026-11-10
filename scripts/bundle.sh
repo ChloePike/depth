@@ -22,8 +22,8 @@ COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE=$(git log -1 --format=%cs 2>/dev/null || date +%F)
 cat > "$APP/Contents/Resources/Credits.rtf" <<RTF
 {\\rtf1\\ansi\\deff0{\\fonttbl{\\f0\\fswiss Helvetica;}}\\f0\\fs20\\qc
-Crypto trading terminal for 11 exchanges in one window:\\line
-Binance, Bybit, OKX, Bitget, Gate, MEXC, Coinbase, Kraken, Hyperliquid, Lighter, Deribit.\\line
+Crypto trading terminal for 13 exchanges in one window:\\line
+Binance, Bybit, OKX, Bitget, Gate, MEXC, Coinbase, Kraken, Hyperliquid, Lighter, Deribit, Bitfinex, Bitstamp.\\line
 Order book, heatmap, chart, options and trading, running on this Mac.\\par\\par
 Build $COMMIT, $DATE\\par
 {\\field{\\*\\fldinst HYPERLINK "https://github.com/ChloePike/depth"}{\\fldrslt github.com/ChloePike/depth}}\\par\\par

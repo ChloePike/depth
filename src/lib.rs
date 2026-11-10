@@ -21,11 +21,11 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
-pub enum Exchange { Binance, Bybit, Bitget, Okx, Mexc, Coinbase, Kraken, Gate, Hyperliquid, Lighter, Deribit }
+pub enum Exchange { Binance, Bybit, Bitget, Okx, Mexc, Coinbase, Kraken, Gate, Hyperliquid, Lighter, Deribit, Bitfinex, Bitstamp }
 
 impl Exchange {
-    pub const ALL: [Exchange; 11] = [Self::Binance, Self::Bybit, Self::Bitget, Self::Okx, Self::Mexc,
-        Self::Coinbase, Self::Kraken, Self::Gate, Self::Hyperliquid, Self::Lighter, Self::Deribit];
+    pub const ALL: [Exchange; 13] = [Self::Binance, Self::Bybit, Self::Bitget, Self::Okx, Self::Mexc,
+        Self::Coinbase, Self::Kraken, Self::Gate, Self::Hyperliquid, Self::Lighter, Self::Deribit, Self::Bitfinex, Self::Bitstamp];
     pub fn parse(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|e| format!("{e:?}").eq_ignore_ascii_case(s))
     }

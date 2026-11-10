@@ -1,6 +1,8 @@
 //! One module per exchange; each exposes `spawn(sub, tx)`.
 pub mod binance;
+pub mod bitfinex;
 pub mod bitget;
+pub mod bitstamp;
 pub mod bybit;
 pub mod coinbase;
 pub mod deribit;
@@ -35,6 +37,8 @@ pub fn spawn(ex: Exchange, sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
         Exchange::Hyperliquid => hyperliquid::spawn(sub, tx),
         Exchange::Lighter => lighter::spawn(sub, tx),
         Exchange::Deribit => deribit::spawn(sub, tx),
+        Exchange::Bitfinex => bitfinex::spawn(sub, tx),
+        Exchange::Bitstamp => bitstamp::spawn(sub, tx),
     }
 }
 
@@ -53,6 +57,8 @@ pub async fn history(ex: Exchange, sub: &Sub, minutes: usize) -> anyhow::Result<
         Exchange::Hyperliquid => hyperliquid::history(sub, minutes).await,
         Exchange::Lighter => lighter::history(sub, minutes).await,
         Exchange::Deribit => deribit::history(sub, minutes).await,
+        Exchange::Bitfinex => bitfinex::history(sub, minutes).await,
+        Exchange::Bitstamp => bitstamp::history(sub, minutes).await,
     }
 }
 
@@ -76,5 +82,7 @@ pub async fn history_until(ex: Exchange, sub: &Sub, tf: u32, bars: usize, until:
         Exchange::Hyperliquid => hyperliquid::history_until(sub, tf, bars, until).await,
         Exchange::Lighter => lighter::history_until(sub, tf, bars, until).await,
         Exchange::Deribit => deribit::history_until(sub, tf, bars, until).await,
+        Exchange::Bitfinex => bitfinex::history_until(sub, tf, bars, until).await,
+        Exchange::Bitstamp => bitstamp::history_until(sub, tf, bars, until).await,
     }
 }

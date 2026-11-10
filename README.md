@@ -5,17 +5,17 @@
 [![build](https://github.com/ChloePike/depth/actions/workflows/build.yml/badge.svg)](https://github.com/ChloePike/depth/actions/workflows/build.yml)
 [![license](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 
-A local, multi-exchange crypto trading terminal for macOS, Windows and Linux. Ten venues streamed side by side,
+A local, multi-exchange crypto trading terminal for macOS, Windows and Linux. Twelve venues streamed side by side,
 aggregated into one book, one tape and one chart, with order entry on the venues you hold keys for.
 Everything runs on your machine: no relay, no server, no account.
 
-![Depth: BTC perpetual across ten venues](docs/screenshot.png)
+![Depth: BTC perpetual across every venue](docs/screenshot.png)
 
 ## What it does
 
-**Market data, ten venues at once**: Binance, Bybit, Bitget, OKX, MEXC, Coinbase, Kraken, Gate,
-Hyperliquid, Lighter, plus the Deribit BTC / ETH option chains. Spot, margin, perpetuals and options
-(where the venue lists them).
+**Market data, twelve venues at once**: Binance, Bybit, Bitget, OKX, MEXC, Coinbase, Kraken, Gate,
+Hyperliquid, Lighter, Bitfinex, Bitstamp, plus the Deribit BTC / ETH option chains. Spot, margin,
+perpetuals and options (where the venue lists them).
 
 - Composite index price (venue mids weighted by recent volume), aggregated candles, CVD
 - Aggregated order book (mid-aligned per venue), individual orders per level where known (L3),
@@ -28,7 +28,7 @@ Hyperliquid, Lighter, plus the Deribit BTC / ETH option chains. Spot, margin, pe
 
 **Chart**: candles from 1m to 1W in one to four cells, MA, Bollinger, session VWAP with ±1σ/±2σ
 bands, visible-range volume profile (POC, value area, high-volume nodes), breakouts, mark price,
-liquidation heatmap over time (Coinglass-style, estimated across all ten venues), footprint, whale
+liquidation heatmap over time (Coinglass-style, estimated across every venue), footprint, whale
 bubbles, RSI / MACD / delta panes, expected-move cone, drawing tools with alerts, bar replay, and
 trading on the chart (drag orders and TP / SL).
 
