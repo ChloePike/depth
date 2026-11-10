@@ -647,7 +647,7 @@ pub const BIG_USD: f64 = 10_000.0;
 /// Quote currency of a venue's spot/perp book (after the connectors' quote mapping).
 pub fn quote_of(ex: Exchange, _market: Market) -> &'static str {
     match ex {
-        Exchange::Coinbase | Exchange::Kraken | Exchange::Deribit => "USD",
+        Exchange::Coinbase | Exchange::Kraken | Exchange::Bitstamp | Exchange::Deribit => "USD",
         Exchange::Hyperliquid | Exchange::Lighter => "USDC",
         _ => "USDT",
     }

@@ -107,7 +107,12 @@ fn parse_ohlc(v: &Value) -> Vec<Kline> {
     }).collect()
 }
 
-fn market_symbol(base: &str, quote: &str) -> String { format!("{base}{quote}").to_lowercase() }
+/// `<base><quote>` as the venue writes it; USDT / USDC are asked for as USD, the venue's liquid books (BTC/USDT went a
+/// minute without a trade), as on Coinbase and Kraken.
+fn market_symbol(base: &str, quote: &str) -> String {
+    let q = if quote == "USDT" || quote == "USDC" { "USD" } else { quote };
+    format!("{base}{q}").to_lowercase()
+}
 
 // ------------------------------------------------------------------ socket
 
@@ -142,6 +147,7 @@ mod tests {
 
     #[test]
     fn subscriptions_fit_the_message_size() {
+        assert_eq!((market_symbol("BTC", "USDT"), market_symbol("ETH", "EUR")), ("btcusd".into(), "etheur".into()));
         let m = sub_msgs(&market_symbol("BTC", "USD"));
         assert!(m.iter().all(|s| s.len() < 512));
         assert_eq!(serde_json::from_str::<Value>(&m[1]).unwrap(), json!({"event": "bts:subscribe", "data": {"channel": "detail_order_book_btcusd"}}));
