@@ -121,7 +121,7 @@ impl App {
                 "price": o.price, "avg": o.avg, "qty": o.qty, "filled": o.filled, "status": o.status, "ts": o.ts})));
             hist.1.extend(h.fills.iter().map(|f| json!({"ex": ex_name(f.ex), "symbol": f.symbol, "side": if f.side == Side::Buy { "buy" } else { "sell" },
                 "price": f.price, "qty": f.qty, "fee": f.fee, "realized": f.realized, "ts": f.ts})));
-            hist.2.extend(h.closed.iter().map(|c| json!({"ex": ex_name(c.ex), "symbol": c.symbol, "long": c.long, "qty": c.qty, "entry": c.entry, "exit": c.exit, "pnl": c.pnl, "ts": c.ts})));
+            hist.2.extend(h.closed.iter().map(|c| json!({"ex": ex_name(c.ex), "symbol": c.symbol, "long": c.long, "qty": c.qty, "entry": c.entry, "exit": c.exit, "pnl": c.pnl, "ts": c.ts, "opened": c.opened})));
             hist.3 = hist.3.min(*ts);
         }
         let by_ts = |v: &mut Vec<Value>| v.sort_by(|a, b| b["ts"].as_i64().cmp(&a["ts"].as_i64()));

@@ -931,10 +931,11 @@ pub struct Fill { pub ex: Exchange, pub id: String, pub symbol: String, pub side
 #[derive(Clone, Debug)]
 pub struct HistOrder { pub ex: Exchange, pub symbol: String, pub side: Side, pub kind: String, pub price: f64, pub avg: f64, pub qty: f64, pub filled: f64, pub status: String, pub ts: i64 }
 
-/// A closed (or partly closed) position. Binance only reports realized PnL per close, so qty /
-/// entry / exit are None there.
+/// A closed (or partly closed) position. Binance only reports realized PnL per close (its ledger rows have no qty /
+/// entry / exit; `closes_from_fills` rebuilds them where the fills were fetched). `opened`: when the position last
+/// left flat before the close, from the fills (`fill_opened`), None when the opening fill is older than those fetched.
 #[derive(Clone, Debug)]
-pub struct ClosedPnl { pub ex: Exchange, pub symbol: String, pub long: Option<bool>, pub qty: Option<f64>, pub entry: Option<f64>, pub exit: Option<f64>, pub pnl: f64, pub ts: i64 }
+pub struct ClosedPnl { pub ex: Exchange, pub symbol: String, pub long: Option<bool>, pub qty: Option<f64>, pub entry: Option<f64>, pub exit: Option<f64>, pub pnl: f64, pub ts: i64, pub opened: Option<i64> }
 
 #[derive(Clone, Debug, Default)]
 pub struct History { pub orders: Vec<HistOrder>, pub fills: Vec<Fill>, pub closed: Vec<ClosedPnl> }
@@ -948,9 +949,12 @@ pub async fn history(ex: Exchange, k: &Keys, symbols: &[String]) -> Result<Histo
     match ex {
         Exchange::Bybit => bybit::history(k, side, &mut h).await?,
         Exchange::Binance => binance::history(k, symbols, side, &mut h).await?,
-        _ => bail!("{ex:?} history not implemented"),
+        // ponytail: the other venues' history endpoints are not wired; their tabs stay empty instead of a toast per open
+        // (Hyperliquid's userFillsByTime would give fills and closes with dir / startPosition)
+        _ => return Ok(h),
     }
     crate::db::fills_put(&h.fills, k.demo);
+    fill_opened(&mut h.closed, &h.fills);
     h.orders.sort_by(|a, b| b.ts.cmp(&a.ts));
     h.fills.sort_by(|a, b| b.ts.cmp(&a.ts));
     h.closed.sort_by(|a, b| b.ts.cmp(&a.ts));
@@ -1018,13 +1022,38 @@ pub(crate) fn closes_from_fills(fills: &[Fill]) -> Vec<ClosedPnl> {
                 c.qty = Some(q + f.qty);
                 c.pnl += r;
             }
-            None => out.push(ClosedPnl { ex: f.ex, symbol: f.symbol.clone(), long: Some(long), qty: Some(f.qty), entry: None, exit: Some(f.price), pnl: r, ts: f.ts }),
+            None => out.push(ClosedPnl { ex: f.ex, symbol: f.symbol.clone(), long: Some(long), qty: Some(f.qty), entry: None, exit: Some(f.price), pnl: r, ts: f.ts, opened: None }),
         }
     }
     for c in &mut out {
         if let (Some(q), Some(x)) = (c.qty, c.exit) { if q > 0.0 { c.entry = Some(if c.long == Some(true) { x - c.pnl / q } else { x + c.pnl / q }); } }
     }
     out
+}
+
+/// Each close's open time: per symbol the fills oldest first and the net position they add up to (one-way: buys up,
+/// sells down); the position of a close opened at the last fill that took the net off flat before it.
+/// ponytail: one-way only; in hedge mode both sides' fills share one net (fills carry no position side here), so a
+/// hedged symbol's open times can be off. Fill rows with their position side would fix it.
+pub(crate) fn fill_opened(closed: &mut [ClosedPnl], fills: &[Fill]) {
+    use std::collections::HashMap;
+    let mut by: HashMap<(Exchange, &str), Vec<&Fill>> = HashMap::new();
+    for f in fills { by.entry((f.ex, f.symbol.as_str())).or_default().push(f); }
+    // per symbol: the times the net left flat, oldest first
+    let starts: HashMap<(Exchange, &str), Vec<i64>> = by.into_iter().map(|(k, mut v)| {
+        v.sort_by_key(|f| f.ts);
+        let (mut net, mut out) = (0.0f64, vec![]);
+        for f in v {
+            let eps = f.qty.abs() * 1e-9;
+            if net.abs() <= eps { out.push(f.ts); }
+            net += if f.side == Side::Buy { f.qty } else { -f.qty };
+        }
+        (k, out)
+    }).collect();
+    for c in closed.iter_mut() {
+        // the close's own fill can open the next position (a flip): only starts before it count
+        c.opened = starts.get(&(c.ex, c.symbol.as_str())).and_then(|s| s.iter().rev().find(|t| **t < c.ts / 1000 * 1000).copied());
+    }
 }
 
 /// Ledger rows of one close arrive per fill: fold rows of the same symbol and second.
@@ -1130,6 +1159,17 @@ fn is_usd(coin: &str) -> bool { matches!(coin, "USDT" | "USDC" | "USD" | "USDE" 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn closes_get_the_time_their_position_opened() {
+        let fill = |ts: i64, side: Side, qty: f64| Fill { ex: Exchange::Binance, id: ts.to_string(), symbol: "A".into(), side, price: 1.0, qty, fee: 0.0, realized: None, ts };
+        // long opened at 1 s, added at 2 s, closed at 5 s; a short opened at 8 s by a flip... closed at 9 s
+        let fills = [fill(1_000, Side::Buy, 1.0), fill(2_000, Side::Buy, 1.0), fill(5_000, Side::Sell, 2.0), fill(8_000, Side::Sell, 1.0), fill(9_000, Side::Buy, 1.0)];
+        let close = |ts: i64| ClosedPnl { ex: Exchange::Binance, symbol: "A".into(), long: None, qty: None, entry: None, exit: None, pnl: 0.0, ts, opened: None };
+        let mut c = vec![close(5_000), close(9_000), close(500)];
+        fill_opened(&mut c, &fills);
+        assert_eq!(c.iter().map(|c| c.opened).collect::<Vec<_>>(), vec![Some(1_000), Some(8_000), None]);
+    }
+
     #[test]
     fn option_order_body() {
         use super::*;
@@ -1258,9 +1298,9 @@ mod tests {
         assert!((c.exit.unwrap() - 334.0 / 3.0).abs() < 1e-9);
         assert!((c.entry.unwrap() - 100.0).abs() < 1e-9);
         let m = merge_same_second(vec![
-            ClosedPnl { ex: Exchange::Binance, symbol: "A".into(), long: None, qty: None, entry: None, exit: None, pnl: 1.0, ts: 1_100 },
-            ClosedPnl { ex: Exchange::Binance, symbol: "A".into(), long: None, qty: None, entry: None, exit: None, pnl: 2.0, ts: 1_900 },
-            ClosedPnl { ex: Exchange::Binance, symbol: "A".into(), long: None, qty: None, entry: None, exit: None, pnl: 4.0, ts: 2_100 }]);
+            ClosedPnl { ex: Exchange::Binance, symbol: "A".into(), long: None, qty: None, entry: None, exit: None, pnl: 1.0, ts: 1_100, opened: None },
+            ClosedPnl { ex: Exchange::Binance, symbol: "A".into(), long: None, qty: None, entry: None, exit: None, pnl: 2.0, ts: 1_900, opened: None },
+            ClosedPnl { ex: Exchange::Binance, symbol: "A".into(), long: None, qty: None, entry: None, exit: None, pnl: 4.0, ts: 2_100, opened: None }]);
         assert_eq!(m.iter().map(|c| c.pnl).collect::<Vec<_>>(), vec![3.0, 4.0]);
     }
 
