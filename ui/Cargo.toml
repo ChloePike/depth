@@ -8,6 +8,8 @@ repository = "https://github.com/ChloePike/depth"
 # The terminal: the eframe app (src/main.rs) with its egui interface (chart, book, panels).
 [dependencies]
 depth = { path = ".." }
+# the chart crate (crates.io, ChloePike/charting, GPL-3.0-only)
+charting = "0.1"
 anyhow = "1.0.104"
 eframe = "0.36.2"
 memmap2 = "0.9.11"

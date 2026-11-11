@@ -812,6 +812,66 @@ pub struct Engine {
     mini: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// The market data of a chart cell showing another symbol than the active one (`Engine::cell_feed`), one market
+/// (spot or perp), on its own runtime: dropping it closes every connection. Binance's trades (and mark or best
+/// bid / ask) only (`binance::spawn_trades`) with its REST history: no book, so no heatmap, walls or other venues.
+/// Scroll-back pages through the engine's own code (`older_pages`).
+pub struct CellFeed {
+    pub base: String,
+    pub market: Market,
+    pub agg: Arc<Mutex<Agg>>,
+    venues: Vec<Exchange>,
+    stats: Arc<Mutex<Stats>>,
+    tfs: Vec<u32>,
+    older_done: Arc<Mutex<std::collections::HashSet<(Exchange, Market, u32, i64)>>>,
+    rt: Option<tokio::runtime::Runtime>,
+}
+
+impl Drop for CellFeed { fn drop(&mut self) { if let Some(rt) = self.rt.take() { rt.shutdown_background() } } }
+
+impl CellFeed {
+    /// What the cell says about its data; `a` is this feed's `agg`, locked by the caller. A market whose history has
+    /// loaded and that has no bar at all is not listed on Binance.
+    pub fn caption(&self, a: &Agg) -> &'static str {
+        let empty = self.stats.lock().unwrap().hist_pending == 0 && a.series.get(&(None, self.market)).is_none_or(|s| s.bars.is_empty());
+        match (empty, self.market) {
+            (true, Market::Spot) => "No Binance spot market (direct mode)",
+            (true, _) => "No Binance perp market (direct mode)",
+            (false, Market::Spot) => "Binance spot only (direct mode)",
+            (false, _) => "Binance perp only (direct mode)",
+        }
+    }
+
+    /// Scroll-back for this cell, the engine's way (`Engine::ensure_older`).
+    pub fn ensure_older(&self, tf: u32, ctx: &eframe::egui::Context) {
+        let Some(rt) = self.rt.as_ref() else { return };
+        let sub = Sub { market: self.market, base: self.base.clone(), quote: "USDT".into() };
+        let venues = self.venues.iter().map(|e| (*e, self.market, sub.clone())).collect();
+        older_pages(rt, &self.agg, &self.stats, &self.older_done, venues, tf, ctx);
+    }
+
+    /// Native `tf`-minute history the first time the cell shows that interval (`Engine::ensure_tf`).
+    pub fn ensure_tf(&mut self, tf: u32, ctx: &eframe::egui::Context) {
+        if tf <= 1 || self.tfs.contains(&tf) { return }
+        let Some(rt) = self.rt.as_ref() else { return };
+        self.tfs.push(tf);
+        self.stats.lock().unwrap().tf_pending.insert(tf, self.venues.len());
+        for &e in &self.venues {
+            let (agg, stats, ctx, sub, m) = (self.agg.clone(), self.stats.clone(), ctx.clone(), Sub { market: self.market, base: self.base.clone(), quote: "USDT".into() }, self.market);
+            rt.spawn(async move {
+                let h = cached_history(e, &sub, tf, &stats).await;
+                let mut a = agg.lock().unwrap();
+                a.load_history_tf(e, m, tf, &h);
+                let mut s = stats.lock().unwrap();
+                let p = s.tf_pending.entry(tf).or_default();
+                *p = p.saturating_sub(1);
+                if *p == 0 { a.finish_history_tf(tf) }
+                ctx.request_repaint();
+            });
+        }
+    }
+}
+
 /// The Hunter scanner's output (kept across base switches; empty while it is off).
 #[derive(Default)]
 pub struct Hunt {
@@ -1422,39 +1482,46 @@ impl Engine {
     /// actions run under them), so everything that locks runs on the runtime.
     pub fn ensure_older(&self, tf: u32, ctx: &eframe::egui::Context) {
         let Some(rt) = self.rt.as_ref() else { return };
-        let (agg, stats, done, ctx) = (self.agg.clone(), self.stats.clone(), self.older_done.clone(), ctx.clone());
         let venues: Vec<(Exchange, Market, Sub)> = self.venues().into_iter().flat_map(|e| HISTORY_MARKETS.map(|m| (e, m, self.sub(m)))).collect();
-        let step = tf as i64 * 60_000;
+        older_pages(rt, &self.agg, &self.stats, &self.older_done, venues, tf, ctx);
+    }
+
+    /// The feed of a chart cell that shows another symbol than the active one, in `market` (see `CellFeed`).
+    pub fn cell_feed(&self, base: &str, market: Market, ctx: &eframe::egui::Context) -> CellFeed {
+        let venues = vec![Exchange::Binance];
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).thread_name("cell").enable_all().build().expect("cell runtime");
+        let base = base.to_uppercase();
+        let mut f = CellFeed { base: base.clone(), market, agg: Default::default(), venues, stats: Default::default(), tfs: vec![], older_done: Default::default(), rt: None };
+        let sub = Sub { market, base: base.clone(), quote: "USDT".into() };
+        let (tx, mut rx) = unbounded_channel::<Msg>();
+        let agg = f.agg.clone();
         rt.spawn(async move {
-            let plan: Vec<_> = {
-                let a = agg.lock().unwrap();
-                let mut s = stats.lock().unwrap();
-                // first loads still running: their bars are not the oldest yet
-                if s.hist_pending > 0 || s.tf_pending.get(&tf).is_some_and(|p| *p > 0) { return; }
-                let plan = older_plan(&a, &mut done.lock().unwrap(), venues, tf);
-                *s.older_pending.entry(tf).or_default() += plan.len();
-                plan
-            };
-            for (e, m, sub, first) in plan {
-                let (agg, stats, done, ctx) = (agg.clone(), stats.clone(), done.clone(), ctx.clone());
-                tokio::spawn(async move {
-                    let h = ex::history_until(e, &sub, tf, HISTORY_MINUTES, Some(first - step)).await;
-                    if std::env::var("T1_DIAG").is_ok() { eprintln!("[older] {e:?} {m:?} {tf}m before {first}: {} bars", h.as_ref().map_or(0, |h| h.klines.len())); }
-                    let mut a = agg.lock().unwrap();
-                    match h {
-                        Ok(h) if tf <= 1 => a.prepend_history(e, m, &h),
-                        Ok(h) => a.prepend_history_tf(e, m, tf, &h),
-                        Err(err) => { eprintln!("[history] {e:?} {m:?} {tf}m older: {err:#}"); done.lock().unwrap().remove(&(e, m, tf, first)); }
-                    }
-                    let mut s = stats.lock().unwrap();
-                    let p = s.older_pending.entry(tf).or_default();
-                    *p = p.saturating_sub(1);
-                    // one rebuild for the whole round, not one per venue
-                    if *p == 0 { if tf <= 1 { a.finish_history() } else { a.finish_history_tf(tf) } }
-                    ctx.request_repaint();
-                });
+            let mut buf = Vec::with_capacity(4096);
+            while rx.recv_many(&mut buf, 4096).await > 0 {
+                let mut a = agg.lock().unwrap();
+                for m in buf.drain(..) { a.on(&m) }
             }
         });
+        f.stats.lock().unwrap().hist_pending = f.venues.len();
+        { let mut a = f.agg.lock().unwrap(); for e in &f.venues { a.expect_history(*e, market) } }
+        for &e in &f.venues {
+            let (agg, stats, ctx, sub) = (f.agg.clone(), f.stats.clone(), ctx.clone(), sub.clone());
+            rt.spawn(async move {
+                let h = cached_history(e, &sub, 1, &stats).await;
+                let mut a = agg.lock().unwrap();
+                a.load_history(e, market, &h);
+                let mut s = stats.lock().unwrap();
+                s.hist_pending -= 1;
+                if s.hist_pending == 0 { a.finish_history() }
+                ctx.request_repaint();
+            });
+        }
+        {
+            let _g = rt.enter();
+            if let Some(s) = ex::venue_sub(Exchange::Binance, &sub) { ex::binance::spawn_trades(&s, tx); }
+        }
+        f.rt = Some(rt);
+        f
     }
 
     /// Place an order (rules fetched once per symbol and cached); the result lands in the account log.
@@ -2218,6 +2285,43 @@ impl Engine {
         let _guard = rt.enter();
         self.spawn_market(market, &tx);
     }
+}
+
+/// `Engine::ensure_older`'s work for any feed (the engine's or a cell's): the pages of `venues` before their oldest
+/// `tf` bars, on `rt`.
+fn older_pages(rt: &tokio::runtime::Runtime, agg: &Arc<Mutex<Agg>>, stats: &Arc<Mutex<Stats>>, done: &Arc<Mutex<std::collections::HashSet<(Exchange, Market, u32, i64)>>>, venues: Vec<(Exchange, Market, Sub)>, tf: u32, ctx: &eframe::egui::Context) {
+    let (agg, stats, done, ctx) = (agg.clone(), stats.clone(), done.clone(), ctx.clone());
+    let step = tf as i64 * 60_000;
+    rt.spawn(async move {
+        let plan: Vec<_> = {
+            let a = agg.lock().unwrap();
+            let mut s = stats.lock().unwrap();
+            // first loads still running: their bars are not the oldest yet
+            if s.hist_pending > 0 || s.tf_pending.get(&tf).is_some_and(|p| *p > 0) { return; }
+            let plan = older_plan(&a, &mut done.lock().unwrap(), venues, tf);
+            *s.older_pending.entry(tf).or_default() += plan.len();
+            plan
+        };
+        for (e, m, sub, first) in plan {
+            let (agg, stats, done, ctx) = (agg.clone(), stats.clone(), done.clone(), ctx.clone());
+            tokio::spawn(async move {
+                let h = ex::history_until(e, &sub, tf, HISTORY_MINUTES, Some(first - step)).await;
+                if std::env::var("T1_DIAG").is_ok() { eprintln!("[older] {e:?} {m:?} {tf}m before {first}: {} bars", h.as_ref().map_or(0, |h| h.klines.len())); }
+                let mut a = agg.lock().unwrap();
+                match h {
+                    Ok(h) if tf <= 1 => a.prepend_history(e, m, &h),
+                    Ok(h) => a.prepend_history_tf(e, m, tf, &h),
+                    Err(err) => { eprintln!("[history] {e:?} {m:?} {tf}m older: {err:#}"); done.lock().unwrap().remove(&(e, m, tf, first)); }
+                }
+                let mut s = stats.lock().unwrap();
+                let p = s.older_pending.entry(tf).or_default();
+                *p = p.saturating_sub(1);
+                // one rebuild for the whole round, not one per venue
+                if *p == 0 { if tf <= 1 { a.finish_history() } else { a.finish_history_tf(tf) } }
+                ctx.request_repaint();
+            });
+        }
+    });
 }
 
 /// The venues to fetch a scroll-back page for: those with bars loaded below the cap whose page before

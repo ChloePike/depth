@@ -115,3 +115,7 @@ Market F&G = 全網
 Stocks open = 開盤中
 Funding (predicted) = 預測資金費率
 Basis 15m = 15 分鐘基差
+Binance perp only (direct mode) = 僅 Binance 永續（直連模式）
+Binance spot only (direct mode) = 僅 Binance 現貨（直連模式）
+No Binance spot market (direct mode) = Binance 無現貨市場（直連模式）
+No Binance perp market (direct mode) = Binance 無永續市場（直連模式）

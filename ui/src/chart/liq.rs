@@ -1,5 +1,6 @@
 //! Estimated liquidation levels: the model, its time x price heatmap and the right-edge profile.
 use super::*;
+use charting::orderflow::segheat::{magma, Segment, SegmentHeat};
 
 /// Estimated liquidation levels left open after `bars`. Model: each bar's traded volume opens
 /// longs and shorts at its typical price, spread over LEVERAGE; a level is wiped once price trades
@@ -14,7 +15,7 @@ const MMR: f64 = 0.005;
 
 /// Price of bin i is (lo + i) * bin; quantities in base units. `segs`: every level's open mass over
 /// time, for the time x price heatmap (a level is drawn from when it formed until price swept it).
-struct LiqMap { bin: f64, lo: i64, long: Vec<f32>, short: Vec<f32>, segs: Vec<LiqSeg> }
+struct LiqMap { bin: f64, lo: i64, long: Vec<f32>, short: Vec<f32>, segs: Vec<Segment> }
 
 /// One level's mass between two changes: bin index, side, [t0, t1) in ms (t1 = MAX while open).
 struct LiqSeg { i: usize, t0: i64, t1: i64, q: f32 }
@@ -53,45 +54,9 @@ fn liq_levels(bars: &[Bar]) -> Option<LiqMap> {
             }
         }
     }
+    // the estimator's segments as plain (price, from, until, size) for the crate's segment heat map
+    let segs = segs.iter().map(|s| Segment { px: (lo + (s.i % bins) as i64) as f64 * bin, t0: s.t0, t1: s.t1, q: s.q }).collect();
     Some(LiqMap { bin, lo, long, short, segs })
-}
-
-impl LiqMap {
-    /// Open mass (longs + shorts) per cell: `cols` columns of `ms` from `t0` (each column shows the
-    /// state at its end), `rows` rows from the bottom; `row` maps a price to its (fractional, unclamped)
-    /// row, any scale. A level fills the rows of its whole bin, so neighbours join into bands.
-    fn grid(&self, t0: i64, ms: i64, cols: usize, rows: usize, row: impl Fn(f64) -> f32) -> Vec<f32> {
-        let mut g = vec![0f32; cols * rows];
-        let n = self.long.len();
-        if cols == 0 || rows == 0 { return g; }
-        let span = cols as i64 * ms;
-        for s in &self.segs {
-            let px = (self.lo + (s.i % n) as i64) as f64 * self.bin;
-            let (a, b) = (row(px - self.bin / 2.0), row(px + self.bin / 2.0));
-            let (a, b) = (a.min(b), a.max(b));
-            if b < 0.0 || a >= rows as f32 { continue; }
-            let (r0, r1) = (a.max(0.0) as usize, (b.ceil() as usize).clamp(1, rows) - 1);
-            // the bin's mass spread over its rows, so a zoomed-in bin is not brighter than a small one
-            let q = s.q / (r1 - r0 + 1) as f32;
-            // column c (end te = t0 + (c+1) ms - 1) shows the segment when t0_seg <= te < t1_seg
-            let c0 = ((s.t0 - t0 + 1).max(0) + ms - 1) / ms - 1;
-            let c1 = (s.t1.min(t0 + span) - t0).div_euclid(ms) - 1;
-            for c in c0.max(0)..=c1.min(cols as i64 - 1) { for r in r0.max(0)..=r1.max(r0) { g[c as usize * rows + r] += q; } }
-        }
-        g
-    }
-}
-
-/// Magma-like ramp of the map (deep purple -> magenta -> orange -> pale yellow), opaque: an empty cell is the
-/// darkest stop, so the map reads as one surface with levels on it (as Hyperdash draws it), not lines on a hole.
-pub(super) fn magma(t: f32) -> Color32 {
-    const S: [(f32, [u8; 3]); 6] = [(0.0, [0x1e, 0x12, 0x33]), (0.3, [0x5a, 0x1d, 0x5e]), (0.55, [0xa3, 0x30, 0x6a]),
-        (0.75, [0xe0, 0x5a, 0x3a]), (0.9, [0xf5, 0xa0, 0x3a]), (1.0, [0xfd, 0xe8, 0x8a])];
-    let t = t.clamp(0.0, 1.0);
-    let k = S.iter().position(|s| s.0 >= t).unwrap_or(S.len() - 1).max(1);
-    let ((t0, a), (t1, b)) = (S[k - 1], S[k]);
-    let c = |x: [u8; 3]| Color32::from_rgb(x[0], x[1], x[2]);
-    lerp(c(a), c(b), (t - t0) / (t1 - t0))
 }
 
 #[derive(Default)]
@@ -102,8 +67,8 @@ pub(super) struct LiqCache {
     at: Option<std::time::Instant>,
     map: Option<LiqMap>,
     ver: u64,
-    /// heatmap texture and what it was drawn for (map version, view)
-    tex: Option<((u64, i64, i64, usize, u64, u64, usize), egui::TextureHandle, f32)>,
+    /// the time x price texture (crate)
+    heat: SegmentHeat,
 }
 
 impl LiqCache {
@@ -117,34 +82,11 @@ impl LiqCache {
         self.map.as_ref()
     }
 
-    /// The time x price heatmap texture for a view (rebuilt when the map or the view changes).
-    /// Cells scale to the 99th percentile so one stacked level does not wash out the rest.
+    /// The time x price heatmap texture for a view (`SegmentHeat`, rebuilt when the map or the view changes).
     #[allow(clippy::too_many_arguments)]
-    /// `view` identifies the price mapping (range and scale) for the cache.
     fn texture(&mut self, ctx: &egui::Context, t0: i64, ms: i64, cols: usize, rows: usize, view: (u64, u64, u8), row: impl Fn(f64) -> f32) -> Option<(egui::TextureId, f32)> {
-        let k = (self.ver, t0, ms, cols, view.0, view.1 ^ ((view.2 as u64) << 60), rows);
-        if let Some((kk, t, top)) = &self.tex { if *kk == k { return Some((t.id(), *top)); } }
-        // past the GPU's texture side (zoomed far out on 1m) wgpu panics: no map there
-        if cols.max(rows) > ctx.input(|i| i.max_texture_side) { return None; }
         let m = self.map.as_ref()?;
-        let g = m.grid(t0, ms, cols, rows, row);
-        let mut nz: Vec<f32> = g.iter().copied().filter(|v| *v > 0.0).collect();
-        if nz.is_empty() { self.tex = None; return None; }
-        let p = (nz.len() * 995 / 1000).min(nz.len() - 1);
-        let top = *nz.select_nth_unstable_by(p, f32::total_cmp).1;
-        let mut img = egui::ColorImage::filled([cols, rows], magma(0.0));
-        for c in 0..cols {
-            for r in 0..rows {
-                let v = g[c * rows + r];
-                if v <= 0.0 { continue; }
-                // linear: most of the map stays deep purple, only the real clusters run to orange and yellow
-                img.pixels[(rows - 1 - r) * cols + c] = magma((v / top).min(1.0));
-            }
-        }
-        let tex = match self.tex.take() { Some((_, mut t, _)) => { t.set(img, egui::TextureOptions::NEAREST); t } None => ctx.load_texture("liqheat", img, egui::TextureOptions::NEAREST) };
-        let id = tex.id();
-        self.tex = Some((k, tex, top));
-        Some((id, top))
+        self.heat.texture(ctx, &m.segs, m.bin, self.ver, t0, ms, cols, rows, view, row)
     }
 }
 
@@ -223,21 +165,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn magma_runs_dark_to_light() {
-        let l = |c: Color32| c.r() as u32 + c.g() as u32 + c.b() as u32;
-        let v: Vec<u32> = (0..=10).map(|i| l(magma(i as f32 / 10.0))).collect();
-        assert!(v.windows(2).all(|w| w[0] <= w[1]), "{v:?}");
-        assert_eq!(magma(1.0), Color32::from_rgb(0xfd, 0xe8, 0x8a));
-    }
-
-    #[test]
     fn liq_levels_open_and_sweep() {
         let bar = |t: i64, c: f64, vol: f64| Bar { t, o: c, h: c, l: c, c, vol, ..Default::default() };
         // time x price grid: column 0 (first bar's minute) holds all 20; the second bar trades down
         // to 60 and sweeps every long level above it, so column 1 keeps only the shorts (10)
         {
             let m = liq_levels(&[bar(0, 100.0, 20.0), Bar { t: 60_000, o: 100.0, h: 100.0, l: 60.0, c: 100.0, vol: 0.0, ..Default::default() }]).unwrap();
-            let g = m.grid(0, 60_000, 2, 1, |_| 0.5);
+            let g = charting::orderflow::segheat::grid(&m.segs, m.bin, 0, 60_000, 2, 1, |_| 0.5);
             assert!((g[0] - 20.0).abs() < 1e-3 && (g[1] - 10.0).abs() < 1e-3, "{g:?}");
         }
         let total = |m: &LiqMap| m.long.iter().chain(&m.short).sum::<f32>();

@@ -414,6 +414,29 @@ pub fn risk_gauge(p: &Painter, c: egui::Pos2, r: f32, risk: f32) {
 /// uniMMR as a gauge position: liquidation at 1.05 is the far right, 10 and above the far left.
 pub fn mmr_risk(uni_mmr: f64) -> f32 { ((1.0 / uni_mmr.max(1e-9) - 0.1) / (1.0 / 1.05 - 0.1)).clamp(0.0, 1.0) as f32 }
 
+/// The app's theme as the `charting` crate's style (set once per frame, before the chart draws).
+pub fn chart_style() -> charting::style::Style {
+    use charting::style::{Fonts, Palette, Style};
+    let n = |s: &str| FontFamily::Name(s.into());
+    Style {
+        palette: Palette {
+            bg: bg(), panel: panel(), panel2: panel2(), fg: fg(), fg_strong: fg_strong(), muted: mu(), dim: dim(),
+            line: line(), edge: edge(), hl: hl(), popup_bg: popup_bg(), label_bg: label_bg(), cross_bg: cross_bg(),
+            up: up(), down: dn(), accent: accent(), warn: WARN, purple: PURPLE,
+        },
+        fonts: Fonts { text: FontFamily::Proportional, text_m: n("m"), text_s: n("s"), num: FontFamily::Monospace, num_m: n("num-m"), num_s: n("num-s") },
+        radius: radius(),
+        light: light(),
+        text: |k| {
+            use charting::style::Text as T;
+            std::borrow::Cow::Borrowed(super::t(match k {
+                T::Bars => "draw.bars", T::PosTarget => "pos.target", T::PosStop => "pos.stop", T::PosLong => "pos.long",
+                T::PosShort => "pos.short", T::PosQty => "pos.qty", T::TextHint => "draw.text_hint", _ => return std::borrow::Cow::Borrowed(k.en()),
+            }))
+        },
+    }
+}
+
 /// Linear blend of two colors (t = 0 gives `a`), for hover / selection fades.
 pub fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);

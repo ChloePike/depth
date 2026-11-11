@@ -97,3 +97,7 @@ Theme = Design
 System = System
 Dark = Dunkel
 Light = Hell
+Binance perp only (direct mode) = Nur Binance-Perp (Direktmodus)
+Binance spot only (direct mode) = Nur Binance-Spot (Direktmodus)
+No Binance spot market (direct mode) = Kein Binance-Spot-Markt (Direktmodus)
+No Binance perp market (direct mode) = Kein Binance-Perp-Markt (Direktmodus)

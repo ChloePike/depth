@@ -97,3 +97,7 @@ Theme = Chủ đề
 System = Hệ thống
 Dark = Tối
 Light = Sáng
+Binance perp only (direct mode) = Chỉ hợp đồng vĩnh cửu Binance (chế độ trực tiếp)
+Binance spot only (direct mode) = Chỉ giao ngay Binance (chế độ trực tiếp)
+No Binance spot market (direct mode) = Binance không có thị trường giao ngay (chế độ trực tiếp)
+No Binance perp market (direct mode) = Binance không có thị trường vĩnh cửu (chế độ trực tiếp)

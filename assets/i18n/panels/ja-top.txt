@@ -97,3 +97,7 @@ Theme = テーマ
 System = システムに合わせる
 Dark = ダーク
 Light = ライト
+Binance perp only (direct mode) = Binance 無期限のみ（ダイレクトモード）
+Binance spot only (direct mode) = Binance 現物のみ（ダイレクトモード）
+No Binance spot market (direct mode) = Binance 現物市場なし（ダイレクトモード）
+No Binance perp market (direct mode) = Binance 無期限市場なし（ダイレクトモード）

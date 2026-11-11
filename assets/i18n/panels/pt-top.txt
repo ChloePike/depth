@@ -97,3 +97,7 @@ Theme = Tema
 System = Sistema
 Dark = Escuro
 Light = Claro
+Binance perp only (direct mode) = Apenas perpétuo da Binance (modo direto)
+Binance spot only (direct mode) = Apenas spot da Binance (modo direto)
+No Binance spot market (direct mode) = Sem mercado spot na Binance (modo direto)
+No Binance perp market (direct mode) = Sem mercado perpétuo na Binance (modo direto)
