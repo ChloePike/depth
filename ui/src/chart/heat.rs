@@ -85,7 +85,10 @@ impl HeatCache {
                 (*t, *blo, w)
             } else { (*t, *blo, v.iter().map(|q| q / (*n).max(1) as f32).collect()) }
         }).collect();
-        if vals.iter().all(|b| b.2.iter().all(|q| *q <= 0.0)) { return None; }
+        let mut qs: Vec<f32> = vals.iter().flat_map(|b| b.2.iter().copied().filter(|q| *q > 0.0)).collect();
+        if qs.is_empty() { return None; }
+        let p = (qs.len() * 995 / 1000).min(qs.len() - 1);
+        let qmax = qs.select_nth_unstable_by(p, f32::total_cmp).1.max(1e-9);
         let mut img = egui::ColorImage::new([cols, rows], vec![Color32::TRANSPARENT; cols * rows]);
         for (bt, blo, v) in &vals {
             let x = ((bt - t0) / ms) as usize;
@@ -94,7 +97,7 @@ impl HeatCache {
             for (k, q) in v.iter().enumerate() {
                 if *q <= 0.0 { continue; }
                 let med = meds[k];
-                let (i, c) = (((rows - 1 - (blo + k as i64 - lo) as usize / step) * cols + x), heat_color(heat_level(*q, med)));
+                let (i, c) = (((rows - 1 - (blo + k as i64 - lo) as usize / step) * cols + x), heat_color(heat_level(*q, med).max(BASE_MAX * (*q / qmax).min(1.0).sqrt())));
                 // merged bins keep the strongest (alpha rises with the level)
                 if c.a() >= img.pixels[i].a() { img.pixels[i] = c; }
             }
@@ -109,6 +112,11 @@ impl HeatCache {
         Some((id, geom))
     }
 }
+
+/// Every resting bin shows at least this much of the ramp by its size against the map's 99.5th percentile, so the book
+/// stays visible (walls alone left the map nearly empty, 2026-11-11); capped so the dense book at the price stays green,
+/// not yellow: only standing out of its neighbours (`heat_level`) reaches the top.
+const BASE_MAX: f32 = 0.45;
 
 /// Bins on each side a bin is compared with (`local_median`).
 const NEIGHBOURS: usize = 10;
@@ -134,9 +142,10 @@ fn local_median(v: &[f32], w: usize) -> Vec<f32> {
 const WALL_X: f32 = 16.0;
 fn heat_level(q: f32, med: f32) -> f32 { ((2.0 * q / med.max(1e-9)).ln() / (2.0 * WALL_X).ln()).clamp(0.0, 1.0) }
 
-/// CoinGlass-like ramp for liquidity, no blue: near-black purple (almost transparent) -> purple -> green -> yellow.
+/// Ramp for liquidity, no blue and no purple (the liquidation map under it is purple): transparent -> teal green ->
+/// yellow green -> yellow.
 fn heat_color(s: f32) -> Color32 {
-    const S: [(f32, [u8; 4]); 5] = [(0.0, [30, 10, 50, 0]), (0.35, [80, 30, 120, 70]), (0.65, [40, 175, 105, 190]),
+    const S: [(f32, [u8; 4]); 5] = [(0.0, [30, 120, 90, 0]), (0.3, [35, 150, 105, 70]), (0.6, [45, 185, 110, 170]),
         (0.85, [175, 220, 60, 235]), (1.0, [255, 236, 90, 255])];
     let s = s.clamp(0.0, 1.0);
     let k = S.iter().position(|x| x.0 >= s).unwrap_or(S.len() - 1).max(1);
