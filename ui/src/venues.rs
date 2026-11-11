@@ -180,9 +180,11 @@ impl VenuePages {
                 }
                 note(ui, l("EWMA of 1m returns, 60 min half-life"));
             });
-            card(ui, l("Pressure"), "", |ui| {
+            // describes the book and the flow now: a backtest (7 days, 7 bases, 2026-11-11) found no forecast in it, and
+            // "buyers / sellers in control" read like one
+            card(ui, l("Book / flow balance"), "", |ui| {
                 let p = f(&q["pressure"]).unwrap_or(0.0);
-                let (name, col) = if p > 20.0 { (l("Buyers in control"), up()) } else if p < -20.0 { (l("Sellers in control"), dn()) } else { (l("Balanced"), fg()) };
+                let (name, col) = if p > 20.0 { (l("Bid-heavy"), up()) } else if p < -20.0 { (l("Ask-heavy"), dn()) } else { (l("Balanced"), fg()) };
                 let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
                 let r = r.shrink2(vec2(2.0, 0.0));
                 ui.painter().text(r.left_center(), Align2::LEFT_CENTER, name, prop_s(13.0), col);
@@ -195,8 +197,9 @@ impl VenuePages {
                 ui.painter().rect_filled(fill, 2, if p >= 0.0 { up() } else { dn() });
                 ui.painter().vline(t.center().x, t.top() - 3.0..=t.bottom() + 3.0, Stroke::new(1.0, mu()));
                 ui.add_space(4.0);
-                kv(ui, l("Bids / asks ±0.5%"), &format!("${} / ${}", big(f(&q["book_bid_usd"]).unwrap_or(0.0)), big(f(&q["book_ask_usd"]).unwrap_or(0.0))), None);
-                note(ui, l("Book depth ±0.5% and 5 min aggressor flow; describes now, not a forecast"));
+                let band = format!("{:.2}%", f(&q["book_band"]).unwrap_or(0.005) * 100.0);
+                kv(ui, &lf("Bids / asks ±%s", &[band]), &format!("${} / ${}", big(f(&q["book_bid_usd"]).unwrap_or(0.0)), big(f(&q["book_ask_usd"]).unwrap_or(0.0))), None);
+                note(ui, l("Book depth within the band every venue covers (up to ±0.5%) and 5 min aggressor flow; describes now, not a forecast"));
             });
             card(ui, l("Carry"), "", |ui| {
                 let mut carry: Vec<&Value> = q["carry"].as_array().map(|a| a.iter().collect()).unwrap_or_default();

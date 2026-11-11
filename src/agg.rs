@@ -912,6 +912,18 @@ impl Agg {
     /// With `align`, each venue's book is first scaled so its own mid sits on the cross-venue
     /// mid: depth is then shown relative to each venue's price, so USDT perps and USD/USDC perps
     /// (a few bp apart) stack instead of crossing. Prices are then not directly executable.
+    /// The band around the mid (a fraction of it) that every live venue's book of `market` covers on both sides: the
+    /// shallowest venue's nearer far edge, at most `cap`, at least 0.1%. A wider band would sum deep books on one
+    /// side against venues that stop short (OKX / Bybit BTC show ±0.1-0.4%, Binance ±2%), skewing a bid / ask sum.
+    /// Feeds that reach under 0.1% (top-of-book streams) do not narrow it: they held BTC's band at the floor.
+    pub fn common_depth(&self, market: Market, cap: f64) -> f64 {
+        self.venues.iter().filter(|((_, m), v)| *m == market && self.live(v, market)).filter_map(|(_, v)| {
+            let vm = v.book_mid().filter(|m| *m > 0.0)?;
+            let (b, a) = (v.book.bids().last()?.0, v.book.asks().last()?.0);
+            Some(((vm - b) / vm).min((a - vm) / vm)).filter(|d| *d >= 1e-3)
+        }).fold(cap, f64::min).clamp(1e-3, cap.max(1e-3))
+    }
+
     pub fn book_where(&self, market: Market, bin: f64, range: f64, align: bool, keep: impl Fn(Exchange) -> bool) -> (Vec<Level>, Vec<Level>) {
         let Some(mid) = self.mid(market) else { return (vec![], vec![]) };
         let (lo, hi) = (mid * (1.0 - range), mid * (1.0 + range));
@@ -1364,6 +1376,20 @@ mod tests {
         assert!(a.basis_bps(Exchange::Binance).unwrap().abs() < 1e-9);
         // Bybit has no spot venue here: falls back to the cross-venue spot median (100.0)
         assert!(a.basis_bps(Exchange::Bybit).unwrap().abs() < 1e-9);
+    }
+
+    #[test]
+    fn common_depth_is_the_shallowest_venues_reach() {
+        let mut a = Agg::default();
+        // Binance reaches 2% on both sides, OKX 0.2% under the mid and 1% over it: the shared band is 0.2%
+        a.on(&msg(Exchange::Binance, Market::Perp, "X", 1, Event::Book { snapshot: true, bids: vec![(99.9, 1.0), (98.0, 1.0)], asks: vec![(100.1, 1.0), (102.0, 1.0)] }));
+        a.on(&msg(Exchange::Okx, Market::Perp, "X", 1, Event::Book { snapshot: true, bids: vec![(99.9, 1.0), (99.8, 1.0)], asks: vec![(100.1, 1.0), (101.0, 1.0)] }));
+        assert!((a.common_depth(Market::Perp, 0.005) - 0.002).abs() < 1e-9, "{}", a.common_depth(Market::Perp, 0.005));
+        // capped; a top-of-book feed (0.02% deep) does not narrow it
+        assert_eq!(a.common_depth(Market::Perp, 0.001), 0.001);
+        a.on(&msg(Exchange::Bybit, Market::Perp, "X", 1, Event::Book { snapshot: true, bids: vec![(99.99, 1.0), (99.98, 1.0)], asks: vec![(100.01, 1.0), (100.02, 1.0)] }));
+        assert!((a.common_depth(Market::Perp, 0.005) - 0.002).abs() < 1e-9);
+        assert_eq!(a.common_depth(Market::Spot, 0.005), 0.005);
     }
 
     #[test]

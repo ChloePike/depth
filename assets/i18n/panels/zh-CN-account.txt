@@ -252,6 +252,11 @@ Pressure = 多空压力
 Buyers in control = 买方主导
 Sellers in control = 卖方主导
 Balanced = 均衡
+Book / flow balance = 盘口 / 成交平衡
+Bid-heavy = 买盘偏重
+Ask-heavy = 卖盘偏重
+Bids / asks ±%s = 买盘 / 卖盘 ±%s
+Book depth within the band every venue covers (up to ±0.5%) and 5 min aggressor flow; describes now, not a forecast = 各交易所盘口都覆盖的范围内（最多 ±0.5%）的挂单深度，加上最近 5 分钟的主动成交；描述当下，不是预测
 Bids / asks ±0.5% = 买盘 / 卖盘 ±0.5%
 Carry = 资金成本
 Predicted funding, annualized; basis: perp over spot = 预测资金费率（年化）；基差 = 合约相对现货

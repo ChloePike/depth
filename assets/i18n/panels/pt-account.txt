@@ -241,6 +241,11 @@ Pressure = Pressão
 Buyers in control = Compradores no controle
 Sellers in control = Vendedores no controle
 Balanced = Equilibrado
+Book / flow balance = Equilíbrio livro / fluxo
+Bid-heavy = Livro pesado na compra
+Ask-heavy = Livro pesado na venda
+Bids / asks ±%s = Compras / vendas ±%s
+Book depth within the band every venue covers (up to ±0.5%) and 5 min aggressor flow; describes now, not a forecast = Profundidade do livro na faixa coberta por todas as corretoras (até ±0,5 %) e fluxo agressor de 5 min; descreve o agora, não é previsão
 Bids / asks ±0.5% = Bids / asks ±0.5%
 Carry = Carry
 Predicted funding, annualized; basis: perp over spot = Funding previsto, anualizado; base = perp sobre spot

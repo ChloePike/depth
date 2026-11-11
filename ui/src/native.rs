@@ -181,7 +181,9 @@ impl App {
             let bars: Vec<depth::agg::Bar> = ag.series.get(&(None, m)).map(|s| s.bars.iter().cloned().collect()).unwrap_or_default();
             let vm = depth::quant::vol_model(&bars);
             let mid = ag.mid(m).unwrap_or(0.0);
-            let (b, k) = ag.book_where(m, depth::agg::nice(mid.max(1e-9) * 1e-4), 0.005, true, |_| true);
+            // the band every venue's book covers on both sides (up to ±0.5%): deeper books do not outweigh short ones
+            let band = ag.common_depth(m, 0.005);
+            let (b, k) = ag.book_where(m, depth::agg::nice(mid.max(1e-9) * 1e-4), band, true, |_| true);
             let usd = |ls: &[depth::agg::Level]| ls.iter().map(|l| l.qty * l.px).sum::<f64>();
             let carry: Vec<Value> = ag.venues.iter().filter(|((_, vm2), _)| *vm2 == Market::Perp).map(|((e, _), v)| json!({
                 "ex": ex_name(*e), "funding_apr": v.funding_h.map(|f| f * 24.0 * 365.0 * 100.0), "basis_bps": ag.basis_bps(*e),
@@ -190,7 +192,7 @@ impl App {
                 "vol": vm.map(|v| json!({"sigma_1h": v.sigma_1h, "sigma_24h": v.sigma_24h, "percentile": v.percentile,
                     "range_1h": [mid * (1.0 - v.sigma_1h), mid * (1.0 + v.sigma_1h)], "range_24h": [mid * (1.0 - v.sigma_24h), mid * (1.0 + v.sigma_24h)]})),
                 "pressure": depth::quant::pressure(usd(&b), usd(&k), &bars, 5),
-                "book_bid_usd": usd(&b), "book_ask_usd": usd(&k), "carry": carry,
+                "book_bid_usd": usd(&b), "book_ask_usd": usd(&k), "book_band": band, "carry": carry,
             })
         };
         json!({

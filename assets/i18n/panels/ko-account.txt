@@ -241,6 +241,11 @@ Pressure = 수급 압력
 Buyers in control = 매수 우위
 Sellers in control = 매도 우위
 Balanced = 균형
+Book / flow balance = 호가 / 체결 균형
+Bid-heavy = 매수 호가 우위
+Ask-heavy = 매도 호가 우위
+Bids / asks ±%s = 매수 / 매도 호가 ±%s
+Book depth within the band every venue covers (up to ±0.5%) and 5 min aggressor flow; describes now, not a forecast = 모든 거래소 호가가 포함하는 범위(최대 ±0.5%)의 호가 깊이와 최근 5분 공격적 체결 흐름. 현재를 보여줄 뿐 예측이 아닙니다
 Bids / asks ±0.5% = 매수 / 매도 호가 ±0.5%
 Carry = 캐리
 Predicted funding, annualized; basis: perp over spot = 예상 펀딩비(연환산). 베이시스 = 무기한 대비 현물
