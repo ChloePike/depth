@@ -812,7 +812,8 @@ dependencies = [
 [[package]]
 name = "charting"
 version = "0.1.0"
-source = "git+https://github.com/ChloePike/charting?rev=8a89cb2b757457f6c9f771e63ff23d633d196c82#8a89cb2b757457f6c9f771e63ff23d633d196c82"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88abdce0c1a52d13b95e4383b0ca4c8226e1144095d6e4e220205996b2741706"
 dependencies = [
  "egui",
  "serde",
