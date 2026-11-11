@@ -388,7 +388,16 @@ impl Chart {
             let r = painter.text(pos2(x, yy), Align2::LEFT_CENTER, k, prop_m(12.0), dim());
             painter.text(pos2(r.right() + 4.0, yy), Align2::LEFT_CENTER, v, mono_m(12.0), col).right() + 14.0
         };
+        // each row on a panel-coloured backing (a slot reserved before its text, sized after): the maps reach up under
+        // the legend, and their colours made the text unreadable; on a plain chart it matches the panel
+        let back = |slot: egui::layers::ShapeIdx, y: f32, x1: f32| {
+            if x1 > main.left() + 10.0 {
+                let r = Rect::from_min_max(pos2(main.left() + 2.0, y - 9.0), pos2(x1 - 8.0, y + 9.0));
+                painter.set(slot, egui::Shape::rect_filled(r, 3, panel().gamma_multiply(0.78)));
+            }
+        };
         let y1 = main.top() + 14.0;
+        let slot1 = painter.add(egui::Shape::Noop);
         let mut lx = main.left() + 6.0;
         if self.multi {
             let tf = TFS.iter().find(|(m, _)| *m == self.tf).map_or("", |x| x.1);
@@ -397,22 +406,27 @@ impl Chart {
         lx = painter.text(pos2(lx, y1), Align2::LEFT_CENTER, fmt_time_full(b.t), mono_m(12.0), mu()).right() + 14.0;
         for (k, v) in [("chart.o", b.o), ("chart.h", b.h), ("chart.l", b.l), ("chart.c", b.c)] { lx = kv(lx, y1, t(k), fmt_px(v), c); }
         lx = kv(lx, y1, t("chart.chg"), format!("{chg:+.2}%"), c);
-        kv(lx, y1, t("chart.range"), format!("{range:.2}%"), c);
+        let x1 = kv(lx, y1, t("chart.range"), format!("{range:.2}%"), c);
+        back(slot1, y1, x1);
         let y2 = main.top() + 33.0;
+        let slot2 = painter.add(egui::Shape::Noop);
         let mut lx = main.left() + 6.0;
         for (m, l) in &mas {
             lx = kv(lx, y2, &format!("{}({})", if l.ema { "EMA" } else { "MA" }, l.n), m[hi_idx].map(fmt_px).unwrap_or("-".into()), rgb(l.col));
         }
         if lmax > 0.0 {
-            kv(lx, y2, t("chart.liq"), format!("{} / {}", fmt_big(b.liq_long), fmt_big(b.liq_short)), dim());
+            lx = kv(lx, y2, t("chart.liq"), format!("{} / {}", fmt_big(b.liq_long), fmt_big(b.liq_short)), dim());
         }
+        back(slot2, y2, lx);
         // the overlay row moves up when there is no MA / liquidation row
         let y3 = main.top() + if mas.is_empty() && lmax <= 0.0 { 33.0 } else { 52.0 };
+        let slot3 = painter.add(egui::Shape::Noop);
         let mut lx = main.left() + 6.0;
         for (k, v, col) in &legend3 {
             painter.circle_filled(pos2(lx + 3.0, y3), 3.0, *col);
             lx = kv(lx + 10.0, y3, k, v.clone(), *col);
         }
+        back(slot3, y3, lx);
         if loading_tf {
             painter.text(pos2(main.left() + 6.0, main.top() + 80.0), Align2::LEFT_CENTER, t("chart.loading"), prop_m(12.0), WARN);
         }
