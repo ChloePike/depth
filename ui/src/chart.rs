@@ -439,8 +439,9 @@ impl Chart {
         let gdp = if gdp_step.is_finite() && gdp_step > 0.0 { super::step_dp(gdp_step) } else { 2 };
         let cx = Cx { a, market, smarket, live, editing, loading_tf, raw: &raw, bars: &bars, vis, i0, i1, rect, plot_w, main, main_plot, fr: &fr, ps, lo, hi, resp: &resp, painter: &painter, gv: &gv, gdp_step, gdp, base_px, pct };
 
-        self.backdrop(ui, &cx);
+        // the liquidation map is opaque (Hyperdash style): it goes first, so the grid and the book heatmap stay on top of it
         let liq_legend = self.liq_layer(ui, &cx);
+        self.backdrop(ui, &cx);
 
         // label layout: the last-price axis tag and the bid/ask box are placed first; every other
         // label moves up or down until it overlaps none of them (place())
@@ -457,7 +458,11 @@ impl Chart {
         let mut taken: Vec<Rect> = vec![Rect::from_min_size(pos2(main.right() + 2.0, last_ly - 10.0), vec2(AXIS_W - 4.0, 34.0))];
         // third legend row: each overlay's name, colour and current value, so no line needs guessing
         let mut legend3: Vec<(String, String, Color32)> = vec![];
-        if let Some(c) = liq_legend { legend3.push((super::l("Liquidation map").into(), super::l("above: shorts · below: longs").into(), c)); }
+        if let Some((c, usd)) = liq_legend {
+            // the colour scale in words: dark purple $0, pale yellow this much (Hyperdash draws it as a bar)
+            let scale = usd.map_or(String::new(), |u| format!(" · $0 – ${}", fmt_usd_short(u)));
+            legend3.push((super::l("Liquidation map").into(), format!("{}{scale}", super::l("above: shorts · below: longs")), c));
+        }
         if let Some(r) = ba_rect { taken.push(r.expand(2.0)); }
         // the tags that matter most are reserved before any context level: mark price, then the
         // account's own position / order lines (drawn later, in their reserved slots)

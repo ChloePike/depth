@@ -67,7 +67,7 @@ pub struct Prefs {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { theme: ThemePref::System, tz_min: None, accent: [0x4c, 0x9e, 0xeb], red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into(), risk: Default::default(), demo: false, demo_balance: depth::demo::START_BALANCE, hunter: true, hunter_notify: false, tp_roe: false, sl_roe: false, scripts: true }
+        Prefs { theme: ThemePref::System, tz_min: None, accent: ORANGE, red_up: false, zoom: 1.0, radius: 4, confirm: true, fees: BTreeMap::new(), hl_flowscan: false, book_tape: true, tray: true, proxy: ProxyMode::None, proxy_url: String::new(), hotkeys: super::hotkeys::defaults(), hot_usdt: 0.0, hot_loan: 0, terminal: false, fill_sound: "depth:bell".into(), risk: Default::default(), demo: false, demo_balance: depth::demo::START_BALANCE, hunter: true, hunter_notify: false, tp_roe: false, sl_roe: false, scripts: true }
     }
 }
 
@@ -75,11 +75,12 @@ impl Default for Prefs {
 #[serde(rename_all = "lowercase")]
 pub enum ThemePref { #[default] System, Dark, Light }
 
-// TradingView-style teal / coral (calmer than the system neon pair)
-const GREEN: Color32 = Color32::from_rgb(0x26, 0xa6, 0x9a);
-const RED: Color32 = Color32::from_rgb(0xef, 0x53, 0x50);
-const ACCENTS: [(&str, [u8; 3]); 6] = [("Blue", [0x4c, 0x9e, 0xeb]), ("Gold", [0xf0, 0xb9, 0x0b]), ("Violet", [0x9b, 0x8c, 0xf0]),
-    ("Teal", [0x2e, 0xc4, 0xb6]), ("Orange", [0xf5, 0x8a, 0x3d]), ("Pink", [0xe0, 0x5b, 0xc4])];
+/// no blue: the warm palette (theme.rs) reads off with a blue accent
+const ACCENTS: [(&str, [u8; 3]); 5] = [("Orange", ORANGE), ("Gold", [0xf0, 0xb9, 0x0b]), ("Violet", [0x9b, 0x8c, 0xf0]),
+    ("Teal", [0x2e, 0xc4, 0xb6]), ("Pink", [0xe0, 0x5b, 0xc4])];
+const ORANGE: [u8; 3] = [0xf5, 0x8a, 0x3d];
+/// the old default accent, still in saved settings: shown as the new default
+const OLD_BLUE: [u8; 3] = [0x4c, 0x9e, 0xeb];
 /// Bloomberg-like amber of the terminal style
 const AMBER: [u8; 3] = [0xfb, 0x8b, 0x1e];
 const DEFAULT_FEES: (f64, f64) = (0.055, 0.02);
@@ -94,9 +95,8 @@ pub fn fee(ex: Exchange) -> (f64, f64) {
 
 impl Prefs {
     pub fn apply(&self, ctx: &egui::Context) {
-        let [r, g, b] = self.accent;
-        let (u, d) = if self.red_up { (RED, GREEN) } else { (GREEN, RED) };
-        set_palette(Color32::from_rgb(r, g, b), u, d);
+        let [r, g, b] = if self.accent == OLD_BLUE { ORANGE } else { self.accent };
+        set_palette(Color32::from_rgb(r, g, b), self.red_up);
         super::set_tz(self.tz_min);
         ctx.set_theme(match self.theme { ThemePref::System => egui::ThemePreference::System, ThemePref::Dark => egui::ThemePreference::Dark, ThemePref::Light => egui::ThemePreference::Light });
         ctx.set_zoom_factor(self.zoom.clamp(0.85, 1.3));

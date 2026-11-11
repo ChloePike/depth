@@ -20,42 +20,44 @@ pub fn radius() -> u8 { RADIUS.load(Relaxed) }
 const fn pick(d: Color32, l: Color32, light: bool) -> Color32 { if light { l } else { d } }
 /// Translucent overlays (white on dark, black on light): they read the same on any panel.
 const fn veil(a: u8, light: bool) -> Color32 { if light { Color32::from_rgba_premultiplied(0, 0, 0, a) } else { Color32::from_rgba_premultiplied(a, a, a, a) } }
-pub fn panel2() -> Color32 { veil(if light() { 8 } else { 13 }, light()) }
-pub fn hl() -> Color32 { veil(if light() { 14 } else { 23 }, light()) }
-pub fn line() -> Color32 { veil(if light() { 22 } else if term() { 40 } else { 28 }, light()) }
+pub fn panel2() -> Color32 { veil(if light() { 8 } else { 10 }, light()) }
+pub fn hl() -> Color32 { veil(if light() { 14 } else { 18 }, light()) }
+pub fn line() -> Color32 { veil(if light() { 15 } else if term() { 30 } else { 20 }, light()) }
 pub fn grid() -> Color32 { veil(if light() { 10 } else { 14 }, light()) }
 /// stronger hairline (selected segment, hovered widget)
-pub fn edge() -> Color32 { veil(if light() { 38 } else { 46 }, light()) }
-pub fn fg() -> Color32 { pick(Color32::from_rgb(0xdb, 0xdb, 0xdb), Color32::from_rgb(0x1d, 0x1d, 0x1f), light()) }
+pub fn edge() -> Color32 { veil(if light() { 26 } else { 41 }, light()) }
+pub fn fg() -> Color32 { pick(Color32::from_rgb(0xd5, 0xd1, 0xcd), Color32::from_rgb(0x26, 0x24, 0x22), light()) }
 /// strongest text: selected tabs, headline values
-pub fn fg_strong() -> Color32 { pick(Color32::from_rgb(0xf2, 0xf2, 0xf2), Color32::from_rgb(0x0b, 0x0b, 0x0c), light()) }
-pub fn mu() -> Color32 { pick(Color32::from_rgb(0x8c, 0x8c, 0x8c), Color32::from_rgb(0x6e, 0x6e, 0x73), light()) }
-pub fn dim() -> Color32 { pick(Color32::from_rgb(0x5e, 0x5e, 0x5e), Color32::from_rgb(0x9a, 0x9a, 0xa0), light()) }
+pub fn fg_strong() -> Color32 { pick(Color32::WHITE, Color32::from_rgb(0x19, 0x16, 0x13), light()) }
+pub fn mu() -> Color32 { pick(Color32::from_rgb(0x92, 0x8d, 0x86), Color32::from_rgb(0x72, 0x6e, 0x68), light()) }
+pub fn dim() -> Color32 { pick(Color32::from_rgb(0x72, 0x6e, 0x68), Color32::from_rgb(0x92, 0x8d, 0x86), light()) }
 /// opaque fill for labels painted over the chart
 /// crosshair tags on the axes (white text on it in both themes, as TradingView does)
-pub fn cross_bg() -> Color32 { pick(Color32::from_rgb(0x38, 0x38, 0x38), Color32::from_rgb(0x13, 0x17, 0x22), light()) }
-pub fn label_bg() -> Color32 { pick(Color32::from_rgb(0x1c, 0x1c, 0x1c), Color32::from_rgb(0xe8, 0xe8, 0xed), light()) }
+pub fn cross_bg() -> Color32 { pick(Color32::from_rgb(0x33, 0x31, 0x2f), Color32::from_rgb(0x26, 0x24, 0x22), light()) }
+pub fn label_bg() -> Color32 { pick(Color32::from_rgb(0x26, 0x24, 0x22), Color32::from_rgb(0xef, 0xed, 0xec), light()) }
 /// off-state track of switches and sliders
-pub fn track() -> Color32 { pick(Color32::from_rgb(0x38, 0x38, 0x38), Color32::from_rgb(0xd1, 0xd1, 0xd6), light()) }
+pub fn track() -> Color32 { pick(Color32::from_rgb(0x33, 0x31, 0x2f), Color32::from_rgb(0xe5, 0xe3, 0xe1), light()) }
 /// the window behind the panels: the gutters between them read as black seams
-pub fn bg() -> Color32 { pick(if term() { Color32::BLACK } else { Color32::from_rgb(0x05, 0x05, 0x05) }, Color32::from_rgb(0xe9, 0xe9, 0xec), light()) }
+pub fn bg() -> Color32 { pick(if term() { Color32::BLACK } else { Color32::from_rgb(0x10, 0x0e, 0x0a) }, Color32::from_rgb(0xef, 0xed, 0xec), light()) }
 /// Opaque fill of popups, menus and windows (the panel veils are translucent and would show what is under them).
-pub fn popup_bg() -> Color32 { pick(Color32::from_rgb(0x1c, 0x1c, 0x1c), Color32::from_rgb(0xff, 0xff, 0xff), light()) }
-pub fn panel() -> Color32 { pick(if term() { Color32::BLACK } else { Color32::from_rgb(0x0f, 0x0f, 0x0f) }, Color32::WHITE, light()) }
+pub fn popup_bg() -> Color32 { pick(Color32::from_rgb(0x1d, 0x1a, 0x18), Color32::WHITE, light()) }
+pub fn panel() -> Color32 { pick(if term() { Color32::BLACK } else { Color32::from_rgb(0x14, 0x12, 0x10) }, Color32::from_rgb(0xf7, 0xf6, 0xf5), light()) }
 /// input wells (text fields): a step darker than controls
-pub fn well() -> Color32 { pick(if term() { Color32::from_rgb(0x0b, 0x0b, 0x0b) } else { Color32::from_rgb(0x12, 0x12, 0x12) }, Color32::from_rgb(0xf6, 0xf6, 0xf8), light()) }
+pub fn well() -> Color32 { pick(if term() { Color32::from_rgb(0x10, 0x0e, 0x0a) } else { Color32::from_rgb(0x19, 0x16, 0x13) }, Color32::from_rgb(0xf3, 0xf2, 0xf1), light()) }
 
 /// User-adjustable colors (Settings > Appearance), packed 0xRRGGBB; read every frame.
-static ACCENT_C: AtomicU32 = AtomicU32::new(0x4c9eeb);
-static UP_C: AtomicU32 = AtomicU32::new(0x26a69a);
-static DN_C: AtomicU32 = AtomicU32::new(0xef5350);
+static ACCENT_C: AtomicU32 = AtomicU32::new(0xf58a3d);
+static RED_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// green / red per theme: brighter on dark so text reads, deeper on light
+const GREEN: (Color32, Color32) = (Color32::from_rgb(0x5c, 0xc0, 0x9b), Color32::from_rgb(0x38, 0xa6, 0x7c));
+const RED: (Color32, Color32) = (Color32::from_rgb(0xd4, 0x4b, 0x62), Color32::from_rgb(0xbc, 0x26, 0x3e));
 fn unpack(v: u32) -> Color32 { Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8) }
 pub fn pack(c: Color32) -> u32 { (c.r() as u32) << 16 | (c.g() as u32) << 8 | c.b() as u32 }
 pub fn accent() -> Color32 { unpack(ACCENT_C.load(Relaxed)) }
 /// Rising / buy color (green by default; red when the user picks red-up).
-pub fn up() -> Color32 { unpack(UP_C.load(Relaxed)) }
-pub fn dn() -> Color32 { unpack(DN_C.load(Relaxed)) }
-pub fn set_palette(accent: Color32, up: Color32, dn: Color32) { ACCENT_C.store(pack(accent), Relaxed); UP_C.store(pack(up), Relaxed); DN_C.store(pack(dn), Relaxed); }
+pub fn up() -> Color32 { let c = if RED_UP.load(Relaxed) { RED } else { GREEN }; pick(c.0, c.1, light()) }
+pub fn dn() -> Color32 { let c = if RED_UP.load(Relaxed) { GREEN } else { RED }; pick(c.0, c.1, light()) }
+pub fn set_palette(accent: Color32, red_up: bool) { ACCENT_C.store(pack(accent), Relaxed); RED_UP.store(red_up, Relaxed); }
 pub const WARN: Color32 = Color32::from_rgb(0xe8, 0xa3, 0x3d);
 pub const PURPLE: Color32 = Color32::from_rgb(0x9b, 0x8c, 0xf0);
 

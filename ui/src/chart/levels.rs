@@ -240,17 +240,17 @@ impl Chart {
                     for (j, d) in [-2.0, -1.0, 0.0, 1.0, 2.0].iter().enumerate() { lines[j].push(pos2(x, y(m + d * sd))); }
                 }
                 let clip = painter.with_clip_rect(main_plot);
-                let cyan = Color32::from_rgb(0x4f, 0xc3, 0xf7);
+                let vwap_c = fg();
                 for (j, pts) in lines.into_iter().enumerate() {
                     if pts.len() < 2 { continue; }
                     let (wdt, a) = match j { 2 => (1.5, 0.9), 1 | 3 => (0.8, 0.32), _ => (0.8, 0.18) };
-                    clip.add(egui::Shape::line(pts, Stroke::new(wdt, cyan.linear_multiply(a))));
+                    clip.add(egui::Shape::line(pts, Stroke::new(wdt, vwap_c.linear_multiply(a))));
                 }
                 if let Some(&(_, m, sd)) = vw.last() {
-                    legend3.push(("VWAP".into(), format!("{}  ±1σ {} – {}", fmt_px(m), fmt_px(m - sd), fmt_px(m + sd)), cyan));
+                    legend3.push(("VWAP".into(), format!("{}  ±1σ {} – {}", fmt_px(m), fmt_px(m - sd), fmt_px(m + sd)), vwap_c));
                     if let Some(r) = (m > lo && m < hi).then(|| try_place(Rect::from_min_size(pos2(main.right() + 2.0, y(m) - 9.0), vec2(AXIS_W - 4.0, 18.0)), &mut taken)).flatten() {
-                        painter.rect_filled(r, 3, cyan.linear_multiply(0.85));
-                        painter.text(r.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(m), mono_m(11.0), Color32::BLACK);
+                        painter.rect_filled(r, 3, vwap_c.linear_multiply(0.85));
+                        painter.text(r.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_px(m), mono_m(11.0), panel());
                     }
                 }
             }

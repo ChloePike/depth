@@ -66,16 +66,21 @@ impl Chart {
         // candles
         // with the footprint: a strip left of the column (style 0), or a normal candle left of the cells (style 1)
         let (bw, shift) = match (fp_on, self.fp_style) {
-            (false, _) => ((self.bar_w * 0.7).max(1.0), 0.0),
+            (false, _) => (tv_body_px(self.bar_w, painter.ctx().pixels_per_point()), 0.0),
             (true, 1) => ((self.bar_w * 0.3).max(1.0), self.bar_w * 0.2),
             (true, _) => ((self.bar_w * 0.06).clamp(1.5, 4.0), self.bar_w * 0.42),
         };
+        let ppp = painter.ctx().pixels_per_point();
+        // plain candles snap to device pixels the TradingView way (`tv_body_px`; was 70%, fractional: soft edges, gaps
+        // one pixel off from bar to bar, the wick off centre)
+        let snap = |v: f32| (v * ppp).round() / ppp;
         for (k, b) in vis.iter().enumerate() {
             let x = fr.x((i0 + k) as f32) - shift;
             let col = if b.c >= b.o { up() } else { dn() };
-            painter.vline(x, y(b.h)..=y(b.l), Stroke::new(1.0, col));
-            let (top, bot) = (y(b.o.max(b.c)), y(b.o.min(b.c)));
-            painter.rect_filled(Rect::from_min_max(pos2(x - bw / 2.0, top), pos2(x + bw / 2.0, bot.max(top + 1.0))), 0, col);
+            let c = candle_px(x, bw, self.bar_w, ppp);
+            painter.rect_filled(Rect::from_min_max(pos2(c.wick.0, snap(y(b.h))), pos2(c.wick.1, snap(y(b.l)).max(snap(y(b.h)) + 1.0 / ppp))), 0, col);
+            let (top, bot) = (snap(y(b.o.max(b.c))), snap(y(b.o.min(b.c))));
+            painter.rect_filled(Rect::from_min_max(pos2(c.body.0, top), pos2(c.body.1, bot.max(top + 1.0 / ppp))), 0, col);
         }
 
         // moving averages of the close, computed over every loaded bar so the left edge is right
@@ -432,6 +437,60 @@ impl Chart {
                 painter.galley(pos2(r.left() + 30.0, r.center().y - g.size().y / 2.0), g, fg_strong().gamma_multiply(ease));
                 if t < 1.0 { ui.ctx().request_repaint(); } else { ui.ctx().request_repaint_after(left.saturating_sub(std::time::Duration::from_millis(400))); }
             } else { self.toast = None; }
+        }
+    }
+}
+
+/// A candle's body and wick spans (x, in points) on whole device pixels: the wick one point wide (whole pixels), the body `bw` wide (at most
+/// the spacing) rounded down to the wick's parity so the wick sits in its exact middle.
+pub(super) struct CandlePx { pub body: (f32, f32), pub wick: (f32, f32) }
+
+/// TradingView's candle body width (lightweight-charts `optimalCandlestickWidth`), in points: nearly the whole spacing
+/// when bars are dense, easing to 80% as they spread (1 - 0.2 * atan(spacing - 4) / (pi / 2)), 3 px between 2.5 and 4,
+/// no gap kept, so dense candles touch as they do there (a fixed 80% with a 1 px gap read loose next to it).
+pub(super) fn tv_body_px(spacing: f32, ppp: f32) -> f32 {
+    if (2.5..=4.0).contains(&spacing) { return (3.0 * ppp).floor() / ppp; }
+    let coeff = 1.0 - 0.2 * (spacing.max(4.0) - 4.0).atan() / std::f32::consts::FRAC_PI_2;
+    (spacing * coeff * ppp).floor().min((spacing * ppp).floor()).max(ppp.floor()) / ppp
+}
+
+pub(super) fn candle_px(x: f32, bw: f32, spacing: f32, ppp: f32) -> CandlePx {
+    let wick = ppp.floor().max(1.0);
+    let mut body = (bw * ppp).floor().min((spacing * ppp).floor()).max(wick);
+    if (body - wick) % 2.0 != 0.0 { body -= 1.0; }
+    let body = body.max(wick);
+    let c = (x * ppp - wick / 2.0).round();
+    let l = c - (body - wick) / 2.0;
+    CandlePx { body: (l / ppp, (l + body) / ppp), wick: (c / ppp, (c + wick) / ppp) }
+}
+
+#[cfg(test)]
+mod candle_tests {
+    use super::candle_px;
+
+    #[test]
+    fn body_width_follows_tradingview() {
+        // dense bars nearly fill the spacing, wide ones ease to 80%
+        assert_eq!(super::tv_body_px(3.0, 2.0), 3.0);
+        assert!(super::tv_body_px(7.0, 2.0) >= 5.5, "{}", super::tv_body_px(7.0, 2.0));
+        let w = super::tv_body_px(42.0, 1.0);
+        assert!((33.0..=34.0).contains(&w), "{w}");
+    }
+
+    #[test]
+    fn candles_sit_on_pixels_with_a_centred_wick() {
+        for ppp in [1.0f32, 2.0] {
+            for spacing in [2.0f32, 3.3, 7.0, 10.6, 25.0] {
+                for x in [100.0f32, 100.37, 101.5] {
+                    let c = candle_px(x, super::tv_body_px(spacing, ppp), spacing, ppp);
+                    let px = |v: f32| v * ppp;
+                    for v in [c.body.0, c.body.1, c.wick.0, c.wick.1] { assert!((px(v) - px(v).round()).abs() < 1e-3, "{ppp} {spacing} {x}: {v}"); }
+                    // the wick in the exact middle of the body
+                    assert!(((c.wick.0 - c.body.0) - (c.body.1 - c.wick.1)).abs() < 1e-4, "{ppp} {spacing} {x}");
+                    // never wider than the spacing (neighbours may touch, as on TradingView)
+                    assert!(px(c.body.1 - c.body.0) <= (spacing * ppp).floor(), "{ppp} {spacing}");
+                }
+            }
         }
     }
 }
