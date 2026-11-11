@@ -407,6 +407,14 @@ fn layout_cells(layout: &str, r: egui::Rect) -> Vec<egui::Rect> {
     }
 }
 
+/// The market a cell pinned to another symbol shows in `mode`: the spot market for Spot and Margin, else the perp.
+fn cell_market(mode: Market) -> Market { if matches!(mode, Market::Spot | Market::Margin) { Market::Spot } else { Market::Perp } }
+
+/// A pinned cell's actions: all dropped (no orders of its own symbol here) but its scroll-back requests, returned.
+fn cell_older(acts: &mut Vec<chart::ChartAct>) -> Vec<u32> {
+    acts.drain(..).filter_map(|a| match a { chart::ChartAct::Older(tf) => Some(tf as u32), _ => None }).collect()
+}
+
 /// A press made `cell` the active chart: the two swap. A cell of another symbol makes that symbol the active one
 /// (returned, for the engine), and the chart that was active keeps showing `base` as a pinned cell.
 fn activate(active: &mut chart::Chart, cell: &mut chart::Chart, base: &str) -> Option<String> {
@@ -1011,9 +1019,14 @@ impl App {
     /// Orders and triggers dragged on a chart, and prices put into the order panel from it.
     fn chart_actions(&mut self, ctx: &egui::Context) {
         let mut acts = std::mem::take(&mut self.chart.actions);
-        // a cell of another symbol has no orders here: its clicks must not reach the active symbol's order panel
+        // a cell of another symbol has no orders here: its clicks must not reach the active symbol's order panel; its
+        // scroll-back goes to its own feed
         let base = self.eng.base.clone();
-        for o in self.others.iter_mut() { if o.1.sym.is_empty() || o.1.sym == base { acts.append(&mut o.1.actions) } else { o.1.actions.clear() } }
+        for o in self.others.iter_mut() {
+            if o.1.sym.is_empty() || o.1.sym == base { acts.append(&mut o.1.actions); continue }
+            let older = cell_older(&mut o.1.actions);
+            if let Some(f) = self.feeds.get(&o.1.sym) { for tf in older { f.ensure_older(tf, ctx) } }
+        }
         for act in acts {
             match act {
                 chart::ChartAct::Fill(px) => self.trade.fill = Some((self.trade.ex, px)),
@@ -1054,16 +1067,17 @@ impl App {
         }
     }
 
-    /// One feed per symbol a visible cell pins (none in a one-chart layout); a feed whose symbol left the layout
-    /// closes.
+    /// One feed per symbol a visible cell pins (none in a one-chart layout); a feed whose symbol left the layout, or
+    /// that runs another market than the mode's, closes.
     fn cell_feeds(&mut self, n: usize, ctx: &egui::Context) {
         let base = &self.eng.base;
         let want: Vec<(String, i64)> = if n < 2 { vec![] } else {
             self.others.iter().filter(|o| o.0 < n && !o.1.sym.is_empty() && o.1.sym != *base).map(|o| (o.1.sym.clone(), o.1.tf)).collect()
         };
-        self.feeds.retain(|b, _| want.iter().any(|w| w.0 == *b));
+        let market = cell_market(self.mode);
+        self.feeds.retain(|b, f| want.iter().any(|w| w.0 == *b) && f.market == market);
         for (b, tf) in want {
-            let f = self.feeds.entry(b.clone()).or_insert_with(|| self.eng.cell_feed(&b, ctx));
+            let f = self.feeds.entry(b.clone()).or_insert_with(|| self.eng.cell_feed(&b, market, ctx));
             f.ensure_tf(chart::native_tf(tf) as u32, ctx);
         }
         // T1_DIAG: each feed's state every 5 s (checks without a screen)
@@ -1072,9 +1086,9 @@ impl App {
             DIAG_AT.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
             for (b, f) in &self.feeds {
                 let a = f.agg.lock().unwrap();
-                let bars = a.series.get(&(None, Market::Perp)).map(|s| (s.bars.len(), s.bars.back().map(|x| x.c)));
+                let bars = a.series.get(&(None, f.market)).map(|s| (s.bars.len(), s.bars.back().map(|x| x.c), s.bars.front().map(|x| x.t)));
                 let venues: Vec<_> = a.venues.keys().map(|(e, _)| *e).collect();
-                eprintln!("[cell] {b} {:?} bars {bars:?} venues {venues:?} tfs {:?}", f.caption(), a.tf.keys().collect::<Vec<_>>());
+                eprintln!("[cell] {b} {:?} {:?} bars {bars:?} venues {venues:?} tfs {:?}", f.market, f.caption(&a), a.tf.keys().collect::<Vec<_>>());
             }
         }
     }
@@ -1135,18 +1149,18 @@ impl App {
                 let c = &mut o.1;
                 c.multi = true;
                 c.adopt_drawings(&self.chart);
-                // a symbol of its own: its feed (perp), no account lines, orders or odds of the active symbol
+                // a symbol of its own: its feed (`cell_market`), no account lines, orders or odds of the active symbol
                 if let Some(f) = self.feeds.get(&c.sym).filter(|_| c.sym != base) {
                     (c.lines, c.fills, c.odds) = (vec![], vec![], vec![]);
                     (c.confirm, c.trading, c.equity, c.amends) = (true, false, None, false);
                     let sym = c.sym.clone();
-                    {
+                    let cap = {
                         let mut fa = f.agg.lock().unwrap();
                         if let Some(u) = usdt { fa.set_fx("USDT", u); }
-                        c.show(&mut child, &fa, Market::Perp, &sym);
-                    }
-                    let cap = f.caption().or((self.mode != Market::Perp).then_some("Perp"));
-                    if let Some(cap) = cap {
+                        c.show(&mut child, &fa, f.market, &sym);
+                        f.caption(&fa)
+                    };
+                    {
                         let p = ui.painter().with_clip_rect(*r);
                         let g = p.layout_no_wrap(l(cap).to_string(), prop(11.0), mu());
                         // inside the plot corner, clear of the price and time axes
@@ -1532,6 +1546,14 @@ fn status_venue(ui: &mut Ui, e: Exchange, on: bool, alive: bool, lat: Option<f64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pinned_cell_keeps_only_older() {
+        let mut acts = vec![chart::ChartAct::Fill(1.0), chart::ChartAct::Older(15), chart::ChartAct::Cancel(chart::LineAct::Preview("px")), chart::ChartAct::Older(1)];
+        assert_eq!(cell_older(&mut acts), [15, 1]);
+        assert!(acts.is_empty());
+        assert_eq!([Market::Spot, Market::Margin, Market::Perp, Market::Option].map(cell_market), [Market::Spot, Market::Spot, Market::Perp, Market::Perp]);
+    }
 
     #[test]
     fn zero_prints_unsigned() {

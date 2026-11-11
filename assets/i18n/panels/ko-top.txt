@@ -98,3 +98,6 @@ System = 시스템 설정 따름
 Dark = 다크
 Light = 라이트
 Binance perp only (direct mode) = 바이낸스 무기한만 (직접 모드)
+Binance spot only (direct mode) = 바이낸스 현물만 (직접 모드)
+No Binance spot market (direct mode) = 바이낸스 현물 시장 없음 (직접 모드)
+No Binance perp market (direct mode) = 바이낸스 무기한 시장 없음 (직접 모드)

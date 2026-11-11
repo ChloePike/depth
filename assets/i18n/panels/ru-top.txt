@@ -98,3 +98,6 @@ System = Система
 Dark = Тёмная
 Light = Светлая
 Binance perp only (direct mode) = Только бессрочный Binance (прямой режим)
+Binance spot only (direct mode) = Только спот Binance (прямой режим)
+No Binance spot market (direct mode) = Нет спотового рынка на Binance (прямой режим)
+No Binance perp market (direct mode) = Нет бессрочного рынка на Binance (прямой режим)

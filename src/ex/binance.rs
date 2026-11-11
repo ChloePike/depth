@@ -61,12 +61,18 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
     }
 }
 
-/// A chart cell's light feed (the app's extra symbols in direct mode): aggregate trades and the mark price of one
-/// perp on one socket, no book (no REST poll either). `sub` in Binance naming (`ex::venue_sub`).
+/// A chart cell's light feed (the app's extra symbols in direct mode) on one socket, no depth book (no REST poll
+/// either): a perp's aggregate trades and mark price, or (`Market::Spot`) a spot pair's trades and best bid / ask.
+/// `sub` in Binance naming (`ex::venue_sub`).
 pub fn spawn_trades(sub: &Sub, tx: Tx) -> JoinHandle<()> {
-    let e = Emit { ex: Exchange::Binance, market: Market::Perp, tx };
     let sym = format!("{}{}", sub.base, sub.quote).to_uppercase();
     let s = sym.to_lowercase();
+    if sub.market == Market::Spot {
+        let e = Emit { ex: Exchange::Binance, market: Market::Spot, tx };
+        let url = format!("wss://stream.binance.com:9443/stream?streams={s}@trade/{s}@bookTicker");
+        return tokio::spawn(ws::run(Spec::new("binance spot trades", url), move |f| on_spot(&e, &sym, f)));
+    }
+    let e = Emit { ex: Exchange::Binance, market: Market::Perp, tx };
     let url = format!("wss://fstream.binance.com/market/stream?streams={s}@aggTrade/{s}@markPrice@1s");
     // no funding interval fetched: the mark carries no funding rate
     let none = AtomicU32::new(0);
