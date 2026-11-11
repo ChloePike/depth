@@ -1,5 +1,5 @@
 //! Order book (cross-venue USD or one venue) and the trade tape.
-use super::{fmt_dp, fmt_px, kit, l, step_dp, t, theme::*};
+use super::{fmt_dp, fmt_px, kit, l, step_dp, t, theme, theme::*};
 use eframe::egui::{self, pos2, vec2, Align2, Rect, Sense, Stroke, Ui};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -212,6 +212,7 @@ impl BookView {
         let (s_exact, s_inf, s_split, s_rest) = (l("exact"), l("inferred"), l("split estimate"), l("resting"));
         let (s_orders, s_largest, s_oldest, s_l4) = (l("Orders at this level"), l("Largest orders"), l("Oldest order"), l("Last 60s"));
         let s_kinds = [l("adds"), l("fills"), l("cancels")];
+        let (s_venues, s_orders_cap) = (l("Venues"), l("Orders"));
         let tip: std::cell::RefCell<Option<String>> = Default::default();
         let now = depth::now_ms();
         let row = |y: f32, l: &Level, c: f64, is_ask: bool| {
@@ -285,7 +286,8 @@ impl BookView {
                     let total = l.qty.max(1e-12);
                     let mut by: Vec<&(Exchange, f64)> = l.by.iter().collect();
                     by.sort_by(|x, y| y.1.total_cmp(&x.1));
-                    lines.extend(by.iter().map(|(e, q)| format!("{e:?}  {}  {:.0}%", qty_sig(*q), q / total * 100.0)));
+                    lines.push(format!("#{s_venues}"));
+                    lines.extend(by.iter().map(|(e, q)| format!("@{e:?}  {}  {:.0}%", qty_sig(*q), q / total * 100.0)));
                 }
                 let key = (is_ask, (l.px / bin).round() as i64);
                 if let Some(os) = blocks.get(&key) {
@@ -293,6 +295,7 @@ impl BookView {
                     let known: Vec<_> = os.iter().filter(|o| o.1 != depth::l3::Src::Split).collect();
                     let exact = known.iter().filter(|o| o.1 == depth::l3::Src::Exact).count();
                     let how = if exact == known.len() { s_exact } else if exact == 0 { s_inf } else { "" };
+                    lines.push(format!("#{s_orders_cap}"));
                     lines.push(format!("{s_orders}  {}{}", os.len(), if how.is_empty() { String::new() } else { format!(" · {how}") }));
                     let mut qs: Vec<f64> = known.iter().map(|o| o.0).collect();
                     qs.sort_by(|a, b| b.total_cmp(a));
@@ -301,8 +304,10 @@ impl BookView {
                 }
                 for i in ice.into_iter().flatten() {
                     if !lines.is_empty() { lines.push(String::new()); }
-                    lines.push(format!("{:?} · {}", i.ex, t(if i.bid { "algo.ice_bid" } else { "algo.ice_ask" })));
-                    lines.push(format!("{} {} · {} {} · {} {}", t("algo.traded"), qty_sig(i.traded), t("algo.shown"), qty_sig(i.shown_max), i.fills, t("algo.fills")));
+                    lines.push(format!("#{} · {}", venue_label(i.ex), t(if i.bid { "algo.ice_bid" } else { "algo.ice_ask" })));
+                    lines.push(format!("{}  {}", t("algo.traded"), qty_sig(i.traded)));
+                    lines.push(format!("{}  {}", t("algo.shown"), qty_sig(i.shown_max)));
+                    lines.push(format!("{}  {}", t("algo.fills"), i.fills));
                 }
                 if let Some(c) = life.get(&key) {
                     // own section: a caption, then kind / count / size per row
@@ -359,12 +364,36 @@ impl BookView {
                             ui.painter().hline(r.x_range(), r.center().y, egui::Stroke::new(1.0, line()));
                         }
                         let mut rows = sec.lines().peekable();
+                        // section caption: small caps overline, as Hyperdash heads its panels
                         if let Some(c) = rows.peek().and_then(|r| r.strip_prefix('#')) {
-                            ui.label(egui::RichText::new(c).font(prop_s(11.0)).color(mu()));
+                            let (r, _) = ui.allocate_exact_size(vec2(ui.painter().layout_no_wrap(c.to_uppercase(), prop_s(10.5), dim()).size().x + 8.0, 16.0), Sense::hover());
+                            overline_at(ui.painter(), r.left_center(), Align2::LEFT_CENTER, c);
                             rows.next();
                         }
-                        egui::Grid::new(("booktip", k)).spacing(vec2(14.0, 3.0)).show(ui, |ui| {
+                        egui::Grid::new(("booktip", k)).spacing(vec2(14.0, 4.0)).show(ui, |ui| {
                             for line in rows {
+                                // a venue row: logo + name, size, share, and a share bar
+                                if let Some(rest) = line.strip_prefix('@') {
+                                    let mut it = rest.split("  ").map(str::trim);
+                                    let (name, q, pct) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""));
+                                    let ex = Exchange::parse(name);
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        if let Some(e) = ex { let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover()); icon(ui.painter(), e, r, false); }
+                                        ui.label(egui::RichText::new(ex.map_or(name.to_string(), venue_label)).font(prop(11.5)).color(fg()));
+                                    });
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(egui::RichText::new(q).font(mono(11.5)).color(fg_strong())));
+                                    let share = pct.trim_end_matches('%').parse::<f32>().unwrap_or(0.0) / 100.0;
+                                    ui.horizontal(|ui| {
+                                        let (r, _) = ui.allocate_exact_size(vec2(44.0, 12.0), Sense::hover());
+                                        let tr = Rect::from_min_max(pos2(r.left(), r.center().y - 2.0), pos2(r.right(), r.center().y + 2.0));
+                                        ui.painter().rect_filled(tr, 2, theme::line());
+                                        ui.painter().rect_filled(Rect::from_min_max(tr.min, pos2(tr.left() + tr.width() * share.clamp(0.0, 1.0), tr.max.y)), 2, accent());
+                                        ui.label(egui::RichText::new(pct).font(mono(11.5)).color(mu()));
+                                    });
+                                    ui.end_row();
+                                    continue;
+                                }
                                 for (i, cell) in line.split("  ").map(str::trim).filter(|c| !c.is_empty()).enumerate() {
                                     let lab = egui::Label::new(egui::RichText::new(cell).font(if i == 0 { prop(11.5) } else { mono(11.5) }).color(if i == 0 { fg() } else { fg_strong() })).extend();
                                     if i == 0 { ui.add(lab); } else { ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(lab)); }
@@ -562,7 +591,17 @@ fn age(ms: i64) -> String {
     if s < 60 { format!("{s}s") } else if s < 3600 { format!("{}m {:02}s", s / 60, s % 60) } else { format!("{}h {:02}m", s / 3600, s % 3600 / 60) }
 }
 
-fn qty_sig(q: f64) -> String { let d = if q > 0.0 { (3.0 - q.log10().floor()).clamp(0.0, 8.0) as usize } else { 2 }; fmt_dp(q, d) }
+fn qty_sig(q: f64) -> String {
+    let d = if q > 0.0 { (3.0 - q.log10().floor()).clamp(0.0, 8.0) as usize } else { 2 };
+    let s = fmt_dp(q, d);
+    // 4 significant digits without the trailing zeros ("0.0002000" read as noise)
+    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s }
+}
+
+/// A venue as people write it (OKX, MEXC), not its enum name.
+fn venue_label(e: Exchange) -> String {
+    match e { Exchange::Okx => "OKX".into(), Exchange::Mexc => "MEXC".into(), e => format!("{e:?}") }
+}
 
 
 /// Overline at `pos`: 10.5 semibold caps, dim, 0.06 em tracking. Returns its rect.

@@ -268,28 +268,35 @@ pub(crate) fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     }).inner
 }
 
-/// Slider 0..=1 (Components spec: 2 px track, diamond notches at quarters, 12 px white knob with an
-/// accent ring), `right` printed after it in 12 grey numbers; snaps near the notches. True when moved.
+/// Slider 0..=1, drawn as Hyperdash does: a well with a hairline border, a thin track with tick marks at the quarters,
+/// the chosen part in the accent colour and a slim accent bar as the knob; `right` in its own small well after it
+/// (12 grey numbers). Snaps near the ticks. True when moved.
 fn slider(ui: &mut Ui, v: &mut f32, right: &str) -> bool {
-    let (row, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), Sense::hover());
-    let rect = Rect::from_min_max(row.min, egui::pos2(row.right() - if right.is_empty() { 0.0 } else { 44.0 }, row.bottom()));
+    let (row, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::hover());
+    let gap = if right.is_empty() { 0.0 } else { 52.0 };
+    let rect = Rect::from_min_max(row.min, egui::pos2(row.right() - gap, row.bottom()));
     let resp = ui.interact(rect, ui.id().with(("slider", right.is_empty())), Sense::click_and_drag());
-    let tr = Rect::from_min_max(egui::pos2(rect.left() + 6.0, rect.center().y - 1.0), egui::pos2(rect.right() - 6.0, rect.center().y + 1.0));
     let hv = ui.ctx().animate_bool_with_time(resp.id.with("hv"), resp.hovered() || resp.dragged(), 0.1);
     let p = ui.painter();
-    p.rect_filled(tr, 1, track());
+    let border = egui::Stroke::new(1.0, if hv > 0.0 { lerp(line(), edge(), hv) } else { line() });
+    p.rect(rect, kit::rad(), well(), border, egui::StrokeKind::Inside);
+    let tr = Rect::from_min_max(egui::pos2(rect.left() + 12.0, rect.center().y - 0.5), egui::pos2(rect.right() - 12.0, rect.center().y + 0.5));
     let x = tr.left() + tr.width() * v.clamp(0.0, 1.0);
-    p.rect_filled(Rect::from_min_max(tr.min, egui::pos2(x, tr.max.y)), 1, accent());
+    p.rect_filled(tr, 0, line());
     for q in 0..=4 {
-        let c = egui::pos2(tr.left() + tr.width() * q as f32 / 4.0, tr.center().y);
-        let on = *v >= q as f32 / 4.0 - 1e-4;
-        p.add(egui::Shape::convex_polygon(vec![c + egui::vec2(0.0, -4.0), c + egui::vec2(4.0, 0.0), c + egui::vec2(0.0, 4.0), c + egui::vec2(-4.0, 0.0)],
-            if on { accent() } else { track() }, Stroke::NONE));
+        let cx = (tr.left() + tr.width() * q as f32 / 4.0).round();
+        let on = *v >= q as f32 / 4.0 - 1e-4 && *v > 0.0;
+        p.vline(cx, tr.center().y - 4.0..=tr.center().y + 4.0, egui::Stroke::new(1.0, if on { accent() } else { edge() }));
     }
-    let k = egui::pos2(x, tr.center().y);
-    if hv > 0.0 { p.circle_filled(k, 6.0 + 4.0 * hv, accent().gamma_multiply(0.18 * hv)); }
-    p.circle(k, 6.0, Color32::WHITE, Stroke::new(1.0, accent()));
-    if !right.is_empty() { p.text(row.right_center(), Align2::RIGHT_CENTER, right, mono_m(12.0), mu()); }
+    p.rect_filled(Rect::from_min_max(egui::pos2(tr.left(), tr.top() - 0.5), egui::pos2(x, tr.bottom() + 0.5)), 0, accent());
+    let k = Rect::from_center_size(egui::pos2(x, tr.center().y), egui::vec2(4.0, 16.0));
+    if hv > 0.0 { p.rect_filled(k.expand(2.0 * hv), 2, accent().gamma_multiply(0.2 * hv)); }
+    p.rect_filled(k, 2, accent());
+    if !right.is_empty() {
+        let b = Rect::from_min_max(egui::pos2(row.right() - gap + 6.0, row.top()), row.max);
+        p.rect(b, kit::rad(), well(), egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside);
+        p.text(b.right_center() - egui::vec2(8.0, 0.0), Align2::RIGHT_CENTER, right, mono_m(12.0), mu());
+    }
     if let Some(pos) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
         let mut x = ((pos.x - tr.left()) / tr.width()).clamp(0.0, 1.0);
         for q in [0.0, 0.25, 0.5, 0.75, 1.0] { if (x - q).abs() < 0.03 { x = q; } }
