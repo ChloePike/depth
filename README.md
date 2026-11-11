@@ -9,7 +9,7 @@ A local, multi-exchange crypto trading terminal for macOS, Windows and Linux. Tw
 aggregated into one book, one tape and one chart, with order entry on the venues you hold keys for.
 Everything runs on your machine: no relay, no server, no account.
 
-![Depth: BTC perpetual across every venue](docs/screenshot.png)
+![Depth: BTC perpetual across every venue, with the liquidation map, book heatmap and demo positions](docs/screenshot.png)
 
 ## What it does
 

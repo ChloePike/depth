@@ -241,6 +241,11 @@ Pressure = 需給圧力
 Buyers in control = 買い優勢
 Sellers in control = 売り優勢
 Balanced = 均衡
+Book / flow balance = 板 / フローのバランス
+Bid-heavy = 買い板優位
+Ask-heavy = 売り板優位
+Bids / asks ±%s = 買い板 / 売り板 ±%s
+Book depth within the band every venue covers (up to ±0.5%) and 5 min aggressor flow; describes now, not a forecast = 全取引所の板がカバーする範囲（最大 ±0.5%）の板の厚みと直近5分のアグレッサーフロー。現状を示すもので予測ではありません
 Bids / asks ±0.5% = 買い板 / 売り板 ±0.5%
 Carry = キャリー
 Predicted funding, annualized; basis: perp over spot = 予想ファンディングレート（年率）。ベーシス = 無期限の現物比

@@ -46,12 +46,16 @@ pub struct AccountPanel {
     pub tab: Tab,
     hide_others: bool,
     hist_requested: bool,
+    /// Trade History: the fills of one order (same symbol and side, back to back) as one row
+    agg_fills: bool,
     /// (column, descending) per sortable table
     sort_orders: (usize, bool),
     sort_tpsl: (usize, bool),
     sort_oh: (usize, bool),
     sort_fills: (usize, bool),
     sort_closed: (usize, bool),
+    /// Positions: None keeps the grouped order (options under their base's perps) until a header is clicked
+    sort_pos: Option<(usize, bool)>,
     sel_orders: Vec<String>,
     sel_tpsl: Vec<String>,
     /// per-position inline limit close price, only once edited (else it follows the mark)
@@ -81,8 +85,8 @@ impl Default for AccountPanel {
     fn default() -> Self {
         AccountPanel {
             // T1_ACC_TAB=<n>: open the strip on tab n (screenshots)
-            tab: std::env::var("T1_ACC_TAB").ok().and_then(|s| s.parse::<usize>().ok()).and_then(|n| TABS.get(n).copied()).unwrap_or(Tab::Positions), hide_others: false, hist_requested: false,
-            sort_orders: (0, true), sort_tpsl: (0, false), sort_oh: (0, true), sort_fills: (0, true), sort_closed: (0, true),
+            tab: std::env::var("T1_ACC_TAB").ok().and_then(|s| s.parse::<usize>().ok()).and_then(|n| TABS.get(n).copied()).unwrap_or(Tab::Positions), hide_others: false, hist_requested: false, agg_fills: true,
+            sort_orders: (0, true), sort_tpsl: (0, false), sort_oh: (0, true), sort_fills: (0, true), sort_closed: (1, true), sort_pos: None,
             sel_orders: vec![], sel_tpsl: vec![], close_px: HashMap::new(), edit: None,
             confirm: None, share: None, sheet: None, xfer: None, wallets_requested: vec![], error: None, xfer_shot: false,
             open_settings: None, prefill: None, insure: None, kill_prompt: false, kill_seen: 0,
@@ -428,6 +432,36 @@ fn cmp(k: Key, a: &Value, b: &Value) -> Ordering {
     }
 }
 
+/// A table's column layout as the user left it, by column name: order, hand-set widths, hidden columns. Kept per
+/// table id in the meta table (`LAYOUTS_KEY`), so it survives a restart.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Layout { order: Vec<String>, widths: HashMap<String, f32>, hidden: Vec<String> }
+
+const LAYOUTS_KEY: &str = "account_table_layouts";
+
+impl Layout {
+    /// The columns to draw, as indices into `cols`, in the user's order (columns new to the layout at the end).
+    fn visible(&self, cols: &[Col]) -> Vec<usize> {
+        let mut v: Vec<usize> = self.order.iter().filter_map(|n| cols.iter().position(|c| c.name == n.as_str())).collect();
+        let rest: Vec<usize> = (0..cols.len()).filter(|i| !v.contains(i)).collect();
+        v.extend(rest);
+        let shown: Vec<usize> = v.iter().copied().filter(|i| !self.hidden.iter().any(|h| h.as_str() == cols[*i].name)).collect();
+        // never all hidden
+        if shown.is_empty() { v } else { shown }
+    }
+
+    /// Moves column `from` (an index into `cols`) to where `to` stands in the drawn order.
+    fn move_col(&mut self, cols: &[Col], from: usize, to: usize) {
+        let mut all: Vec<usize> = self.order.iter().filter_map(|n| cols.iter().position(|c| c.name == n.as_str())).collect();
+        let rest: Vec<usize> = (0..cols.len()).filter(|i| !all.contains(i)).collect();
+        all.extend(rest);
+        let (Some(a), Some(b)) = (all.iter().position(|i| *i == from), all.iter().position(|i| *i == to)) else { return };
+        let c = all.remove(a);
+        all.insert(b, c);
+        self.order = all.iter().map(|i| cols[*i].name.to_string()).collect();
+    }
+}
+
 /// What the table asks its caller to draw.
 enum Part<'v> { Head(usize, Rect), Row(Rect, &'v Value), Cell(usize, Rect, &'v Value), Menu(Vec<&'v Value>) }
 
@@ -438,25 +472,61 @@ const PAD: f32 = 12.0;
 /// multi-selection (click, cmd/shift-click), right-click menu; scrolls sideways when narrower than
 /// its columns.
 #[allow(clippy::too_many_arguments)]
-fn table<'v>(ui: &mut Ui, id: &str, cols: &[Col], mut rows: Vec<&'v Value>, row_h: f32, empty: &str,
+fn table<'v>(ui: &mut Ui, id: &str, cols: &[Col], rows: Vec<&'v Value>, row_h: f32, empty: &str,
+             sort: Option<&mut (usize, bool)>, sel: Option<&mut Vec<String>>, f: &mut dyn FnMut(&mut Ui, Part<'v>)) {
+    // the table's layout, read once per run from the meta table, written back when the user changed it
+    static LAYOUTS: std::sync::Mutex<Option<HashMap<String, Layout>>> = std::sync::Mutex::new(None);
+    let before = {
+        let mut g = LAYOUTS.lock().unwrap();
+        let all = g.get_or_insert_with(|| depth::db::meta_get(LAYOUTS_KEY).and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default());
+        all.get(id).cloned().unwrap_or_default()
+    };
+    let mut lay = before.clone();
+    table_in(ui, id, cols, rows, row_h, empty, &mut lay, sort, sel, f);
+    if lay != before {
+        let mut g = LAYOUTS.lock().unwrap();
+        let all = g.get_or_insert_with(Default::default);
+        all.insert(id.to_string(), lay);
+        if let Ok(j) = serde_json::to_string(&*all) { depth::db::meta_put(LAYOUTS_KEY, &j); }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn table_in<'v>(ui: &mut Ui, id: &str, cols: &[Col], mut rows: Vec<&'v Value>, row_h: f32, empty: &str, lay: &mut Layout,
              mut sort: Option<&mut (usize, bool)>, mut sel: Option<&mut Vec<String>>, f: &mut dyn FnMut(&mut Ui, Part<'v>)) {
-    if let Some((c, desc)) = sort.as_deref().copied() {
-        let k = cols[c.min(cols.len() - 1)].key;
+    if let Some((c, desc)) = sort.as_deref().copied().filter(|(c, _)| *c < cols.len()) {
+        let k = cols[c].key;
         rows.sort_by(|a, b| { let o = cmp(k, a, b); if desc { o.reverse() } else { o } });
     }
     if let Some(sel) = sel.as_deref_mut() { sel.retain(|k| rows.iter().any(|r| row_key(r) == *k)); }
-    let min: f32 = cols.iter().map(|c| c.w).sum::<f32>() + 2.0 * PAD;
+    // the drawn columns in the user's order; a hand-set width is fixed, the others share the spare width
+    let vis = lay.visible(cols);
+    let base = |i: usize| lay.widths.get(cols[i].name).copied().unwrap_or(cols[i].w);
+    let min: f32 = vis.iter().map(|i| base(*i)).sum::<f32>() + 2.0 * PAD;
     let total = ui.available_width().max(min);
-    let growers = cols.iter().filter(|c| c.grow).count().max(1) as f32;
+    let growers = vis.iter().filter(|i| cols[**i].grow && !lay.widths.contains_key(cols[**i].name)).count().max(1) as f32;
     let extra = (total - min) / growers;
-    let mut xs = vec![];
+    // (x, width) per column index into `cols`; hidden ones get none
+    let mut xs = vec![(0.0f32, 0.0f32); cols.len()];
     let mut x = PAD;
-    for c in cols { let w = c.w + if c.grow { extra } else { 0.0 }; xs.push((x, w)); x += w; }
+    for &i in &vis { let w = base(i) + if cols[i].grow && !lay.widths.contains_key(cols[i].name) { extra } else { 0.0 }; xs[i] = (x, w); x += w; }
     let cell_rect = |row: Rect, i: usize| { let (x, w) = xs[i]; Rect::from_min_size(egui::pos2(row.left() + x, row.top()), egui::vec2(w, row.height())).shrink2(egui::vec2(7.0, 0.0)) };
     egui::ScrollArea::horizontal().id_salt((id, "h")).auto_shrink([false, false]).show(ui, |ui| {
         ui.set_min_width(total);
-        let (hr, _) = ui.allocate_exact_size(egui::vec2(total, 30.0), egui::Sense::hover());
-        for (i, c) in cols.iter().enumerate() {
+        let (hr, hresp) = ui.allocate_exact_size(egui::vec2(total, 30.0), egui::Sense::click());
+        // right-click on the header: which columns show, or back to the default layout
+        hresp.context_menu(|ui| {
+            for (i, c) in cols.iter().enumerate() {
+                let mut on = !lay.hidden.iter().any(|h| h.as_str() == c.name);
+                if ui.checkbox(&mut on, c.name).changed() {
+                    if on { lay.hidden.retain(|h| h.as_str() != c.name) } else if vis.len() > 1 || !vis.contains(&i) { lay.hidden.push(c.name.to_string()) }
+                }
+            }
+            ui.separator();
+            if menu_item(ui, l("Reset columns")) { *lay = Layout::default(); }
+        });
+        for &i in &vis {
+            let c = &cols[i];
             let r = cell_rect(hr, i);
             // kit::th: Some(true) = ascending arrow
             let sorted = match sort.as_deref() { Some(&(si, d)) if si == i => Some(!d), _ => None };
@@ -464,14 +534,23 @@ fn table<'v>(ui: &mut Ui, id: &str, cols: &[Col], mut rows: Vec<&'v Value>, row_
             let w = ui.painter().layout_no_wrap(label, prop_m(11.0), mu()).size().x;
             let (pos, al) = if c.right { (r.right_center(), egui::Align2::RIGHT_CENTER) } else { (r.left_center(), egui::Align2::LEFT_CENTER) };
             kit::th(ui.painter(), pos, al, c.name, sorted);
-            let tr = Rect::from_min_size(egui::pos2(if c.right { r.right() - w } else { r.left() }, r.center().y - 7.0), egui::vec2(w, 14.0));
-            if !matches!(c.key, Key::No) {
-                if let Some(srt) = sort.as_deref_mut() {
-                    if ui.interact(tr.expand(3.0), ui.id().with((id, "sort", i)), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        *srt = if srt.0 == i { (i, !srt.1) } else { (i, false) };
-                    }
-                }
+            let _ = w;
+            // the whole header cell: click sorts, drag moves the column (dropped where the pointer lets go)
+            let full = Rect::from_min_size(egui::pos2(hr.left() + xs[i].0, hr.top()), egui::vec2(xs[i].1 - 5.0, hr.height()));
+            let hd = ui.interact(full, ui.id().with((id, "head", i)), egui::Sense::click_and_drag());
+            let sortable = !matches!(c.key, Key::No) && sort.is_some();
+            if hd.clicked() && sortable && let Some(srt) = sort.as_deref_mut() { *srt = if srt.0 == i { (i, !srt.1) } else { (i, false) }; }
+            if hd.dragged() { ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing); ui.painter().rect_filled(full, 3, hl()); }
+            else if hd.hovered() && sortable { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
+            if hd.drag_stopped() && let Some(p) = ui.ctx().pointer_latest_pos() {
+                if let Some(&to) = vis.iter().find(|j| { let (x0, w0) = xs[**j]; p.x >= hr.left() + x0 && p.x < hr.left() + x0 + w0 }) { if to != i { lay.move_col(cols, i, to); } }
             }
+            // the right edge: drag to set the width, double-click to give it back
+            let grip = Rect::from_min_size(egui::pos2(hr.left() + xs[i].0 + xs[i].1 - 5.0, hr.top()), egui::vec2(8.0, hr.height()));
+            let er = ui.interact(grip, ui.id().with((id, "edge", i)), egui::Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeColumn);
+            if er.dragged() { lay.widths.insert(c.name.to_string(), (xs[i].1 + er.drag_delta().x).max(40.0)); }
+            if er.double_clicked() { lay.widths.remove(c.name); }
+            if er.hovered() || er.dragged() { ui.painter().vline(grip.center().x, hr.y_range().shrink(6.0), egui::Stroke::new(1.0, edge())); }
             f(ui, Part::Head(i, r));
         }
         ui.painter().hline(hr.x_range(), hr.bottom(), egui::Stroke::new(1.0, line()));
@@ -504,11 +583,40 @@ fn table<'v>(ui: &mut Ui, id: &str, cols: &[Col], mut rows: Vec<&'v Value>, row_
                     let picked: Vec<&Value> = match sel.as_deref() { Some(s) if s.contains(&k) => rows.iter().filter(|r| s.contains(&row_key(r))).copied().collect(), _ => vec![v] };
                     f(ui, Part::Menu(picked));
                 });
-                for c in 0..cols.len() { f(ui, Part::Cell(c, cell_rect(r, c), v)); }
+                for &c in &vis { f(ui, Part::Cell(c, cell_rect(r, c), v)); }
                 ui.painter().hline(r.x_range(), r.bottom() - 0.5, egui::Stroke::new(1.0, line()));
             }
         });
     });
+}
+
+/// Fills of one order as one row: same venue, symbol and side, each within a second of the previous one (a fill row
+/// carries no order id here; an order's fills land together). Price: the size-weighted mean; size, fee and realized
+/// PnL summed; `ts` the last fill's; `n` how many fills. Newest first.
+fn aggregate_fills(fills: &[&Value]) -> Vec<Value> {
+    let mut v: Vec<&Value> = fills.to_vec();
+    v.sort_by(|a, b| (s(&a["ex"]), s(&a["symbol"]), s(&a["side"]), a["ts"].as_i64()).cmp(&(s(&b["ex"]), s(&b["symbol"]), s(&b["side"]), b["ts"].as_i64())));
+    let mut out: Vec<Value> = vec![];
+    for x in v {
+        let ts = x["ts"].as_i64().unwrap_or(0);
+        let same = out.last().is_some_and(|g| g["ex"] == x["ex"] && g["symbol"] == x["symbol"] && g["side"] == x["side"] && ts - g["ts"].as_i64().unwrap_or(0) <= 1_000);
+        if same {
+            let g = out.last_mut().unwrap();
+            let (q0, q1) = (f(&g["qty"]), f(&x["qty"]));
+            g["price"] = json!((f(&g["price"]) * q0 + f(&x["price"]) * q1) / (q0 + q1).max(1e-12));
+            g["qty"] = json!(q0 + q1);
+            g["fee"] = json!(f(&g["fee"]) + f(&x["fee"]));
+            if x["realized"].is_number() { g["realized"] = json!(f(&g["realized"]) + f(&x["realized"])); }
+            g["ts"] = json!(ts);
+            g["n"] = json!(g["n"].as_u64().unwrap_or(1) + 1);
+        } else {
+            let mut g = x.clone();
+            g["n"] = json!(1);
+            out.push(g);
+        }
+    }
+    out.sort_by(|a, b| b["ts"].as_i64().cmp(&a["ts"].as_i64()));
+    out
 }
 
 fn menu_item(ui: &mut Ui, text: &str) -> bool { let c = ui.button(RichText::new(text).font(prop(12.5))).clicked(); if c { ui.close(); } c }
@@ -676,16 +784,19 @@ impl AccountPanel {
         let pm = st["binance_pm"] == true;
         let tpsl = st["tpsl"].as_array().cloned().unwrap_or_default();
         let cols = [
-            Col { name: l("Symbol"), w: 220.0, right: false, grow: false, key: Key::No },
-            col(l("Size"), 130.0, true, Key::No), col(l("Entry"), 92.0, true, Key::No), col(l("Mark"), 92.0, true, Key::No), col(l("Liq. Price"), 92.0, true, Key::No),
-            col(l("Margin"), 116.0, true, Key::No), col(l("PnL (ROE%)"), 140.0, true, Key::No), col(l("Close Position"), 236.0, false, Key::No),
-            col(l("TP / SL"), 130.0, true, Key::No), col(l("Est. Funding"), 140.0, true, Key::No), col(l("Funding paid"), 120.0, true, Key::No),
+            Col { name: l("Symbol"), w: 220.0, right: false, grow: false, key: Key::S("symbol") },
+            col(l("Size"), 130.0, true, Key::G(|p| f(&p["qty"]) * f(&p["mark"]))), col(l("Entry"), 92.0, true, Key::F("entry")), col(l("Mark"), 92.0, true, Key::F("mark")),
+            col(l("Liq. Price"), 92.0, true, Key::F("liq")),
+            col(l("Margin"), 116.0, true, Key::F("margin")), col(l("PnL (ROE%)"), 140.0, true, Key::F("upnl")), col(l("Close Position"), 236.0, false, Key::No),
+            col(l("TP / SL"), 130.0, true, Key::No), col(l("Est. Funding"), 140.0, true, Key::F("funding_est")), col(l("Funding paid"), 120.0, true, Key::F("funding_paid")),
             col(super::t("ins.col"), 96.0, true, Key::No),
             Col { name: "", w: 84.0, right: true, grow: false, key: Key::No },
         ];
         let px_map = &mut self.close_px;
         let now = depth::now_ms();
-        table(ui, "positions", &cols, rows, 44.0, l("No open positions"), None, None, &mut |ui, part| match part {
+        // sortable once a header is clicked; until then (no column: usize::MAX) the grouped order above
+        let mut srt = self.sort_pos.unwrap_or((usize::MAX, false));
+        table(ui, "positions", &cols, rows, 44.0, l("No open positions"), Some(&mut srt), None, &mut |ui, part| match part {
             Part::Head(7, r) => {
                 let w = ui.painter().layout_no_wrap(l("Close Position").into(), prop_m(11.0), mu()).size().x;
                 let b = Rect::from_min_max(egui::pos2(r.left() + w + 4.0, r.center().y - H_SM / 2.0), egui::pos2(r.right() + 7.0, r.center().y + H_SM / 2.0));
@@ -841,6 +952,7 @@ impl AccountPanel {
                 if menu_item(ui, l("Copy Symbol")) { acts.push(Act::Copy(s(&p["symbol"]).into())); }
             }
         });
+        self.sort_pos = (srt.0 != usize::MAX).then_some(srt);
     }
 
     fn confirm_modal(&mut self, ui: &mut Ui, call: &mut Call) {
@@ -1110,7 +1222,7 @@ impl AccountPanel {
                         None => None,
                         Some("trigger") => Some(l("Conditional order: cancel it and place a new one to change it")),
                         Some("margin") => Some(l("Margin order: cancel it and place a new one to change it")),
-                        Some(_) => Some(l("Only plain GTC limit orders can be changed here")),
+                        Some(_) => Some(l("Only GTC or post-only limit orders can be changed here")),
                     };
                     let (px, q) = (f(&o["price"]), f(&o["qty"]));
                     let (shown, font, c) = match i { 4 => (fmt_px(px), mono_m(12.5), fg()), 5 => (qty(q), mono(12.5), fg()), _ => (usd(px * q), mono(12.5), mu()) };
@@ -1184,9 +1296,15 @@ impl AccountPanel {
                     let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
                     spinner(ui, r.center(), 5.0);
                 } else if kit::button(ui, &format!("↻ {}", l("Refresh")), Look::Link, H_SM, None, true).clicked() { acts.push(Act::Op(json!({"op": "load_history"}))); }
+                if self.tab == Tab::TradeHist {
+                    ui.add_space(14.0);
+                    kit::switch(ui, &mut self.agg_fills);
+                    ui.label(RichText::new(l("Aggregate fills")).font(prop(12.0)).color(mu()));
+                }
             });
         });
         let list = |k: &str| h[k].as_array().map(|a| a.iter().collect::<Vec<_>>()).unwrap_or_default();
+        let agg_rows = if self.tab == Tab::TradeHist && self.agg_fills { aggregate_fills(&list("fills")) } else { vec![] };
         let time_c = |ui: &Ui, r: Rect, v: &Value| { txt(ui, r, time(v["ts"].as_i64().unwrap_or(0)), mono(12.0), mu(), false); };
         let side_c = |ui: &mut Ui, r: Rect, side: &str| { chip_at(ui, r.left(), r.center().y, side_name(side), side_tone(side == "buy" || side == "long")); };
         let num = |ui: &Ui, r: Rect, v: Option<f64>, fmt: fn(f64) -> String| match v.filter(|x| *x > 0.0) { Some(x) => { txt(ui, r, fmt(x), mono(12.5), fg(), true); } None => { txt(ui, r, "—", mono(12.5), dim(), true); } };
@@ -1221,13 +1339,19 @@ impl AccountPanel {
                     col(l("Price"), 90.0, true, Key::F("price")), col(l("Size"), 80.0, true, Key::F("qty")), col(l("Value"), 100.0, true, Key::G(|x| f(&x["price"]) * f(&x["qty"]))),
                     col(l("Fee"), 80.0, true, Key::F("fee")), col(l("Realized PnL"), 100.0, true, Key::F("realized")),
                 ];
-                table(ui, "fills", &cols, list("fills"), 36.0, l("No trades in the last 7 days"), Some(&mut self.sort_fills), None, &mut |ui, part| if let Part::Cell(i, r, x) = part {
+                let rows = if self.agg_fills { agg_rows.iter().collect() } else { list("fills") };
+                table(ui, "fills", &cols, rows, 36.0, l("No trades in the last 7 days"), Some(&mut self.sort_fills), None, &mut |ui, part| if let Part::Cell(i, r, x) = part {
                     match i {
                         0 => time_c(ui, r, x),
                         1 => { symbol_cell(ui, r, s(&x["ex"]), s(&x["symbol"]), &format!("tf{}{}", s(&x["symbol"]), x["ts"]), acts); }
                         2 => side_c(ui, r, s(&x["side"])),
                         3 => { txt(ui, r, fmt_px(f(&x["price"])), mono_m(12.5), fg(), true); }
-                        4 => { txt(ui, r, qty(f(&x["qty"])), mono(12.5), fg(), true); }
+                        4 => {
+                            // an aggregated row says how many fills it holds
+                            let mut parts = vec![(qty(f(&x["qty"])), fg())];
+                            if let Some(n) = x["n"].as_u64().filter(|n| *n > 1) { parts.insert(0, (format!("×{n}  "), dim())); }
+                            rich_right(ui, r, &parts, mono(12.5));
+                        }
                         5 => { txt(ui, r, usd(f(&x["price"]) * f(&x["qty"])), mono(12.5), fg(), true); }
                         6 => { txt(ui, r, fmt_dp(f(&x["fee"]), 4), mono(12.5), mu(), true); }
                         _ => match x["realized"].as_f64().filter(|v| *v != 0.0) { Some(v) => { txt(ui, r, signed(v), mono_s(12.5), pnl_col(v), true); } None => { txt(ui, r, "—", mono(12.5), dim(), true); } },
@@ -1236,18 +1360,19 @@ impl AccountPanel {
             }
             _ => {
                 let cols = [
-                    col(l("Closed"), 116.0, false, Key::F("ts")), col(l("Symbol"), 150.0, false, Key::S("symbol")),
+                    col(l("Opened"), 116.0, false, Key::F("opened")), col(l("Closed"), 116.0, false, Key::F("ts")), col(l("Symbol"), 150.0, false, Key::S("symbol")),
                     col(l("Side"), 60.0, false, Key::G(|c| match c["long"].as_bool() { Some(true) => 1.0, Some(false) => 2.0, None => 0.0 })),
                     col(l("Size"), 90.0, true, Key::F("qty")), col(l("Entry"), 90.0, true, Key::No), col(l("Exit"), 90.0, true, Key::No), col(l("Realized PnL"), 110.0, true, Key::F("pnl")),
                 ];
                 table(ui, "closed", &cols, list("closed"), 36.0, l("No closed positions in the last 7 days"), Some(&mut self.sort_closed), None, &mut |ui, part| if let Part::Cell(i, r, c) = part {
                     match i {
-                        0 => time_c(ui, r, c),
-                        1 => { symbol_cell(ui, r, s(&c["ex"]), s(&c["symbol"]), &format!("ph{}{}", s(&c["symbol"]), c["ts"]), acts); }
-                        2 => match c["long"].as_bool() { Some(lg) => side_c(ui, r, if lg { "long" } else { "short" }), None => { txt(ui, r, "—", prop(12.5), dim(), false); } },
-                        3 => num(ui, r, c["qty"].as_f64(), qty),
-                        4 => num(ui, r, c["entry"].as_f64(), fmt_px),
-                        5 => num(ui, r, c["exit"].as_f64(), fmt_px),
+                        0 => match c["opened"].as_i64() { Some(t) => { txt(ui, r, time(t), mono(12.0), mu(), false); } None => { txt(ui, r, "—", mono(12.0), dim(), false); } },
+                        1 => time_c(ui, r, c),
+                        2 => { symbol_cell(ui, r, s(&c["ex"]), s(&c["symbol"]), &format!("ph{}{}", s(&c["symbol"]), c["ts"]), acts); }
+                        3 => match c["long"].as_bool() { Some(lg) => side_c(ui, r, if lg { "long" } else { "short" }), None => { txt(ui, r, "—", prop(12.5), dim(), false); } },
+                        4 => num(ui, r, c["qty"].as_f64(), qty),
+                        5 => num(ui, r, c["entry"].as_f64(), fmt_px),
+                        6 => num(ui, r, c["exit"].as_f64(), fmt_px),
                         _ => { let v = f(&c["pnl"]); txt(ui, r, signed(v), mono_s(12.5), pnl_col(v), true); }
                     }
                 });
@@ -1546,6 +1671,35 @@ impl AccountPanel {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn column_layout_orders_hides_and_moves() {
+        let cols = [super::col("A", 10.0, false, super::Key::No), super::col("B", 10.0, false, super::Key::No), super::col("C", 10.0, false, super::Key::No)];
+        let mut l = super::Layout::default();
+        assert_eq!(l.visible(&cols), vec![0, 1, 2]);
+        l.move_col(&cols, 2, 0);
+        assert_eq!(l.visible(&cols), vec![2, 0, 1]);
+        l.hidden.push("A".into());
+        assert_eq!(l.visible(&cols), vec![2, 1]);
+        // never all hidden; a column unknown to the layout shows at the end
+        l.hidden = vec!["A".into(), "B".into(), "C".into()];
+        assert_eq!(l.visible(&cols).len(), 3);
+        let l2 = super::Layout { order: vec!["C".into()], ..Default::default() };
+        assert_eq!(l2.visible(&cols), vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn fills_of_one_order_aggregate() {
+        let x = |ts: i64, side: &str, px: f64, q: f64| json!({"ex": "Binance", "symbol": "A", "side": side, "price": px, "qty": q, "fee": 0.1, "realized": null, "ts": ts});
+        let f = [x(1_000, "buy", 10.0, 1.0), x(1_400, "buy", 12.0, 3.0), x(2_300, "buy", 13.0, 1.0), x(9_000, "buy", 9.0, 1.0), x(1_200, "sell", 11.0, 2.0)];
+        let refs: Vec<&Value> = f.iter().collect();
+        let g = super::aggregate_fills(&refs);
+        assert_eq!(g.len(), 3, "{g:?}");
+        // newest first: the 9 s buy alone, then the three back-to-back buys, then the sell
+        assert_eq!((g[0]["n"].as_u64(), g[1]["n"].as_u64(), g[2]["n"].as_u64()), (Some(1), Some(3), Some(1)));
+        assert!((g[1]["price"].as_f64().unwrap() - (10.0 + 36.0 + 13.0) / 5.0).abs() < 1e-9 && g[1]["qty"] == 5.0 && g[1]["ts"] == 2_300);
+        assert!((g[1]["fee"].as_f64().unwrap() - 0.3).abs() < 1e-9);
+    }
+
     use super::*;
     #[test]
     fn formats_the_tables() {

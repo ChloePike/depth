@@ -82,6 +82,18 @@ impl LiqMap {
     }
 }
 
+/// Magma-like ramp of the map (deep purple -> magenta -> orange -> pale yellow), opaque: an empty cell is the
+/// darkest stop, so the map reads as one surface with levels on it (as Hyperdash draws it), not lines on a hole.
+pub(super) fn magma(t: f32) -> Color32 {
+    const S: [(f32, [u8; 3]); 6] = [(0.0, [0x1e, 0x12, 0x33]), (0.3, [0x5a, 0x1d, 0x5e]), (0.55, [0xa3, 0x30, 0x6a]),
+        (0.75, [0xe0, 0x5a, 0x3a]), (0.9, [0xf5, 0xa0, 0x3a]), (1.0, [0xfd, 0xe8, 0x8a])];
+    let t = t.clamp(0.0, 1.0);
+    let k = S.iter().position(|s| s.0 >= t).unwrap_or(S.len() - 1).max(1);
+    let ((t0, a), (t1, b)) = (S[k - 1], S[k]);
+    let c = |x: [u8; 3]| Color32::from_rgb(x[0], x[1], x[2]);
+    lerp(c(a), c(b), (t - t0) / (t1 - t0))
+}
+
 #[derive(Default)]
 pub(super) struct LiqCache {
     /// (tf, bar count, last bar time, last volume bits): recomputed only when one of them changes,
@@ -91,7 +103,7 @@ pub(super) struct LiqCache {
     map: Option<LiqMap>,
     ver: u64,
     /// heatmap texture and what it was drawn for (map version, view)
-    tex: Option<((u64, i64, i64, usize, u64, u64, usize), egui::TextureHandle)>,
+    tex: Option<((u64, i64, i64, usize, u64, u64, usize), egui::TextureHandle, f32)>,
 }
 
 impl LiqCache {
@@ -109,9 +121,9 @@ impl LiqCache {
     /// Cells scale to the 99th percentile so one stacked level does not wash out the rest.
     #[allow(clippy::too_many_arguments)]
     /// `view` identifies the price mapping (range and scale) for the cache.
-    fn texture(&mut self, ctx: &egui::Context, t0: i64, ms: i64, cols: usize, rows: usize, view: (u64, u64, u8), row: impl Fn(f64) -> f32) -> Option<egui::TextureId> {
+    fn texture(&mut self, ctx: &egui::Context, t0: i64, ms: i64, cols: usize, rows: usize, view: (u64, u64, u8), row: impl Fn(f64) -> f32) -> Option<(egui::TextureId, f32)> {
         let k = (self.ver, t0, ms, cols, view.0, view.1 ^ ((view.2 as u64) << 60), rows);
-        if let Some((kk, t)) = &self.tex { if *kk == k { return Some(t.id()); } }
+        if let Some((kk, t, top)) = &self.tex { if *kk == k { return Some((t.id(), *top)); } }
         // past the GPU's texture side (zoomed far out on 1m) wgpu panics: no map there
         if cols.max(rows) > ctx.input(|i| i.max_texture_side) { return None; }
         let m = self.map.as_ref()?;
@@ -120,45 +132,49 @@ impl LiqCache {
         if nz.is_empty() { self.tex = None; return None; }
         let p = (nz.len() * 995 / 1000).min(nz.len() - 1);
         let top = *nz.select_nth_unstable_by(p, f32::total_cmp).1;
-        let (cold, hot) = (Color32::from_rgb(0x8a, 0x4b, 0x0f), Color32::from_rgb(0xff, 0xd6, 0x0a));
-        let mut img = egui::ColorImage::filled([cols, rows], Color32::TRANSPARENT);
+        let mut img = egui::ColorImage::filled([cols, rows], magma(0.0));
         for c in 0..cols {
             for r in 0..rows {
                 let v = g[c * rows + r];
                 if v <= 0.0 { continue; }
-                // squared, like Coinglass: most of the map stays dark, only real clusters light up
-                let t = (v / top).min(1.0).powi(2);
-                if t < 0.02 { continue; }
-                img.pixels[(rows - 1 - r) * cols + c] = lerp(cold, hot, t.sqrt()).gamma_multiply(0.04 + 0.86 * t);
+                // linear: most of the map stays deep purple, only the real clusters run to orange and yellow
+                img.pixels[(rows - 1 - r) * cols + c] = magma((v / top).min(1.0));
             }
         }
-        let tex = match self.tex.take() { Some((_, mut t)) => { t.set(img, egui::TextureOptions::NEAREST); t } None => ctx.load_texture("liqheat", img, egui::TextureOptions::NEAREST) };
+        let tex = match self.tex.take() { Some((_, mut t, _)) => { t.set(img, egui::TextureOptions::NEAREST); t } None => ctx.load_texture("liqheat", img, egui::TextureOptions::NEAREST) };
         let id = tex.id();
-        self.tex = Some((k, tex));
-        Some(id)
+        self.tex = Some((k, tex, top));
+        Some((id, top))
     }
 }
 
 impl Chart {
     /// Liquidation map (perp, live): heatmap over the plot and the profile at its right edge;
-    /// returns the legend colour when it drew.
-    pub(super) fn liq_layer(&mut self, ui: &Ui, cx: &Cx) -> Option<Color32> {
+    /// returns the legend colour when it drew, with the USD size of the map's brightest colour.
+    pub(super) fn liq_layer(&mut self, ui: &Ui, cx: &Cx) -> Option<(Color32, Option<f64>)> {
         let Cx { smarket, live, raw, bars, i0, i1, main, main_plot, fr, ps, lo, hi, resp, painter, .. } = *cx;
         let y = |v: f64| ps.y(v);
         // estimated liquidation map: horizontal profile on the right edge of the price plot,
         // longs (below price) red, shorts (above) green, merged into ~2px rows
         let mut liq_legend: Option<Color32> = None;
+        let mut scale_usd: Option<f64> = None;
         if self.liqmap && smarket == Market::Perp && live {
             // estimated from the 1m series whatever the interval: finer OI steps, same levels
             // time x price: each estimated level from when it formed until price swept it (2 px rows)
                 if self.liq.get(&raw, 1).is_some() {
-                let rows = ((main_plot.height() / 2.0) as usize).clamp(1, 1000);
+                // 4 px rows: at 2 px a row was about one price bin and every other row came out empty (stripes)
+                // up under the legend rows too (same price scale), as TradingView / Hyperdash draw it: a black band there
+                // read as a hole in the map
+                let area = Rect::from_min_max(pos2(main_plot.left(), main.top()), main_plot.right_bottom());
+                let rows = ((area.height() / 4.0) as usize).clamp(1, 500);
                 let ms = self.tf * 60_000;
-                let (bot, h) = (main_plot.bottom(), main_plot.height());
+                let (bot, h) = (area.bottom(), area.height());
                 let row = |px: f64| (bot - y(px)) / h * rows as f32;
-                if let Some(id) = self.liq.texture(ui.ctx(), bars[i0].t, ms, i1 - i0 + 1, rows, (lo.to_bits(), hi.to_bits(), self.scale as u8), row) {
-                    let r = Rect::from_min_max(pos2(fr.x(i0 as f32) - self.bar_w / 2.0, main_plot.top()), pos2(fr.x(i1 as f32) + self.bar_w / 2.0, main_plot.bottom()));
-                    painter.with_clip_rect(main_plot).image(id, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                if let Some((id, top)) = self.liq.texture(ui.ctx(), bars[i0].t, ms, i1 - i0 + 1, rows, (lo.to_bits(), hi.to_bits(), self.scale as u8), row) {
+                    let r = Rect::from_min_max(pos2(fr.x(i0 as f32) - self.bar_w / 2.0, area.top()), pos2(fr.x(i1 as f32) + self.bar_w / 2.0, area.bottom()));
+                    painter.with_clip_rect(area).image(id, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    // colour scale for the legend: the brightest colour is this much (the map's 99.5th percentile cell)
+                    scale_usd = bars.last().map(|b| top as f64 * b.c);
                 }
             }
             if let Some(m) = self.liq.get(&raw, 1) {
@@ -172,11 +188,10 @@ impl Chart {
                 }
                 let qmax = rows.values().map(|(l, s)| l.max(*s)).fold(0.0, f32::max);
                 if qmax > 0.0 {
-                    // one heat color for both sides (dim amber -> bright yellow): shorts are liquidated
+                    // one heat color for both sides (the map's magma ramp): shorts are liquidated
                     // above the price, longs below; up / down colors here read as "who is long"
                     let w = 90.0;
                     let clip = painter.with_clip_rect(main_plot);
-                    let (cold, hot) = (Color32::from_rgb(0x8a, 0x4b, 0x0f), Color32::from_rgb(0xff, 0xd6, 0x0a));
                     let ptr = resp.hover_pos().filter(|p| p.x > main.right() - w && p.x < main.right() && main_plot.contains(*p));
                     let mut tip = None;
                     for (k, (l, s)) in rows {
@@ -185,7 +200,7 @@ impl Chart {
                         let len = w * (q / qmax).sqrt();
                         let r = Rect::from_min_max(pos2(main.right() - len, y0), pos2(main.right(), y1.max(y0 + 1.0)));
                         let t = q / qmax;
-                        clip.rect_filled(r, 0, lerp(cold, hot, t).gamma_multiply(0.35 + 0.55 * t));
+                        clip.rect_filled(r, 0, magma(0.25 + 0.75 * t.sqrt()));
                         if ptr.is_some_and(|p| p.y >= y0 && p.y <= y1.max(y0 + 1.0)) { tip = Some(((k as f64 + 0.5) * row, l, s)); }
                     }
                     if let (Some((px, l, s)), Some(p)) = (tip, ptr) {
@@ -195,17 +210,25 @@ impl Chart {
                         painter.rect(b, 5, popup_bg(), Stroke::new(1.0, line()), egui::StrokeKind::Inside);
                         painter.galley(b.min + vec2(6.0, 6.0), g, fg());
                     }
-                    liq_legend = Some(hot);
+                    liq_legend = Some(magma(0.9));
                 }
             }
         }
-        liq_legend
+        liq_legend.map(|c| (c, scale_usd))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn magma_runs_dark_to_light() {
+        let l = |c: Color32| c.r() as u32 + c.g() as u32 + c.b() as u32;
+        let v: Vec<u32> = (0..=10).map(|i| l(magma(i as f32 / 10.0))).collect();
+        assert!(v.windows(2).all(|w| w[0] <= w[1]), "{v:?}");
+        assert_eq!(magma(1.0), Color32::from_rgb(0xfd, 0xe8, 0x8a));
+    }
 
     #[test]
     fn liq_levels_open_and_sweep() {

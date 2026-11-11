@@ -444,7 +444,7 @@ pub async fn history(k: &Keys, side: impl Fn(&Value) -> Side, h: &mut History) -
     // the row's side is the closing order's side: Sell closed a long
     h.closed = c["list"].as_array().into_iter().flatten().map(|c| ClosedPnl {
         ex, symbol: c["symbol"].as_str().unwrap_or_default().into(), long: Some(side(&c["side"]) == Side::Sell), qty: crate::opt_num(&c["closedSize"]),
-        entry: crate::opt_num(&c["avgEntryPrice"]), exit: crate::opt_num(&c["avgExitPrice"]), pnl: n(&c["closedPnl"]), ts: n(&c["updatedTime"]) as i64,
+        entry: crate::opt_num(&c["avgEntryPrice"]), exit: crate::opt_num(&c["avgExitPrice"]), pnl: n(&c["closedPnl"]), ts: n(&c["updatedTime"]) as i64, opened: None,
     }).collect();
     Ok(())
 }

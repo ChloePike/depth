@@ -165,6 +165,27 @@ pub async fn place(k: &Keys, req: &OrderReq, r: &Rules, ref_px: f64, mode: Mode)
     Ok(o["ordId"].as_str().unwrap_or_default().to_string())
 }
 
+/// `/api/v5/trade/amend-order` body: newSz is the total size in contracts (filled part included).
+/// Unchanged fields are left out (at least one is sent); cxlOnFail false keeps the order on a refused amend.
+fn amend_body(o: &OpenOrder, px: &str, qty: &str, r: &Rules, i: Inst) -> Result<Value> {
+    let mut b = json!({"instId": native(&o.symbol), "ordId": o.id, "cxlOnFail": false});
+    let sz = contracts(qty, i)?;
+    let sz_changed = sz != fmt_step(o.qty / i.ct, i.lot, false);
+    if sz_changed { b["newSz"] = sz.into(); }
+    if !sz_changed || px != fmt_step(o.price, r.tick, false) { b["newPx"] = px.into(); }
+    Ok(b)
+}
+
+/// Change a resting limit order in place (keeps its id): `px` and `qty` are the new price and the new TOTAL size,
+/// already on the venue grid as strings, in the same units as `OpenOrder.qty` / `OpenOrder.price`.
+/// sCode 0 means accepted, not done: the private stream shows the result.
+pub async fn amend(k: &Keys, o: &OpenOrder, px: &str, qty: &str, r: &Rules) -> Result<()> {
+    let b = amend_body(o, px, qty, r, inst(&native(&o.symbol)).await?)?;
+    let d = okx(k, Some(b), "/api/v5/trade/amend-order").await?;
+    if d[0]["sCode"] != "0" { bail!("okx amend: {} ({})", d[0]["sMsg"].as_str().unwrap_or("?"), d[0]["sCode"]); }
+    Ok(())
+}
+
 pub async fn cancel(k: &Keys, symbol: &str, id: &str) -> Result<()> {
     let d = okx(k, Some(json!({"instId": native(symbol), "ordId": id})), "/api/v5/trade/cancel-order").await?;
     if d[0]["sCode"] != "0" { bail!("okx cancel: {} ({})", d[0]["sMsg"].as_str().unwrap_or("?"), d[0]["sCode"]); }
@@ -386,6 +407,20 @@ mod tests {
         let l = order_body(&o(Side::Buy, false, Kind::Limit { price: 1.0, tif: Tif::Ioc }), Mode::Hedge, "1", Some("1")).unwrap();
         assert_eq!(l["ordType"].as_str(), Some("ioc"));
         assert!(order_body(&o(Side::Buy, false, Kind::Bbo { queue: true, level: 1 }), Mode::Hedge, "1", None).is_err());
+    }
+
+    #[test]
+    fn amend_bodies() {
+        let r = Rules { tick: BTC.tick, step: BTC.lot * BTC.ct, min_qty: BTC.min * BTC.ct, min_notional: 0.0 };
+        let o = OpenOrder { ex: Exchange::Okx, symbol: "BTCUSDT".into(), id: "123".into(), side: Side::Buy, price: 86000.1, qty: 0.0123, filled: 0.0, kind: "post_only".into(),
+            tif: String::new(), reduce_only: false, ts: 0, pos: None, client_id: None, trigger: None };
+        // 0.025 BTC = 2.50 contracts (lot 0.01); price unchanged is left out
+        let b = amend_body(&o, "86000.1", "0.025", &r, BTC).unwrap();
+        assert_eq!(b, json!({"instId": "BTC-USDT-SWAP", "ordId": "123", "cxlOnFail": false, "newSz": "2.50"}));
+        let b = amend_body(&o, "85000", "0.0123", &r, BTC).unwrap();
+        assert_eq!(b, json!({"instId": "BTC-USDT-SWAP", "ordId": "123", "cxlOnFail": false, "newPx": "85000"}));
+        let b = amend_body(&o, "85000", "0.03", &r, BTC).unwrap();
+        assert_eq!((b["newPx"].as_str(), b["newSz"].as_str()), (Some("85000"), Some("3.00")));
     }
 
     #[test]

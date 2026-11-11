@@ -241,6 +241,11 @@ Pressure = Áp lực
 Buyers in control = Phe mua chiếm ưu thế
 Sellers in control = Phe bán chiếm ưu thế
 Balanced = Cân bằng
+Book / flow balance = Cân bằng sổ lệnh / dòng lệnh
+Bid-heavy = Nghiêng về bên mua
+Ask-heavy = Nghiêng về bên bán
+Bids / asks ±%s = Mua / bán ±%s
+Book depth within the band every venue covers (up to ±0.5%) and 5 min aggressor flow; describes now, not a forecast = Độ sâu sổ lệnh trong dải mà mọi sàn đều bao phủ (tối đa ±0,5%) và dòng lệnh chủ động 5 phút; mô tả hiện tại, không phải dự báo
 Bids / asks ±0.5% = Bid / Ask ±0,5%
 Carry = Carry
 Predicted funding, annualized; basis: perp over spot = Funding dự kiến quy năm; basis = perp so với spot

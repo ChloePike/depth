@@ -38,6 +38,17 @@ fn db() -> Option<MutexGuard<'static, Connection>> {
     }).as_ref().map(|m| m.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
+// ---------------------------------------------------------------- small settings (meta)
+
+/// A value of the meta table (small per-device UI state, e.g. the account tables' column layouts).
+pub fn meta_get(key: &str) -> Option<String> {
+    db()?.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0)).optional().ok().flatten()
+}
+
+pub fn meta_put(key: &str, value: &str) {
+    if let Some(c) = db() { let _ = c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)", params![key, value]); }
+}
+
 // ---------------------------------------------------------------- market history cache
 
 pub fn hist_get(key: &str) -> Option<Vec<u8>> {

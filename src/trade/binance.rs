@@ -478,27 +478,37 @@ pub async fn history(k: &Keys, symbols: &[String], side: impl Fn(&Value) -> Side
     let pm = binance_pm(k).await?;
     let (base, (orders, trades, income)) = if pm { (papi_url(), ("/papi/v1/um/allOrders", "/papi/v1/um/userTrades", "/papi/v1/um/income")) }
         else { (binance_url(), ("/fapi/v1/allOrders", "/fapi/v1/userTrades", "/fapi/v1/income")) };
-    for sym in symbols.iter().take(6) {
-        let q = [("symbol", sym.clone()), ("limit", "50".to_string())];
-        let o = binance_at(k, base, reqwest::Method::GET, orders, &q).await?;
-        h.orders.extend(o.as_array().into_iter().flatten().map(|o| HistOrder {
+    // the ledger first: the symbols that closed something get their fills too, so their closes have side / size /
+    // entry / exit (they were PnL-only rows when not on screen, 2026-11-11)
+    let c = binance_at(k, base, reqwest::Method::GET, income, &[("incomeType", "REALIZED_PNL".into()), ("limit", "100".into())]).await?;
+    let ledger: Vec<ClosedPnl> = c.as_array().into_iter().flatten().map(|c| ClosedPnl {
+        ex, symbol: c["symbol"].as_str().unwrap_or_default().into(), long: None, qty: None, entry: None, exit: None, pnl: n(&c["income"]), ts: c["time"].as_i64().unwrap_or(0), opened: None,
+    }).collect();
+    let mut syms: Vec<String> = symbols.to_vec();
+    for l in &ledger { if !syms.contains(&l.symbol) { syms.push(l.symbol.clone()); } }
+    // ponytail: 12 symbols x (allOrders + userTrades), weight 5 each; page more if a week touches more symbols
+    syms.truncate(12);
+    // every symbol's two requests at once (they ran one after another: ~0.5 s each)
+    let side = &side;
+    let got = futures_util::future::join_all(syms.iter().map(|sym| async move {
+        let q = [("symbol", sym.clone()), ("limit", "200".to_string())];
+        let (o, t) = tokio::join!(binance_at(k, base, reqwest::Method::GET, orders, &q), binance_at(k, base, reqwest::Method::GET, trades, &q));
+        (sym, o, t)
+    })).await;
+    for (sym, o, t) in got {
+        h.orders.extend(o?.as_array().into_iter().flatten().map(|o| HistOrder {
             ex, symbol: sym.clone(), side: side(&o["side"]), kind: o["type"].as_str().unwrap_or_default().into(), price: n(&o["price"]), avg: n(&o["avgPrice"]),
             qty: n(&o["origQty"]), filled: n(&o["executedQty"]), status: o["status"].as_str().unwrap_or_default().into(), ts: o["time"].as_i64().unwrap_or(0),
         }));
-        let t = binance_at(k, base, reqwest::Method::GET, trades, &q).await?;
-        h.fills.extend(t.as_array().into_iter().flatten().map(|f| Fill {
+        h.fills.extend(t?.as_array().into_iter().flatten().map(|f| Fill {
             ex, id: f["id"].to_string(), symbol: sym.clone(), side: side(&f["side"]), price: n(&f["price"]), qty: n(&f["qty"]), fee: n(&f["commission"]),
             realized: crate::opt_num(&f["realizedPnl"]), ts: f["time"].as_i64().unwrap_or(0),
         }));
     }
-    // closes reconstructed from fills that realized PnL (side, size, exit VWAP, entry implied);
-    // symbols whose fills weren't fetched fall back to the income ledger (PnL only)
+    // closes reconstructed from fills that realized PnL (side, size, exit VWAP, entry implied); symbols past the cap
+    // keep the ledger's PnL-only rows
     h.closed = closes_from_fills(&h.fills);
-    let c = binance_at(k, base, reqwest::Method::GET, income, &[("incomeType", "REALIZED_PNL".into()), ("limit", "100".into())]).await?;
-    let rows: Vec<ClosedPnl> = c.as_array().into_iter().flatten().map(|c| ClosedPnl {
-        ex, symbol: c["symbol"].as_str().unwrap_or_default().into(), long: None, qty: None, entry: None, exit: None, pnl: n(&c["income"]), ts: c["time"].as_i64().unwrap_or(0),
-    }).filter(|c| !symbols.contains(&c.symbol)).collect();
-    h.closed.extend(merge_same_second(rows));
+    h.closed.extend(merge_same_second(ledger.into_iter().filter(|c| !syms.contains(&c.symbol)).collect()));
     Ok(())
 }
 

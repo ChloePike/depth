@@ -623,22 +623,37 @@ pub async fn can_trade(ex: Exchange, k: &Keys) -> Result<Option<bool>> {
     })
 }
 
-/// Venues whose resting limit orders `amend` changes in place (same id): Bybit linear and (unified
-/// account) spot, Binance USD-M. The others, Binance spot included, are changed by cancel + new.
-pub fn can_amend(ex: Exchange, spot: bool) -> bool { ex == Exchange::Bybit || (ex == Exchange::Binance && !spot) }
+/// Venues whose resting limit orders `amend` changes with one amend request: Bybit linear and (unified account) spot;
+/// Binance USD-M, OKX, Gate, Hyperliquid perps (same id); Bitget perps (its modify re-creates the order under a new id,
+/// see `amends`). The others, Binance spot included (one cancelReplace there, `replace_order`), are cancel + new.
+pub fn can_amend(ex: Exchange, spot: bool) -> bool {
+    ex == Exchange::Bybit || (!spot && matches!(ex, Exchange::Binance | Exchange::Okx | Exchange::Gate | Exchange::Hyperliquid | Exchange::Bitget))
+}
+
+/// `can_amend` for one row: Bitget's modify takes no time in force and its docs do not say a post-only order stays
+/// post-only, so those go the checked cancel + new way instead.
+pub fn amends(o: &OpenOrder, spot: bool) -> bool { can_amend(o.ex, spot) && !(o.ex == Exchange::Bitget && post_only(o)) }
 
 impl OpenOrder {
     /// Whether the order reduces a position: reduce-only, or in hedge mode a sell on the long / a buy on the short.
     pub fn closes(&self) -> bool { self.reduce_only || self.pos.is_some_and(|p| p != self.side) }
 }
 
-/// Why a resting order row cannot be changed (price / size) from Depth, None when it can: only a plain
-/// GTC limit ("lmt" is Kraken's), never a conditional row (a cancel + new would lose its trigger) nor
-/// post-only / IOC (it would come back as a GTC limit on the cancel + new venues).
+/// A post-only (maker-only) row, whichever way its venue says it: in the time in force (Binance GTX, Bybit PostOnly,
+/// Gate poc, Hyperliquid Alo) or in the type itself (OKX post_only, Binance spot LIMIT_MAKER).
+pub fn post_only(o: &OpenOrder) -> bool {
+    let n = |s: &str| s.to_ascii_lowercase().replace(['_', '-', ' '], "");
+    matches!(n(&o.tif).as_str(), "gtx" | "postonly" | "poc" | "alo" | "post") || matches!(n(&o.kind).as_str(), "postonly" | "limitmaker")
+}
+
+/// Why a resting order row cannot be changed (price / size) from Depth, None when it can: a GTC or post-only limit
+/// ("lmt" is Kraken's; a post-only one is placed again post-only on the cancel + new venues, `replace_order`), never a
+/// conditional row (a cancel + new would lose its trigger) nor IOC / FOK.
 pub fn not_editable(o: &OpenOrder) -> Option<&'static str> {
     if o.trigger.is_some() { return Some("trigger"); }
-    let limit = o.kind.eq_ignore_ascii_case("limit") || o.kind == "lmt";
-    if !(limit && matches!(o.tif.to_ascii_lowercase().as_str(), "" | "gtc" | "goodtillcancel")) { return Some("type"); }
+    let po = post_only(o);
+    let limit = o.kind.eq_ignore_ascii_case("limit") || o.kind == "lmt" || po;
+    if !(limit && (po || matches!(o.tif.to_ascii_lowercase().as_str(), "" | "gtc" | "goodtillcancel"))) { return Some("type"); }
     None
 }
 
@@ -661,11 +676,16 @@ pub fn amend_checked(o: &OpenOrder, price: f64, qty: f64, r: &Rules) -> Result<(
 /// filled part included) as `amend_checked` puts them on the grid. `spot`: a spot row (Bybit only).
 pub async fn amend(ex: Exchange, k: &Keys, o: &OpenOrder, spot: bool, price: f64, qty: f64, r: &Rules) -> Result<()> {
     if k.demo { return crate::demo::amend(o, if spot { crate::Market::Spot } else { crate::Market::Perp }, price, qty, r); }
-    if !can_amend(ex, spot) { bail!("{ex:?}: no in-place amend"); }
+    if !(can_amend(ex, spot) && !(ex == Exchange::Bitget && post_only(o))) { bail!("{ex:?}: no in-place amend"); }
     let (px, q) = amend_checked(o, price, qty, r)?;
     match ex {
         Exchange::Bybit => bybit::amend(k, o, spot, &px, &q, r).await,
-        _ => binance::amend(k, o, &px, &q).await,
+        Exchange::Binance => binance::amend(k, o, &px, &q).await,
+        Exchange::Okx => okx::amend(k, o, &px, &q, r).await,
+        Exchange::Gate => gate::amend(k, o, &px, &q, r).await,
+        Exchange::Hyperliquid => hyperliquid::amend(k, o, &px, &q, r).await,
+        Exchange::Bitget => bitget::amend(k, o, &px, &q, r).await,
+        _ => bail!("{ex:?}: no in-place amend"),
     }
 }
 
@@ -911,10 +931,11 @@ pub struct Fill { pub ex: Exchange, pub id: String, pub symbol: String, pub side
 #[derive(Clone, Debug)]
 pub struct HistOrder { pub ex: Exchange, pub symbol: String, pub side: Side, pub kind: String, pub price: f64, pub avg: f64, pub qty: f64, pub filled: f64, pub status: String, pub ts: i64 }
 
-/// A closed (or partly closed) position. Binance only reports realized PnL per close, so qty /
-/// entry / exit are None there.
+/// A closed (or partly closed) position. Binance only reports realized PnL per close (its ledger rows have no qty /
+/// entry / exit; `closes_from_fills` rebuilds them where the fills were fetched). `opened`: when the position last
+/// left flat before the close, from the fills (`fill_opened`), None when the opening fill is older than those fetched.
 #[derive(Clone, Debug)]
-pub struct ClosedPnl { pub ex: Exchange, pub symbol: String, pub long: Option<bool>, pub qty: Option<f64>, pub entry: Option<f64>, pub exit: Option<f64>, pub pnl: f64, pub ts: i64 }
+pub struct ClosedPnl { pub ex: Exchange, pub symbol: String, pub long: Option<bool>, pub qty: Option<f64>, pub entry: Option<f64>, pub exit: Option<f64>, pub pnl: f64, pub ts: i64, pub opened: Option<i64> }
 
 #[derive(Clone, Debug, Default)]
 pub struct History { pub orders: Vec<HistOrder>, pub fills: Vec<Fill>, pub closed: Vec<ClosedPnl> }
@@ -928,9 +949,12 @@ pub async fn history(ex: Exchange, k: &Keys, symbols: &[String]) -> Result<Histo
     match ex {
         Exchange::Bybit => bybit::history(k, side, &mut h).await?,
         Exchange::Binance => binance::history(k, symbols, side, &mut h).await?,
-        _ => bail!("{ex:?} history not implemented"),
+        // ponytail: the other venues' history endpoints are not wired; their tabs stay empty instead of a toast per open
+        // (Hyperliquid's userFillsByTime would give fills and closes with dir / startPosition)
+        _ => return Ok(h),
     }
     crate::db::fills_put(&h.fills, k.demo);
+    fill_opened(&mut h.closed, &h.fills);
     h.orders.sort_by(|a, b| b.ts.cmp(&a.ts));
     h.fills.sort_by(|a, b| b.ts.cmp(&a.ts));
     h.closed.sort_by(|a, b| b.ts.cmp(&a.ts));
@@ -998,13 +1022,38 @@ pub(crate) fn closes_from_fills(fills: &[Fill]) -> Vec<ClosedPnl> {
                 c.qty = Some(q + f.qty);
                 c.pnl += r;
             }
-            None => out.push(ClosedPnl { ex: f.ex, symbol: f.symbol.clone(), long: Some(long), qty: Some(f.qty), entry: None, exit: Some(f.price), pnl: r, ts: f.ts }),
+            None => out.push(ClosedPnl { ex: f.ex, symbol: f.symbol.clone(), long: Some(long), qty: Some(f.qty), entry: None, exit: Some(f.price), pnl: r, ts: f.ts, opened: None }),
         }
     }
     for c in &mut out {
         if let (Some(q), Some(x)) = (c.qty, c.exit) { if q > 0.0 { c.entry = Some(if c.long == Some(true) { x - c.pnl / q } else { x + c.pnl / q }); } }
     }
     out
+}
+
+/// Each close's open time: per symbol the fills oldest first and the net position they add up to (one-way: buys up,
+/// sells down); the position of a close opened at the last fill that took the net off flat before it.
+/// ponytail: one-way only; in hedge mode both sides' fills share one net (fills carry no position side here), so a
+/// hedged symbol's open times can be off. Fill rows with their position side would fix it.
+pub(crate) fn fill_opened(closed: &mut [ClosedPnl], fills: &[Fill]) {
+    use std::collections::HashMap;
+    let mut by: HashMap<(Exchange, &str), Vec<&Fill>> = HashMap::new();
+    for f in fills { by.entry((f.ex, f.symbol.as_str())).or_default().push(f); }
+    // per symbol: the times the net left flat, oldest first
+    let starts: HashMap<(Exchange, &str), Vec<i64>> = by.into_iter().map(|(k, mut v)| {
+        v.sort_by_key(|f| f.ts);
+        let (mut net, mut out) = (0.0f64, vec![]);
+        for f in v {
+            let eps = f.qty.abs() * 1e-9;
+            if net.abs() <= eps { out.push(f.ts); }
+            net += if f.side == Side::Buy { f.qty } else { -f.qty };
+        }
+        (k, out)
+    }).collect();
+    for c in closed.iter_mut() {
+        // the close's own fill can open the next position (a flip): only starts before it count
+        c.opened = starts.get(&(c.ex, c.symbol.as_str())).and_then(|s| s.iter().rev().find(|t| **t < c.ts / 1000 * 1000).copied());
+    }
 }
 
 /// Ledger rows of one close arrive per fill: fold rows of the same symbol and second.
@@ -1110,6 +1159,17 @@ fn is_usd(coin: &str) -> bool { matches!(coin, "USDT" | "USDC" | "USD" | "USDE" 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn closes_get_the_time_their_position_opened() {
+        let fill = |ts: i64, side: Side, qty: f64| Fill { ex: Exchange::Binance, id: ts.to_string(), symbol: "A".into(), side, price: 1.0, qty, fee: 0.0, realized: None, ts };
+        // long opened at 1 s, added at 2 s, closed at 5 s; a short opened at 8 s by a flip... closed at 9 s
+        let fills = [fill(1_000, Side::Buy, 1.0), fill(2_000, Side::Buy, 1.0), fill(5_000, Side::Sell, 2.0), fill(8_000, Side::Sell, 1.0), fill(9_000, Side::Buy, 1.0)];
+        let close = |ts: i64| ClosedPnl { ex: Exchange::Binance, symbol: "A".into(), long: None, qty: None, entry: None, exit: None, pnl: 0.0, ts, opened: None };
+        let mut c = vec![close(5_000), close(9_000), close(500)];
+        fill_opened(&mut c, &fills);
+        assert_eq!(c.iter().map(|c| c.opened).collect::<Vec<_>>(), vec![Some(1_000), Some(8_000), None]);
+    }
+
     #[test]
     fn option_order_body() {
         use super::*;
@@ -1238,9 +1298,9 @@ mod tests {
         assert!((c.exit.unwrap() - 334.0 / 3.0).abs() < 1e-9);
         assert!((c.entry.unwrap() - 100.0).abs() < 1e-9);
         let m = merge_same_second(vec![
-            ClosedPnl { ex: Exchange::Binance, symbol: "A".into(), long: None, qty: None, entry: None, exit: None, pnl: 1.0, ts: 1_100 },
-            ClosedPnl { ex: Exchange::Binance, symbol: "A".into(), long: None, qty: None, entry: None, exit: None, pnl: 2.0, ts: 1_900 },
-            ClosedPnl { ex: Exchange::Binance, symbol: "A".into(), long: None, qty: None, entry: None, exit: None, pnl: 4.0, ts: 2_100 }]);
+            ClosedPnl { ex: Exchange::Binance, symbol: "A".into(), long: None, qty: None, entry: None, exit: None, pnl: 1.0, ts: 1_100, opened: None },
+            ClosedPnl { ex: Exchange::Binance, symbol: "A".into(), long: None, qty: None, entry: None, exit: None, pnl: 2.0, ts: 1_900, opened: None },
+            ClosedPnl { ex: Exchange::Binance, symbol: "A".into(), long: None, qty: None, entry: None, exit: None, pnl: 4.0, ts: 2_100, opened: None }]);
         assert_eq!(m.iter().map(|c| c.pnl).collect::<Vec<_>>(), vec![3.0, 4.0]);
     }
 
@@ -1550,18 +1610,28 @@ mod tests {
         assert_eq!(b, json!({"category": "linear", "symbol": "BTCUSDT", "orderId": "1", "qty": "0.015"}));
         let b = bybit::amend_body(&o, true, "79500.0", "0.010", &r);
         assert_eq!(b, json!({"category": "spot", "symbol": "BTCUSDT", "orderId": "1", "price": "79500.0"}));
-        assert!(can_amend(Exchange::Bybit, true) && can_amend(Exchange::Binance, false) && !can_amend(Exchange::Binance, true) && !can_amend(Exchange::Okx, false));
+        assert!(can_amend(Exchange::Bybit, true) && can_amend(Exchange::Binance, false) && !can_amend(Exchange::Binance, true) && can_amend(Exchange::Okx, false));
+        assert!(!can_amend(Exchange::Okx, true) && !can_amend(Exchange::Kraken, false) && !can_amend(Exchange::Lighter, false));
         // with real keys the rules refuse before any request; a venue without amend refuses outright
         let k = Keys { key: "k".into(), secret: "s".into(), extra: None, demo: false };
         assert!(now(amend(Exchange::Bybit, &k, &o, false, 80_000.0, 0.004, &r)).unwrap_err().to_string().contains("already filled"));
         assert!(now(amend(Exchange::Binance, &k, &o, false, 80_000.0, 0.0009, &r)).unwrap_err().to_string().contains("below minimum"));
-        assert!(now(amend(Exchange::Okx, &k, &o, false, 79_000.0, 0.01, &r)).unwrap_err().to_string().contains("no in-place amend"));
+        assert!(now(amend(Exchange::Kraken, &k, &OpenOrder { ex: Exchange::Kraken, ..o.clone() }, false, 79_000.0, 0.01, &r)).unwrap_err().to_string().contains("no in-place amend"));
+        // Bitget's modify is not trusted to keep post-only: those rows take the checked cancel + new
+        let bg = OpenOrder { ex: Exchange::Bitget, ..o.clone() };
+        assert!(amends(&bg, false) && !amends(&OpenOrder { tif: "post_only".into(), ..bg.clone() }, false));
         assert!(now(amend(Exchange::Binance, &k, &o, true, 79_000.0, 0.01, &r)).unwrap_err().to_string().contains("no in-place amend"));
         // only plain GTC limits are changed from Depth
         assert_eq!(not_editable(&o), None);
         assert_eq!(not_editable(&OpenOrder { kind: "lmt".into(), tif: String::new(), ..o.clone() }), None);
         assert_eq!(not_editable(&OpenOrder { trigger: Some(1.0), ..o.clone() }), Some("trigger"));
-        assert_eq!(not_editable(&OpenOrder { tif: "PostOnly".into(), ..o.clone() }), Some("type"));
+        // post-only, each venue's way, can be changed (it is placed again post-only); IOC cannot
+        for (kind, tif) in [("limit", "PostOnly"), ("LIMIT", "GTX"), ("limit", "poc"), ("limit", "Alo"), ("post_only", ""), ("LIMIT_MAKER", "")] {
+            let p = OpenOrder { kind: kind.into(), tif: tif.into(), ..o.clone() };
+            assert!(post_only(&p) && not_editable(&p).is_none(), "{kind} {tif}");
+        }
+        assert!(!post_only(&o));
+        assert_eq!(not_editable(&OpenOrder { tif: "IOC".into(), ..o.clone() }), Some("type"));
         assert_eq!(not_editable(&OpenOrder { kind: "STOP".into(), ..o.clone() }), Some("type"));
     }
 

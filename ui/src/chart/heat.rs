@@ -15,6 +15,8 @@ pub(super) struct HeatCache {
     /// bumped whenever `bars` changes; the GPU texture is rebuilt only then (about once a second)
     ver: u64,
     tex: Option<(u64, egui::TextureHandle, TexGeom)>,
+    /// the book right now for the depth profile at the right edge: (when read, bin, [(price, qty, ask)])
+    depth: Option<(std::time::Instant, f64, Vec<(f64, f32, bool)>)>,
 }
 
 /// Where the heatmap texture sits: first bar time, bar width (ms), lowest bin, bin count.
@@ -57,8 +59,9 @@ impl HeatCache {
         if self.bars.len() > 2000 { self.bars.drain(..self.bars.len() - 2000); }
     }
 
-    /// The heatmap as one RGBA texture (columns = bars, rows = price bins, top = highest price),
-    /// re-uploaded only when new samples arrived. Drawn as a single textured rect per frame.
+    /// The heatmap as one RGBA texture (columns = bars, rows = price bins, top = highest price), re-uploaded only when
+    /// new samples arrived. Drawn as a single textured rect per frame. (Thin 2 px lines per bin, as CoinGlass draws its
+    /// finer bins, made a comb of BTC's $15-25 bins: nearly every bin holds orders, 2026-11-11.)
     fn texture(&mut self, ctx: &egui::Context) -> Option<(egui::TextureId, TexGeom)> {
         if let Some((v, t, g)) = &self.tex { if *v == self.ver { return Some((t.id(), *g)); } }
         // a texture side over the GPU limit (8192 here) is a wgpu validation panic: keep the newest
@@ -84,14 +87,17 @@ impl HeatCache {
         }).collect();
         let mut qs: Vec<f32> = vals.iter().flat_map(|b| b.2.iter().copied().filter(|q| *q > 0.0)).collect();
         if qs.is_empty() { return None; }
-        qs.sort_by(f32::total_cmp);
-        let qmax = qs[(qs.len() * 97 / 100).min(qs.len() - 1)].max(1e-9);
+        let p = (qs.len() * 995 / 1000).min(qs.len() - 1);
+        let qmax = qs.select_nth_unstable_by(p, f32::total_cmp).1.max(1e-9);
         let mut img = egui::ColorImage::new([cols, rows], vec![Color32::TRANSPARENT; cols * rows]);
         for (bt, blo, v) in &vals {
             let x = ((bt - t0) / ms) as usize;
+            // each bin against its price neighbours (`local_median`): what stands out of the book around it lights up
+            let meds = local_median(v, NEIGHBOURS);
             for (k, q) in v.iter().enumerate() {
                 if *q <= 0.0 { continue; }
-                let (i, c) = (((rows - 1 - (blo + k as i64 - lo) as usize / step) * cols + x), heat_color((q / qmax).min(1.0).sqrt()));
+                let med = meds[k];
+                let (i, c) = (((rows - 1 - (blo + k as i64 - lo) as usize / step) * cols + x), heat_color(heat_level(*q, med).max(BASE_MAX * (*q / qmax).min(1.0).sqrt())));
                 // merged bins keep the strongest (alpha rises with the level)
                 if c.a() >= img.pixels[i].a() { img.pixels[i] = c; }
             }
@@ -107,26 +113,52 @@ impl HeatCache {
     }
 }
 
-/// dark blue -> cyan -> yellow ramp for liquidity
+/// Every resting bin shows at least this much of the ramp by its size against the map's 99.5th percentile, so the book
+/// stays visible (walls alone left the map nearly empty, 2026-11-11); capped so the dense book at the price stays green,
+/// not yellow: only standing out of its neighbours (`heat_level`) reaches the top.
+const BASE_MAX: f32 = 0.45;
+
+/// Bins on each side a bin is compared with (`local_median`).
+const NEIGHBOURS: usize = 10;
+
+/// Per bin, the median of the resting bins within `w` bins of it (itself included). Against the whole column's median
+/// instead, the dense book next to the price stood out of the thin 2% edges: a solid yellow band at the price, 2026-11-11.
+fn local_median(v: &[f32], w: usize) -> Vec<f32> {
+    let mut buf = Vec::with_capacity(2 * w + 1);
+    (0..v.len()).map(|k| {
+        buf.clear();
+        buf.extend(v[k.saturating_sub(w)..(k + w + 1).min(v.len())].iter().copied().filter(|q| *q > 0.0));
+        if buf.is_empty() { return 0.0; }
+        let m = buf.len() / 2;
+        *buf.select_nth_unstable_by(m, f32::total_cmp).1
+    }).collect()
+}
+
+/// How far a bin stands out of the book around it (`med`: the median of its price neighbours) as 0..1 on a log scale: half the median 0, the
+/// median 0.2 (a faint purple wherever orders rest, as CoinGlass shows the book), 3x about 0.5 (still purple: neighbouring
+/// bins vary 1-3x minute to minute, and green there read as a checkerboard), WALL_X times it 1. A cut-off at 2x hid the
+/// smoother minute columns entirely, 2026-11-11. Against the map's top level instead, BTC's $20 bins summed over 12 venues were all near the top: one yellow
+/// block, walls invisible (2026-11-11). Fades in, no threshold (a threshold flickered bar to bar).
+const WALL_X: f32 = 16.0;
+fn heat_level(q: f32, med: f32) -> f32 { ((2.0 * q / med.max(1e-9)).ln() / (2.0 * WALL_X).ln()).clamp(0.0, 1.0) }
+
+/// Ramp for liquidity, no blue and no purple (the liquidation map under it is purple): transparent -> teal green ->
+/// yellow green -> yellow.
 fn heat_color(s: f32) -> Color32 {
-    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
-    let (r, g, b) = if s < 0.5 {
-        let t = s / 0.5;
-        (lerp(20.0, 30.0, t), lerp(40.0, 150.0, t), lerp(90.0, 200.0, t))
-    } else {
-        let t = (s - 0.5) / 0.5;
-        (lerp(30.0, 235.0, t), lerp(150.0, 200.0, t), lerp(200.0, 95.0, t))
-    };
-    // thin liquidity fades out completely, so only real walls light up (a floor here turned a
-    // lone column into a solid block)
-    let a = if s < 0.25 { 0.0 } else { 190.0 * ((s - 0.25) / 0.75).powf(1.3) };
-    Color32::from_rgba_unmultiplied(r as u8, g as u8, b as u8, a as u8)
+    const S: [(f32, [u8; 4]); 5] = [(0.0, [30, 120, 90, 0]), (0.3, [35, 150, 105, 70]), (0.6, [45, 185, 110, 170]),
+        (0.85, [175, 220, 60, 235]), (1.0, [255, 236, 90, 255])];
+    let s = s.clamp(0.0, 1.0);
+    let k = S.iter().position(|x| x.0 >= s).unwrap_or(S.len() - 1).max(1);
+    let ((a, ca), (b, cb)) = (S[k - 1], S[k]);
+    let t = (s - a) / (b - a);
+    let m = |i: usize| (ca[i] as f32 + (cb[i] as f32 - ca[i] as f32) * t).round() as u8;
+    Color32::from_rgba_unmultiplied(m(0), m(1), m(2), m(3))
 }
 
 impl Chart {
     /// Everything behind the candles: grid lines, the watermark and the cross-venue book heatmap.
     pub(super) fn backdrop(&mut self, ui: &Ui, cx: &Cx) {
-        let Cx { a, smarket, live, bars, main, main_plot, fr, ps, painter, gv, .. } = *cx;
+        let Cx { a, smarket, live, bars, main, main_plot, fr, ps, painter, gv, lo, hi, .. } = *cx;
         let y = |v: f64| ps.y(v);
         // grid + price axis (TradingView: faint dotted grid; round levels a shade brighter)
         for v in gv.iter().copied() {
@@ -147,7 +179,8 @@ impl Chart {
             let r = Rect::from_min_max(
                 pos2(fr.x(i0f) - self.bar_w / 2.0, y((g.lo + g.bins as i64) as f64 * bin - bin / 2.0)),
                 pos2(fr.x(i0f + g.cols as f32 - 1.0) + self.bar_w / 2.0, y(g.lo as f64 * bin - bin / 2.0)));
-            painter.with_clip_rect(main_plot).image(tex, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            // up under the legend rows too, like the liquidation map
+            painter.with_clip_rect(Rect::from_min_max(pos2(main_plot.left(), main.top()), main_plot.right_bottom())).image(tex, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         };
         // heatmap (cross-venue book, USDT) behind candles
         // the footprint replaces the book heatmap: two volume colorings on top of each other read as noise
@@ -155,7 +188,34 @@ impl Chart {
             if let Some(h) = a.heat.get(&smarket) {
                 self.cache.update(h, self.tf, smarket);
                 // recorded live from the book: on long intervals it starts as the current bar only
-                if let Some((tex, g)) = self.cache.texture(ui.ctx()) { quad(tex, g, self.cache.bin); }
+                let bin = self.cache.bin;
+                if let Some((tex, g)) = self.cache.texture(ui.ctx()) { quad(tex, g, bin); }
+                // the book now as a profile at the right edge, asks above (down colour) and bids below (up colour), as
+                // CoinGlass draws it; the liquidation map's own profile takes that place while it is on
+                if !(self.liqmap && smarket == Market::Perp) && bin > 0.0 {
+                    let fresh = self.cache.depth.as_ref().is_some_and(|(at, b, _)| *b == bin && at.elapsed() < std::time::Duration::from_millis(250));
+                    if !fresh {
+                        let (bids, asks) = a.book_where(smarket, bin, ((hi - lo) / ((lo + hi) / 2.0)).clamp(0.001, 0.05), true, |_| true);
+                        let lv = bids.iter().map(|l| (l.px, l.qty as f32, false)).chain(asks.iter().map(|l| (l.px, l.qty as f32, true))).collect();
+                        self.cache.depth = Some((std::time::Instant::now(), bin, lv));
+                    }
+                    if let Some((_, _, lv)) = &self.cache.depth {
+                        // merged into rows of at least 2 px
+                        let row = ((hi - lo) / main_plot.height() as f64 * 2.0).max(bin);
+                        let mut rows: std::collections::BTreeMap<(i64, bool), f32> = Default::default();
+                        for &(px, q, ask) in lv { if px >= lo && px <= hi { *rows.entry(((px / row).floor() as i64, ask)).or_default() += q; } }
+                        let qmax = rows.values().copied().fold(0.0, f32::max);
+                        if qmax > 0.0 {
+                            let (w, clip) = (80.0, painter.with_clip_rect(main_plot));
+                            for ((k, ask), q) in rows {
+                                let (y0, y1) = (y((k + 1) as f64 * row), y(k as f64 * row));
+                                let len = w * (q / qmax).sqrt();
+                                let col = if ask { dn() } else { up() };
+                                clip.rect_filled(Rect::from_min_max(pos2(main.right() - len, y0), pos2(main.right(), y1.max(y0 + 1.0))), 0, col.gamma_multiply(0.75));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -195,4 +255,36 @@ mod tests {
         // the quad still covers every bin of the kept bars
         assert!(g.lo + g.bins as i64 >= 1499 * 10 + 1 && g.cols == w);
     }
+}
+
+#[cfg(test)]
+mod ramp_tests {
+    use super::*;
+
+    #[test]
+    fn a_dense_book_at_the_price_does_not_light_up_only_a_wall_does() {
+        // thin edges, a dense block in the middle (the book at the price), one wall 10x inside it
+        let mut v = vec![1.0f32; 60];
+        for x in v.iter_mut().take(40).skip(20) { *x = 10.0; }
+        v[30] = 100.0;
+        let m = local_median(&v, NEIGHBOURS);
+        assert!(heat_level(v[25], m[25]) < 0.3, "the dense book stays dark: {}", heat_level(v[25], m[25]));
+        assert!(heat_level(v[30], m[30]) > 0.75, "the wall lights up: {}", heat_level(v[30], m[30]));
+    }
+
+    #[test]
+    fn heat_scale_fades_small_and_tops_out() {
+        // the column's typical level faint, its 1-3x noise still purple (under the green from 0.55), a wall 16x the brightest
+        assert_eq!(heat_level(0.0, 10.0), 0.0);
+        let med = heat_level(10.0, 10.0);
+        assert!(med > 0.15 && med < 0.25 && heat_color(med).a() > 0, "{med}");
+        assert!(heat_level(30.0, 10.0) < 0.55, "{}", heat_level(30.0, 10.0));
+        assert!((heat_level(160.0, 10.0) - 1.0).abs() < 1e-5 && heat_level(500.0, 10.0) == 1.0);
+        assert_eq!(heat_color(0.0).a(), 0);
+        assert!(heat_color(0.5).a() > heat_color(0.2).a() && heat_color(1.0).a() == 255);
+        // no blue on top: the ramp ends yellow
+        let c = heat_color(1.0);
+        assert!(c.r() > c.b() && c.g() > c.b());
+    }
+
 }

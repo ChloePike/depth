@@ -252,6 +252,33 @@ pub async fn cancel_twap(k: &Keys, symbol: &str, id: &str) -> Result<()> {
     if d["status"] == "success" { Ok(()) } else { bail!("hyperliquid: {}", d["status"]["error"].as_str().map(String::from).unwrap_or_else(|| d["status"].to_string())) }
 }
 
+/// `modify` action. `always_place` (`a`) is left out (false; the docs reject `a: false` in the hash): the new
+/// order is placed only if the cancel of the old one succeeded, and must be Alo or a non-marketable Gtc.
+#[derive(Serialize)]
+struct ModifyAction { #[serde(rename = "type")] ty: &'static str, oid: u64, order: OrderWire }
+
+/// Modify of a resting limit order: same side, time in force (Alo stays Alo) and reduce-only. The venue places a
+/// fresh order under the same oid, so `s` is what is left to fill: the new total minus what already filled.
+fn modify_action(o: &OpenOrder, a: &Asset, px: &str, qty: &str) -> Result<ModifyAction> {
+    if o.trigger.is_some() { bail!("hyperliquid: a trigger order cannot be amended here"); }
+    let oid: u64 = o.id.parse().map_err(|_| anyhow!("hyperliquid: bad order id {}", o.id))?;
+    let (px, qty): (f64, f64) = (px.parse()?, qty.parse()?);
+    let s = sz_str(qty - o.filled, a.sz_dec);
+    if s.parse::<f64>().unwrap_or(0.0) <= 0.0 { bail!("hyperliquid: new size must exceed the filled {}", o.filled); }
+    let tif = if post_only(o) { "Alo" } else { "Gtc" };
+    Ok(ModifyAction { ty: "modify", oid, order: OrderWire { a: a.index, b: o.side == Side::Buy, p: px_str(px, a.sz_dec), s, r: o.reduce_only, t: OrderType { limit: Limit { tif } } } })
+}
+
+/// Change a resting limit order in place (keeps its id): `px` and `qty` are the new price and the new TOTAL size,
+/// already on the venue grid as strings, in the same units as `OpenOrder.qty` / `OpenOrder.price`.
+pub async fn amend(k: &Keys, o: &OpenOrder, px: &str, qty: &str, _r: &Rules) -> Result<()> {
+    let a = asset(&o.symbol).await?;
+    let d = exchange(k, &modify_action(o, &a, px, qty)?).await?;
+    // success is `{"type": "default"}` (no data); a status list, when present, may carry the error
+    if let Some(e) = d["statuses"][0]["error"].as_str() { bail!("hyperliquid: {e}"); }
+    Ok(())
+}
+
 pub async fn cancel(k: &Keys, symbol: &str, id: &str) -> Result<()> {
     let a = asset(symbol).await?;
     let o: u64 = id.parse().map_err(|_| anyhow!("hyperliquid: bad order id {id}"))?;
@@ -401,6 +428,17 @@ mod tests {
                              "s": "0x6b53878fc99d26047f4d7e8c90eb98955a109f44209163f52d8dc4278cbbd9f5", "v": 27}));
         // expiresAfter changes the hash (SDK appends 0x00 + 8 bytes)
         assert_ne!(action_hash(&a, 0, Some(1)).unwrap(), action_hash(&a, 0, None).unwrap());
+    }
+
+    #[test]
+    fn modify_post_only() {
+        let a = Asset { coin: "BTC".into(), index: 3, sz_dec: 5 };
+        let o = OpenOrder { ex: Exchange::Hyperliquid, symbol: "BTCUSDT".into(), id: "12345".into(), side: Side::Sell, price: 100_000.0, qty: 0.01, filled: 0.004,
+            kind: "Limit".into(), tif: "Alo".into(), reduce_only: true, ts: 0, pos: None, client_id: None, trigger: None };
+        let v = serde_json::to_value(modify_action(&o, &a, "101000.0", "0.02").unwrap()).unwrap();
+        assert_eq!(v, json!({"type": "modify", "oid": 12345, "order": {"a": 3, "b": false, "p": "101000", "s": "0.016", "r": true, "t": {"limit": {"tif": "Alo"}}}}));
+        assert!(modify_action(&o, &a, "101000", "0.004").is_err());
+        assert!(modify_action(&OpenOrder { tif: "Gtc".into(), ..o }, &a, "1", "1").is_ok_and(|m| m.order.t.limit.tif == "Gtc"));
     }
 
     #[test]

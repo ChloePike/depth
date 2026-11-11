@@ -241,6 +241,11 @@ Pressure = Давление
 Buyers in control = Покупатели контролируют
 Sellers in control = Продавцы контролируют
 Balanced = Баланс
+Book / flow balance = Баланс стакана / потока
+Bid-heavy = Перевес бидов
+Ask-heavy = Перевес асков
+Bids / asks ±%s = Биды / аски ±%s
+Book depth within the band every venue covers (up to ±0.5%) and 5 min aggressor flow; describes now, not a forecast = Глубина стакана в полосе, которую покрывают все биржи (до ±0,5 %), и агрессивный поток за 5 мин; описывает текущий момент, не прогноз
 Bids / asks ±0.5% = Биды / аски ±0,5%
 Carry = Carry
 Predicted funding, annualized; basis: perp over spot = Прогноз фандинга в годовых; базис = бессрочный к споту

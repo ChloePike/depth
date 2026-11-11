@@ -107,7 +107,7 @@ impl App {
             "ex": ex_name(o.ex), "symbol": o.symbol, "id": o.id, "side": if o.side == Side::Buy { "buy" } else { "sell" }, "price": o.price, "qty": o.qty,
             "filled": o.filled, "kind": o.kind, "tif": o.tif, "reduce_only": o.reduce_only, "ts": o.ts, "pos": o.pos.map(side_name), "spot": market != "perp", "market": market,
             // price / size editable (None) or why not; changed in place or by cancel + new
-            "edit": if market == "margin" { Some("margin") } else { trade::not_editable(o) }, "amends": trade::can_amend(o.ex, market == "spot"),
+            "edit": if market == "margin" { Some("margin") } else { trade::not_editable(o) }, "amends": trade::amends(o, market == "spot"),
         });
         let orders: Vec<Value> = acc.orders.iter().map(|o| order_json(o, "perp")).chain(acc.spot_orders.iter().map(|o| order_json(o, "spot")))
             .chain(acc.margin_orders.iter().map(|o| order_json(o, "margin"))).collect();
@@ -121,7 +121,7 @@ impl App {
                 "price": o.price, "avg": o.avg, "qty": o.qty, "filled": o.filled, "status": o.status, "ts": o.ts})));
             hist.1.extend(h.fills.iter().map(|f| json!({"ex": ex_name(f.ex), "symbol": f.symbol, "side": if f.side == Side::Buy { "buy" } else { "sell" },
                 "price": f.price, "qty": f.qty, "fee": f.fee, "realized": f.realized, "ts": f.ts})));
-            hist.2.extend(h.closed.iter().map(|c| json!({"ex": ex_name(c.ex), "symbol": c.symbol, "long": c.long, "qty": c.qty, "entry": c.entry, "exit": c.exit, "pnl": c.pnl, "ts": c.ts})));
+            hist.2.extend(h.closed.iter().map(|c| json!({"ex": ex_name(c.ex), "symbol": c.symbol, "long": c.long, "qty": c.qty, "entry": c.entry, "exit": c.exit, "pnl": c.pnl, "ts": c.ts, "opened": c.opened})));
             hist.3 = hist.3.min(*ts);
         }
         let by_ts = |v: &mut Vec<Value>| v.sort_by(|a, b| b["ts"].as_i64().cmp(&a["ts"].as_i64()));
@@ -181,7 +181,9 @@ impl App {
             let bars: Vec<depth::agg::Bar> = ag.series.get(&(None, m)).map(|s| s.bars.iter().cloned().collect()).unwrap_or_default();
             let vm = depth::quant::vol_model(&bars);
             let mid = ag.mid(m).unwrap_or(0.0);
-            let (b, k) = ag.book_where(m, depth::agg::nice(mid.max(1e-9) * 1e-4), 0.005, true, |_| true);
+            // the band every venue's book covers on both sides (up to ±0.5%): deeper books do not outweigh short ones
+            let band = ag.common_depth(m, 0.005);
+            let (b, k) = ag.book_where(m, depth::agg::nice(mid.max(1e-9) * 1e-4), band, true, |_| true);
             let usd = |ls: &[depth::agg::Level]| ls.iter().map(|l| l.qty * l.px).sum::<f64>();
             let carry: Vec<Value> = ag.venues.iter().filter(|((_, vm2), _)| *vm2 == Market::Perp).map(|((e, _), v)| json!({
                 "ex": ex_name(*e), "funding_apr": v.funding_h.map(|f| f * 24.0 * 365.0 * 100.0), "basis_bps": ag.basis_bps(*e),
@@ -190,7 +192,7 @@ impl App {
                 "vol": vm.map(|v| json!({"sigma_1h": v.sigma_1h, "sigma_24h": v.sigma_24h, "percentile": v.percentile,
                     "range_1h": [mid * (1.0 - v.sigma_1h), mid * (1.0 + v.sigma_1h)], "range_24h": [mid * (1.0 - v.sigma_24h), mid * (1.0 + v.sigma_24h)]})),
                 "pressure": depth::quant::pressure(usd(&b), usd(&k), &bars, 5),
-                "book_bid_usd": usd(&b), "book_ask_usd": usd(&k), "carry": carry,
+                "book_bid_usd": usd(&b), "book_ask_usd": usd(&k), "book_band": band, "carry": carry,
             })
         };
         json!({
