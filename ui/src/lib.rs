@@ -348,6 +348,8 @@ pub struct App {
     /// screenshot request from env: (path, after seconds)
     shot: Option<(String, f64)>,
     shot_sent: bool,
+    /// T1_DEMO_SEED: the demo orders were placed
+    demo_seeded: bool,
     started: Instant,
     last_frame: Instant,
     /// order routing policy (Settings > Trading), persisted
@@ -458,7 +460,7 @@ impl App {
             eng, prefs, settings: Default::default(), command: Default::default(), back: None, help: false, kbd: kbd::Kbd::start(), tray: None, pop: None, saved: (saved, Instant::now()), unreadable, prev_kept: false, window: st.window, mode, chart, book, opt: Default::default(), picker, trade, spot: Default::default(),
             rate: (Instant::now(), 0, 0.0),
             shot: env("T1_SHOT").map(|p| (p, env("T1_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(30.0))),
-            shot_sent: false, started: Instant::now(), last_frame: Instant::now(),
+            shot_sent: false, demo_seeded: false, started: Instant::now(), last_frame: Instant::now(),
             route: st.route.clone().unwrap_or_default(), pending_base: None, pending_mode: None, pending_restart: false,
             layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(), fills_key: Default::default(), log_seen: now_ms(), fill_seen: 0,
             st: (Default::default(), Instant::now(), true), order: Default::default(), hot_trade: vec![], venue_toggle: None, coins_preloaded: false, order_panel: st.order_panel.unwrap_or(true), top: Default::default(), venue_pages: Default::default(),
@@ -855,8 +857,34 @@ impl App {
             });
         });
     }
+    /// T1_DEMO_SEED=1 with the demo account (screenshots, README pictures): once Binance, Bybit and OKX perps have a
+    /// book, a few demo orders on the base: longs on Binance and OKX and a short on Bybit at market, a resting buy and
+    /// sell 0.4% off the mid; sizes in USD notional. Demo orders only reach the simulator.
+    fn demo_seed(&mut self, ctx: &egui::Context) {
+        if self.demo_seeded || !depth::demo::on() || std::env::var("T1_DEMO_SEED").is_err() { return; }
+        let mids: Vec<f64> = {
+            let a = self.eng.agg.lock().unwrap();
+            [Exchange::Binance, Exchange::Bybit, Exchange::Okx].iter()
+                .filter_map(|e| a.venues.get(&(*e, Market::Perp)).and_then(|v| v.book_mid())).collect()
+        };
+        let [bin, byb, okx] = mids[..] else { return };
+        self.demo_seeded = true;
+        let sym = depth::trade::symbol(&self.eng.base);
+        let req = |pos: depth::Side, kind: depth::trade::Kind, usd: f64, px: f64| depth::trade::OrderReq {
+            symbol: sym.clone(), pos, close: false, kind, qty: usd / px, client_id: None, attach: None };
+        use depth::{trade::{Kind, Tif}, Side::{Buy, Sell}};
+        for (ex, r, px) in [
+            (Exchange::Binance, req(Buy, Kind::Market, 30_000.0, bin), bin),
+            (Exchange::Bybit, req(Sell, Kind::Market, 15_000.0, byb), byb),
+            (Exchange::Okx, req(Buy, Kind::Market, 10_000.0, okx), okx),
+            (Exchange::Binance, req(Buy, Kind::Limit { price: (bin * 0.996).round(), tif: Tif::Gtc }, 12_000.0, bin), bin),
+            (Exchange::Bybit, req(Sell, Kind::Limit { price: (byb * 1.004).round(), tif: Tif::Gtc }, 8_000.0, byb), byb),
+        ] { self.eng.submit(ex, r, px, ctx); }
+    }
+
     /// T1_SHOT=<png path> [T1_SHOT_AFTER=<s>]: save one screenshot and exit (used for visual checks).
     fn screenshot(&mut self, ctx: &egui::Context) {
+        self.demo_seed(ctx);
         let Some((path, after)) = self.shot.clone() else { return };
         if !self.shot_sent && self.started.elapsed().as_secs_f64() > after {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
