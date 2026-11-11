@@ -623,22 +623,37 @@ pub async fn can_trade(ex: Exchange, k: &Keys) -> Result<Option<bool>> {
     })
 }
 
-/// Venues whose resting limit orders `amend` changes in place (same id): Bybit linear and (unified
-/// account) spot, Binance USD-M. The others, Binance spot included, are changed by cancel + new.
-pub fn can_amend(ex: Exchange, spot: bool) -> bool { ex == Exchange::Bybit || (ex == Exchange::Binance && !spot) }
+/// Venues whose resting limit orders `amend` changes with one amend request: Bybit linear and (unified account) spot;
+/// Binance USD-M, OKX, Gate, Hyperliquid perps (same id); Bitget perps (its modify re-creates the order under a new id,
+/// see `amends`). The others, Binance spot included (one cancelReplace there, `replace_order`), are cancel + new.
+pub fn can_amend(ex: Exchange, spot: bool) -> bool {
+    ex == Exchange::Bybit || (!spot && matches!(ex, Exchange::Binance | Exchange::Okx | Exchange::Gate | Exchange::Hyperliquid | Exchange::Bitget))
+}
+
+/// `can_amend` for one row: Bitget's modify takes no time in force and its docs do not say a post-only order stays
+/// post-only, so those go the checked cancel + new way instead.
+pub fn amends(o: &OpenOrder, spot: bool) -> bool { can_amend(o.ex, spot) && !(o.ex == Exchange::Bitget && post_only(o)) }
 
 impl OpenOrder {
     /// Whether the order reduces a position: reduce-only, or in hedge mode a sell on the long / a buy on the short.
     pub fn closes(&self) -> bool { self.reduce_only || self.pos.is_some_and(|p| p != self.side) }
 }
 
-/// Why a resting order row cannot be changed (price / size) from Depth, None when it can: only a plain
-/// GTC limit ("lmt" is Kraken's), never a conditional row (a cancel + new would lose its trigger) nor
-/// post-only / IOC (it would come back as a GTC limit on the cancel + new venues).
+/// A post-only (maker-only) row, whichever way its venue says it: in the time in force (Binance GTX, Bybit PostOnly,
+/// Gate poc, Hyperliquid Alo) or in the type itself (OKX post_only, Binance spot LIMIT_MAKER).
+pub fn post_only(o: &OpenOrder) -> bool {
+    let n = |s: &str| s.to_ascii_lowercase().replace(['_', '-', ' '], "");
+    matches!(n(&o.tif).as_str(), "gtx" | "postonly" | "poc" | "alo" | "post") || matches!(n(&o.kind).as_str(), "postonly" | "limitmaker")
+}
+
+/// Why a resting order row cannot be changed (price / size) from Depth, None when it can: a GTC or post-only limit
+/// ("lmt" is Kraken's; a post-only one is placed again post-only on the cancel + new venues, `replace_order`), never a
+/// conditional row (a cancel + new would lose its trigger) nor IOC / FOK.
 pub fn not_editable(o: &OpenOrder) -> Option<&'static str> {
     if o.trigger.is_some() { return Some("trigger"); }
-    let limit = o.kind.eq_ignore_ascii_case("limit") || o.kind == "lmt";
-    if !(limit && matches!(o.tif.to_ascii_lowercase().as_str(), "" | "gtc" | "goodtillcancel")) { return Some("type"); }
+    let po = post_only(o);
+    let limit = o.kind.eq_ignore_ascii_case("limit") || o.kind == "lmt" || po;
+    if !(limit && (po || matches!(o.tif.to_ascii_lowercase().as_str(), "" | "gtc" | "goodtillcancel"))) { return Some("type"); }
     None
 }
 
@@ -661,11 +676,16 @@ pub fn amend_checked(o: &OpenOrder, price: f64, qty: f64, r: &Rules) -> Result<(
 /// filled part included) as `amend_checked` puts them on the grid. `spot`: a spot row (Bybit only).
 pub async fn amend(ex: Exchange, k: &Keys, o: &OpenOrder, spot: bool, price: f64, qty: f64, r: &Rules) -> Result<()> {
     if k.demo { return crate::demo::amend(o, if spot { crate::Market::Spot } else { crate::Market::Perp }, price, qty, r); }
-    if !can_amend(ex, spot) { bail!("{ex:?}: no in-place amend"); }
+    if !(can_amend(ex, spot) && !(ex == Exchange::Bitget && post_only(o))) { bail!("{ex:?}: no in-place amend"); }
     let (px, q) = amend_checked(o, price, qty, r)?;
     match ex {
         Exchange::Bybit => bybit::amend(k, o, spot, &px, &q, r).await,
-        _ => binance::amend(k, o, &px, &q).await,
+        Exchange::Binance => binance::amend(k, o, &px, &q).await,
+        Exchange::Okx => okx::amend(k, o, &px, &q, r).await,
+        Exchange::Gate => gate::amend(k, o, &px, &q, r).await,
+        Exchange::Hyperliquid => hyperliquid::amend(k, o, &px, &q, r).await,
+        Exchange::Bitget => bitget::amend(k, o, &px, &q, r).await,
+        _ => bail!("{ex:?}: no in-place amend"),
     }
 }
 
@@ -1550,18 +1570,28 @@ mod tests {
         assert_eq!(b, json!({"category": "linear", "symbol": "BTCUSDT", "orderId": "1", "qty": "0.015"}));
         let b = bybit::amend_body(&o, true, "79500.0", "0.010", &r);
         assert_eq!(b, json!({"category": "spot", "symbol": "BTCUSDT", "orderId": "1", "price": "79500.0"}));
-        assert!(can_amend(Exchange::Bybit, true) && can_amend(Exchange::Binance, false) && !can_amend(Exchange::Binance, true) && !can_amend(Exchange::Okx, false));
+        assert!(can_amend(Exchange::Bybit, true) && can_amend(Exchange::Binance, false) && !can_amend(Exchange::Binance, true) && can_amend(Exchange::Okx, false));
+        assert!(!can_amend(Exchange::Okx, true) && !can_amend(Exchange::Kraken, false) && !can_amend(Exchange::Lighter, false));
         // with real keys the rules refuse before any request; a venue without amend refuses outright
         let k = Keys { key: "k".into(), secret: "s".into(), extra: None, demo: false };
         assert!(now(amend(Exchange::Bybit, &k, &o, false, 80_000.0, 0.004, &r)).unwrap_err().to_string().contains("already filled"));
         assert!(now(amend(Exchange::Binance, &k, &o, false, 80_000.0, 0.0009, &r)).unwrap_err().to_string().contains("below minimum"));
-        assert!(now(amend(Exchange::Okx, &k, &o, false, 79_000.0, 0.01, &r)).unwrap_err().to_string().contains("no in-place amend"));
+        assert!(now(amend(Exchange::Kraken, &k, &OpenOrder { ex: Exchange::Kraken, ..o.clone() }, false, 79_000.0, 0.01, &r)).unwrap_err().to_string().contains("no in-place amend"));
+        // Bitget's modify is not trusted to keep post-only: those rows take the checked cancel + new
+        let bg = OpenOrder { ex: Exchange::Bitget, ..o.clone() };
+        assert!(amends(&bg, false) && !amends(&OpenOrder { tif: "post_only".into(), ..bg.clone() }, false));
         assert!(now(amend(Exchange::Binance, &k, &o, true, 79_000.0, 0.01, &r)).unwrap_err().to_string().contains("no in-place amend"));
         // only plain GTC limits are changed from Depth
         assert_eq!(not_editable(&o), None);
         assert_eq!(not_editable(&OpenOrder { kind: "lmt".into(), tif: String::new(), ..o.clone() }), None);
         assert_eq!(not_editable(&OpenOrder { trigger: Some(1.0), ..o.clone() }), Some("trigger"));
-        assert_eq!(not_editable(&OpenOrder { tif: "PostOnly".into(), ..o.clone() }), Some("type"));
+        // post-only, each venue's way, can be changed (it is placed again post-only); IOC cannot
+        for (kind, tif) in [("limit", "PostOnly"), ("LIMIT", "GTX"), ("limit", "poc"), ("limit", "Alo"), ("post_only", ""), ("LIMIT_MAKER", "")] {
+            let p = OpenOrder { kind: kind.into(), tif: tif.into(), ..o.clone() };
+            assert!(post_only(&p) && not_editable(&p).is_none(), "{kind} {tif}");
+        }
+        assert!(!post_only(&o));
+        assert_eq!(not_editable(&OpenOrder { tif: "IOC".into(), ..o.clone() }), Some("type"));
         assert_eq!(not_editable(&OpenOrder { kind: "STOP".into(), ..o.clone() }), Some("type"));
     }
 

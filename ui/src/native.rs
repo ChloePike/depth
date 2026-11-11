@@ -107,7 +107,7 @@ impl App {
             "ex": ex_name(o.ex), "symbol": o.symbol, "id": o.id, "side": if o.side == Side::Buy { "buy" } else { "sell" }, "price": o.price, "qty": o.qty,
             "filled": o.filled, "kind": o.kind, "tif": o.tif, "reduce_only": o.reduce_only, "ts": o.ts, "pos": o.pos.map(side_name), "spot": market != "perp", "market": market,
             // price / size editable (None) or why not; changed in place or by cancel + new
-            "edit": if market == "margin" { Some("margin") } else { trade::not_editable(o) }, "amends": trade::can_amend(o.ex, market == "spot"),
+            "edit": if market == "margin" { Some("margin") } else { trade::not_editable(o) }, "amends": trade::amends(o, market == "spot"),
         });
         let orders: Vec<Value> = acc.orders.iter().map(|o| order_json(o, "perp")).chain(acc.spot_orders.iter().map(|o| order_json(o, "spot")))
             .chain(acc.margin_orders.iter().map(|o| order_json(o, "margin"))).collect();

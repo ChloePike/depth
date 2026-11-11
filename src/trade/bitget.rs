@@ -123,6 +123,22 @@ pub async fn cancel(k: &Keys, symbol: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// modify-order body: newSize and newPrice must go together, newClientOid is required. No marginCoin
+/// or force field: the doc lists neither.
+fn amend_body(o: &OpenOrder, px: &str, qty: &str, cid: &str) -> Value {
+    json!({"symbol": o.symbol, "productType": PT, "orderId": o.id, "newClientOid": cid, "newSize": qty, "newPrice": px})
+}
+
+/// Change a resting limit order in place (keeps its id): `px` and `qty` are the new price and the new TOTAL size,
+/// already on the venue grid as strings, in the same units as `OpenOrder.qty` / `OpenOrder.price`.
+/// Bitget: modify-order (10/s/UID) cancels the order and re-creates it asynchronously under a NEW orderId
+/// (so it loses queue priority); only limit orders still in status "new" (nothing filled) qualify, so
+/// total and remaining size are the same. The new order shows up on the private stream.
+pub async fn amend(k: &Keys, o: &OpenOrder, px: &str, qty: &str, _r: &Rules) -> Result<()> {
+    bitget(k, true, "/api/v2/mix/order/modify-order", &[], Some(amend_body(o, px, qty, &uuid_v4()))).await?;
+    Ok(())
+}
+
 /// One position row: REST all-position (`symbol`) and the WS positions push (`instId`) share fields.
 fn position(p: &Value) -> Position {
     Position {
@@ -291,6 +307,14 @@ mod tests {
         assert_eq!(sign("YYYYSECRET", r#"1700000000000POST/api/v2/mix/order/cancel-order{"orderId":"1","productType":"USDT-FUTURES","symbol":"BTCUSDT"}"#),
                    "TxnfTVc53z4D7XfWiKE2Jtnpiw640Rm9LzdH8Kd+C8Q=");
         assert_eq!(sign("YYYYSECRET", "1700000000GET/user/verify"), "ncaZkuPLdgAq/NBd8hHbsJUtC//TXVyn0ngncN5YKEQ=");
+    }
+
+    #[test]
+    fn amend_body_fields() {
+        let o = OpenOrder { ex: EX, symbol: "BTCUSDT".into(), id: "1".into(), side: Side::Buy, price: 86000.0, qty: 0.01, filled: 0.0,
+            kind: "limit".into(), tif: "post_only".into(), reduce_only: false, ts: 0, pos: None, client_id: None, trigger: None };
+        assert_eq!(amend_body(&o, "86000.1", "0.02", "c1"),
+            json!({"symbol": "BTCUSDT", "productType": "USDT-FUTURES", "orderId": "1", "newClientOid": "c1", "newSize": "0.02", "newPrice": "86000.1"}));
     }
 
     #[test]

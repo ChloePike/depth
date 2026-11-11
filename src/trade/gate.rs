@@ -163,6 +163,21 @@ pub async fn place(k: &Keys, req: &OrderReq, r: &Rules, ref_px: f64, mode: Mode)
     Ok(id_of(&v))
 }
 
+/// Amend body (FuturesOrderAmendment): `size` is the new total in contracts, filled part included,
+/// signed like the original (the side cannot change); tif is kept by the venue.
+fn amend_body(o: &OpenOrder, px: &str, qty: &str, r: &Rules) -> Result<Value> {
+    let contracts = (qty.parse::<f64>()? / r.step).round() as i64;
+    if contracts <= 0 { bail!("gate: size {qty} is below one contract"); }
+    Ok(json!({"size": if o.side == Side::Buy { contracts } else { -contracts }, "price": px}))
+}
+
+/// Change a resting limit order in place (keeps its id): `px` and `qty` are the new price and the new TOTAL size,
+/// already on the venue grid as strings, in the same units as `OpenOrder.qty` / `OpenOrder.price`.
+pub async fn amend(k: &Keys, o: &OpenOrder, px: &str, qty: &str, r: &Rules) -> Result<()> {
+    gate(k, reqwest::Method::PUT, &format!("/futures/usdt/orders/{}", o.id), "", Some(&amend_body(o, px, qty, r)?)).await?;
+    Ok(())
+}
+
 /// Order ids are global on Gate; `symbol` is not needed.
 pub async fn cancel(k: &Keys, symbol: &str, id: &str) -> Result<()> {
     let _ = symbol;
@@ -393,6 +408,17 @@ mod tests {
         let contracts = (qty.parse::<f64>().unwrap() / r.step).round() as i64;
         let b = order_body(&req, contracts, px.as_deref()).unwrap();
         assert_eq!((b["contract"].as_str(), b["size"].as_i64(), b["price"].as_str(), b["tif"].as_str()), (Some("BTC_USDT"), Some(-25), Some("84000.0"), Some("poc")));
+    }
+
+    #[test]
+    fn amend_signed_contracts() {
+        let r = Rules { tick: 0.1, step: 0.0001, min_qty: 0.0001, min_notional: 0.0 };
+        let mut o = OpenOrder { ex: Exchange::Gate, symbol: "BTCUSDT".into(), id: "123".into(), side: Side::Sell, price: 84000.0, qty: 0.0025, filled: 0.0,
+            kind: "limit".into(), tif: "poc".into(), reduce_only: false, ts: 0, pos: None, client_id: None, trigger: None };
+        assert_eq!(amend_body(&o, "84100.5", "0.0030", &r).unwrap(), json!({"size": -30, "price": "84100.5"}));
+        o.side = Side::Buy;
+        assert_eq!(amend_body(&o, "84000.0", "0.0025", &r).unwrap()["size"], 25);
+        assert!(amend_body(&o, "84000.0", "0.00004", &r).is_err());
     }
 
     #[test]

@@ -587,6 +587,26 @@ fn venue_mid(agg: &Arc<Mutex<Agg>>, base: &str, ex: Exchange, symbol: &str) -> f
     a.venues.get(&(ex, Market::Perp)).filter(|v| now_ms() - v.fresh < 5_000).and_then(|v| v.mid()).unwrap_or(0.0)
 }
 
+/// The venue's best bid and ask of `symbol` when it is the base on screen and its book is fresh.
+fn venue_bbo(agg: &Arc<Mutex<Agg>>, base: &str, ex: Exchange, symbol: &str, spot: bool) -> Option<(f64, f64)> {
+    if symbol != trade::symbol(base) { return None; }
+    let a = agg.lock().unwrap();
+    let v = a.venues.get(&(ex, if spot { Market::Spot } else { Market::Perp })).filter(|v| now_ms() - v.fresh < 5_000)?;
+    Some((v.book.best_bid()?.0, v.book.best_ask()?.0))
+}
+
+/// Why a post-only order moved to `price` by cancel + place could be lost, None when it is safe: the new order
+/// would take (a buy at or over the ask, a sell at or under the bid) and be refused after the old one was
+/// cancelled. Without a fresh book there is no telling, so that is refused too.
+fn post_only_cross(side: depth::Side, price: f64, bbo: Option<(f64, f64)>) -> Option<String> {
+    let Some((bid, ask)) = bbo else { return Some("no fresh book for it here (open its chart): a post-only price that would take is refused after the cancel".into()) };
+    match side {
+        depth::Side::Buy if price >= ask => Some(format!("{price} reaches the ask {ask}: the post-only order would be refused after the cancel")),
+        depth::Side::Sell if price <= bid => Some(format!("{price} reaches the bid {bid}: the post-only order would be refused after the cancel")),
+        _ => None,
+    }
+}
+
 /// Place one order with the account's keys, cached rules and position mode; every order carries a
 /// client id (so an unanswered one can be found), the outcome lands in the order log and on its
 /// routed leg, and the round trip is tracked.
@@ -1898,7 +1918,7 @@ impl Engine {
             let what = format!("{:?} {} {} {}@{} -> {qty}@{price}", o.ex, o.symbol, o.id, o.qty, o.price);
             let note = |msg: String, ok: bool| { account.lock().unwrap().note(msg, ok); ctx.request_repaint(); };
             let fail = |msg: String| note(format!("FAIL amend {what}: {msg}"), false);
-            if let Some(why) = trade::not_editable(&o) { return fail(format!("not a plain GTC limit order ({why}); cancel it and place a new one")); }
+            if let Some(why) = trade::not_editable(&o) { return fail(format!("not a GTC or post-only limit order ({why}); cancel it and place a new one")); }
             let key = (o.ex, if spot { format!("spot:{}", o.symbol) } else { o.symbol.clone() });
             let cached = account.lock().unwrap().rules.get(&key).copied();
             let r = match cached { Some(r) => Ok(r), None if spot => trade::spot::rules(o.ex, &o.symbol).await, None => trade::rules(o.ex, &o.symbol).await };
@@ -1907,12 +1927,14 @@ impl Engine {
             let (price, total) = (px.parse().unwrap_or(price), q.parse().unwrap_or(qty));
             let opp = |s: depth::Side| if s == depth::Side::Buy { depth::Side::Sell } else { depth::Side::Buy };
             // what is left of the new size; the position it acts on: its own side when opening, the other one when reducing
-            let req = OrderReq { symbol: o.symbol.clone(), close: o.closes(), kind: trade::Kind::Limit { price, tif: trade::Tif::Gtc }, qty: total - o.filled, client_id: None, attach: None,
+            // a post-only row stays post-only (a price that would take is refused by the venue, never filled as taker)
+            let tif = if trade::post_only(&o) { trade::Tif::PostOnly } else { trade::Tif::Gtc };
+            let req = OrderReq { symbol: o.symbol.clone(), close: o.closes(), kind: trade::Kind::Limit { price, tif }, qty: total - o.filled, client_id: None, attach: None,
                 pos: o.pos.unwrap_or(if o.closes() { opp(o.side) } else { o.side }) };
             // the new order against the risk limits too (in the task: the caller may hold the agg lock)
             let mid = if spot { 0.0 } else { venue_mid(&agg, &base, o.ex, &o.symbol) };
             if !spot { let gate = risk_gate(&mut account.lock().unwrap(), o.ex, &req, mid); if let Err(e) = gate { return fail(format!("risk limit: {e}")); } }
-            if trade::can_amend(o.ex, spot) {
+            if trade::amends(&o, spot) {
                 match trade::amend(o.ex, &k, &o, spot, price, total, &r).await {
                     Ok(()) => note(format!("OK amend {what}"), true),
                     Err(e) if trade::is_unknown_outcome(&e) => note(format!("UNKNOWN amend {what}: no answer read ({e:#}); the order list shows what the venue did, it is never sent again"), false),
@@ -1921,12 +1943,35 @@ impl Engine {
                 if spot { refresh_spot(&account, o.ex).await; ctx.request_repaint(); }
                 return;
             }
+            // cancel + place: a post-only order that would take is refused by the venue after the cancel, leaving
+            // nothing resting: checked against the book first, nothing is cancelled when it would
+            if trade::post_only(&o) && let Some(why) = post_only_cross(o.side, price, venue_bbo(&agg, &base, o.ex, &o.symbol, spot)) {
+                return fail(format!("{why}; nothing was cancelled"));
+            }
             // cancel + place: the new order must pass as one, and the position mode be known, before the old one goes
             let new_ok = if spot { trade::spot::checked(req.kind, req.qty, &r, price).map(|_| ()) } else { trade::checked(&req, &r, price).map(|_| ()) };
             if let Err(e) = new_ok { return fail(format!("the new order would be refused ({e:#}); nothing was cancelled")); }
             let cached_mode = account.lock().unwrap().modes.get(&key).copied().flatten();
             if !spot && cached_mode.is_none() {
                 match trade::mode(o.ex, &k, &o.symbol).await { Ok(m) => { account.lock().unwrap().modes.insert(key, Some(m)); } Err(e) => return fail(format!("{e:#}")) }
+            }
+            // Binance spot: one request instead of our cancel + place: a smaller size at the same price in place, keeping the
+            // queue position (amend/keepPriority); anything else cancelReplace (STOP_ON_FAILURE: a failed cancel places nothing)
+            if spot && o.ex == Exchange::Binance && !k.demo {
+                // `px` / `q`: price and total size as `amend_checked` put them on the grid
+                let r_ = if (price - o.price).abs() < r.tick * 0.5 && total < o.qty - r.step * 0.5 {
+                    trade::spot::binance_amend_keep_priority(&k, &o, &q).await.map(|()| "in place, queue position kept".to_string())
+                } else {
+                    trade::spot::binance_cancel_replace(&k, &o, &px, &trade::fmt_step(total - o.filled, r.step, true)).await.map(|id| format!("replaced as {id}"))
+                };
+                match r_ {
+                    Ok(how) => note(format!("OK amend {what}: {how}"), true),
+                    Err(e) if trade::is_unknown_outcome(&e) => note(format!("UNKNOWN amend {what}: no answer read ({e:#}); check Open Orders, it is never sent again"), false),
+                    Err(e) => fail(format!("{e:#}")),
+                }
+                refresh_spot(&account, o.ex).await;
+                ctx.request_repaint();
+                return;
             }
             let cancel = if spot { trade::spot::cancel(o.ex, &k, &o.symbol, &o.id, false).await } else { trade::cancel_order(o.ex, &k, &o).await };
             match cancel {
@@ -2492,6 +2537,15 @@ fn apply(a: &mut Account, ex: Exchange, ev: trade::AccEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn post_only_move_refused_where_it_would_take() {
+        use depth::Side::{Buy, Sell};
+        let bbo = Some((100.0, 101.0));
+        assert!(post_only_cross(Buy, 100.5, bbo).is_none() && post_only_cross(Sell, 100.5, bbo).is_none());
+        assert!(post_only_cross(Buy, 101.0, bbo).is_some() && post_only_cross(Sell, 100.0, bbo).is_some());
+        assert!(post_only_cross(Buy, 99.0, None).is_some(), "no book: no telling, refused");
+    }
+
     use super::*;
     use depth::Side;
     use trade::AccEvent as E;

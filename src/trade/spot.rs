@@ -162,6 +162,59 @@ pub async fn cancel(ex: Exchange, k: &Keys, symbol: &str, id: &str, margin: bool
     Ok(())
 }
 
+/// cancelReplace params: the row's side and post-only kind, `px` / `qty` already on the grid.
+fn cancel_replace_params(o: &OpenOrder, px: &str, qty: &str) -> Vec<(&'static str, String)> {
+    let tif = if super::post_only(o) { Tif::PostOnly } else { Tif::Gtc };
+    let mut p = binance_params(&o.symbol, o.side, Kind::Limit { price: px.parse().unwrap_or_default(), tif }, qty, Some(px));
+    p.push(("cancelReplaceMode", "STOP_ON_FAILURE".into()));
+    p.push(("cancelOrderId", o.id.clone()));
+    p
+}
+
+/// cancelReplace reply -> new order id. -2021 under STOP_ON_FAILURE: the cancel went through, the new order did not.
+fn cancel_replace_outcome(ok: bool, v: &Value) -> Result<String> {
+    if ok { return Ok(v["newOrderResponse"]["orderId"].to_string()); }
+    let d = &v["data"];
+    if v["code"] == -2021 && d["cancelResult"] == "SUCCESS" {
+        let r = &d["newOrderResponse"];
+        bail!("cancelled, the new order was refused: {} ({})", r["msg"].as_str().unwrap_or("?"), r["code"]);
+    }
+    // -2022: the cancel failed, nothing placed; the cancel leg's reason is the useful one
+    let r = if d["cancelResponse"]["msg"].is_string() { &d["cancelResponse"] } else { v };
+    bail!("binance cancelReplace: {} ({})", r["msg"].as_str().unwrap_or("?"), r["code"])
+}
+
+/// Binance spot: cancel `o` and place its replacement in one request (cancelReplace, STOP_ON_FAILURE: a failed
+/// cancel places nothing). `px` / `qty`: the replacement's price and size on the venue grid (the remaining size to
+/// place, as our cancel + place path sends). A LIMIT_MAKER row is replaced as LIMIT_MAKER, otherwise LIMIT GTC.
+pub async fn binance_cancel_replace(k: &Keys, o: &OpenOrder, px: &str, qty: &str) -> Result<String> {
+    super::no_demo(k)?;
+    // signed like binance_at, but the 409 body is needed: it says which leg failed
+    let mut q: Vec<String> = cancel_replace_params(o, px, qty).iter().map(|(a, b)| format!("{a}={b}")).collect();
+    q.push(format!("recvWindow={}", super::RECV_WRITE));
+    q.push(format!("timestamp={}", crate::now_ms()));
+    let q = q.join("&");
+    let url = format!("{}/api/v3/order/cancelReplace?{q}&signature={}", binance_spot(), super::hmac_hex(&k.secret, &q));
+    ws::check_paused(&url)?;
+    let r = ws::http().post(&url).header("X-MBX-APIKEY", &k.key).send().await?;
+    let st = r.status();
+    let retry_after = r.headers().get("retry-after").and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+    let body = r.text().await?;
+    ws::note_limit(&url, st.as_u16(), retry_after, &body);
+    cancel_replace_outcome(st.is_success(), &serde_json::from_str(&body).unwrap_or(Value::Null))
+}
+
+fn keep_priority_params(o: &OpenOrder, new_total: &str) -> Vec<(&'static str, String)> {
+    vec![("symbol", o.symbol.clone()), ("orderId", o.id.clone()), ("newQty", new_total.into())]
+}
+
+/// Binance spot: lower a resting order's size in place, keeping its queue priority (amend/keepPriority). `new_total`:
+/// the new TOTAL quantity on the grid (filled part included), below the current one.
+pub async fn binance_amend_keep_priority(k: &Keys, o: &OpenOrder, new_total: &str) -> Result<()> {
+    binance_at(k, binance_spot(), reqwest::Method::PUT, "/api/v3/order/amend/keepPriority", &keep_priority_params(o, new_total)).await?;
+    Ok(())
+}
+
 fn binance_order(ex: Exchange, o: &Value) -> OpenOrder {
     OpenOrder {
         ex, symbol: o["symbol"].as_str().unwrap_or_default().into(), id: o["orderId"].to_string(),
@@ -263,6 +316,27 @@ mod tests {
         assert!(b.get("isLeverage").is_none() && bybit_body("BTCUSDT", Side::Buy, Kind::Market, "0.001", None, true)["isLeverage"] == 1);
         let p = binance_params("BTCUSDT", Side::Sell, Kind::Limit { price: 1.0, tif: Tif::PostOnly }, "1", Some("1.00"));
         assert!(p.contains(&("type", "LIMIT_MAKER".into())) && !p.iter().any(|x| x.0 == "timeInForce"));
+    }
+
+    #[test]
+    fn binance_cancel_replace_and_keep_priority() {
+        let mut o = binance_order(Exchange::Binance, &json!({"symbol": "BTCUSDT", "orderId": 42, "side": "SELL", "price": "1", "origQty": "2", "executedQty": "0", "timeInForce": "GTC", "type": "LIMIT_MAKER"}));
+        let p = cancel_replace_params(&o, "1.10", "2");
+        for x in [("type", "LIMIT_MAKER"), ("cancelReplaceMode", "STOP_ON_FAILURE"), ("cancelOrderId", "42"), ("side", "SELL"), ("price", "1.10"), ("quantity", "2")] {
+            assert!(p.contains(&(x.0, x.1.into())), "{x:?}");
+        }
+        assert!(!p.iter().any(|x| x.0 == "timeInForce"));
+        o.kind = "limit".into();
+        let p = cancel_replace_params(&o, "1.10", "2");
+        assert!(p.contains(&("type", "LIMIT".into())) && p.contains(&("timeInForce", "GTC".into())));
+        assert_eq!(cancel_replace_outcome(true, &json!({"cancelResult": "SUCCESS", "newOrderResult": "SUCCESS", "newOrderResponse": {"orderId": 43}})).unwrap(), "43");
+        let e = cancel_replace_outcome(false, &json!({"code": -2021, "msg": "Order cancel-replace partially failed.", "data": {"cancelResult": "SUCCESS", "newOrderResult": "FAILURE",
+            "cancelResponse": {"orderId": 42, "status": "CANCELED"}, "newOrderResponse": {"code": -2010, "msg": "Order would immediately match and take."}}})).unwrap_err().to_string();
+        assert!(e.starts_with("cancelled, the new order was refused: Order would immediately match and take."), "{e}");
+        let e = cancel_replace_outcome(false, &json!({"code": -2022, "msg": "Order cancel-replace failed.", "data": {"cancelResult": "FAILURE", "newOrderResult": "NOT_ATTEMPTED",
+            "cancelResponse": {"code": -2011, "msg": "Unknown order sent."}, "newOrderResponse": null}})).unwrap_err().to_string();
+        assert!(e.contains("Unknown order sent.") && !e.contains("cancelled"), "{e}");
+        assert_eq!(keep_priority_params(&o, "1.5"), vec![("symbol", "BTCUSDT".into()), ("orderId", "42".into()), ("newQty", "1.5".into())]);
     }
 
     #[test]
