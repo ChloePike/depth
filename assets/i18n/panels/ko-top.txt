@@ -97,3 +97,4 @@ Theme = 테마
 System = 시스템 설정 따름
 Dark = 다크
 Light = 라이트
+Binance perp only (direct mode) = 바이낸스 무기한만 (직접 모드)

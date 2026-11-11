@@ -97,3 +97,4 @@ Theme = Tema
 System = Sistema
 Dark = Oscuro
 Light = Claro
+Binance perp only (direct mode) = Solo perpetuo de Binance (modo directo)

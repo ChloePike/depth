@@ -97,3 +97,4 @@ Theme = テーマ
 System = システムに合わせる
 Dark = ダーク
 Light = ライト
+Binance perp only (direct mode) = Binance 無期限のみ（ダイレクトモード）

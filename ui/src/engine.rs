@@ -812,6 +812,47 @@ pub struct Engine {
     mini: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// The market data of a chart cell showing another symbol than the active one (`Engine::cell_feed`), perp
+/// only, on its own runtime: dropping it closes every connection. Binance's trades and mark only
+/// (`binance::spawn_trades`) with its REST history: no book, so no heatmap, walls or other venues.
+/// ponytail: no scroll-back (`ensure_older`) for these cells; add a per-feed copy when someone scrolls that far
+pub struct CellFeed {
+    pub base: String,
+    pub agg: Arc<Mutex<Agg>>,
+    venues: Vec<Exchange>,
+    stats: Arc<Mutex<Stats>>,
+    tfs: Vec<u32>,
+    rt: Option<tokio::runtime::Runtime>,
+}
+
+impl Drop for CellFeed { fn drop(&mut self) { if let Some(rt) = self.rt.take() { rt.shutdown_background() } } }
+
+impl CellFeed {
+    /// What the cell says about its data.
+    pub fn caption(&self) -> Option<&'static str> { Some("Binance perp only (direct mode)") }
+
+    /// Native `tf`-minute history the first time the cell shows that interval (`Engine::ensure_tf`).
+    pub fn ensure_tf(&mut self, tf: u32, ctx: &eframe::egui::Context) {
+        if tf <= 1 || self.tfs.contains(&tf) { return }
+        let Some(rt) = self.rt.as_ref() else { return };
+        self.tfs.push(tf);
+        self.stats.lock().unwrap().tf_pending.insert(tf, self.venues.len());
+        for &e in &self.venues {
+            let (agg, stats, ctx, sub) = (self.agg.clone(), self.stats.clone(), ctx.clone(), Sub { market: Market::Perp, base: self.base.clone(), quote: "USDT".into() });
+            rt.spawn(async move {
+                let h = cached_history(e, &sub, tf, &stats).await;
+                let mut a = agg.lock().unwrap();
+                a.load_history_tf(e, Market::Perp, tf, &h);
+                let mut s = stats.lock().unwrap();
+                let p = s.tf_pending.entry(tf).or_default();
+                *p = p.saturating_sub(1);
+                if *p == 0 { a.finish_history_tf(tf) }
+                ctx.request_repaint();
+            });
+        }
+    }
+}
+
 /// The Hunter scanner's output (kept across base switches; empty while it is off).
 #[derive(Default)]
 pub struct Hunt {
@@ -1455,6 +1496,44 @@ impl Engine {
                 });
             }
         });
+    }
+
+    /// The feed of a chart cell that shows another symbol than the active one (see `CellFeed`).
+    pub fn cell_feed(&self, base: &str, ctx: &eframe::egui::Context) -> CellFeed {
+        let venues = vec![Exchange::Binance];
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).thread_name("cell").enable_all().build().expect("cell runtime");
+        let base = base.to_uppercase();
+        let mut f = CellFeed { base: base.clone(), agg: Default::default(), venues, stats: Default::default(), tfs: vec![], rt: None };
+        let sub = Sub { market: Market::Perp, base: base.clone(), quote: "USDT".into() };
+        let (tx, mut rx) = unbounded_channel::<Msg>();
+        let agg = f.agg.clone();
+        rt.spawn(async move {
+            let mut buf = Vec::with_capacity(4096);
+            while rx.recv_many(&mut buf, 4096).await > 0 {
+                let mut a = agg.lock().unwrap();
+                for m in buf.drain(..) { a.on(&m) }
+            }
+        });
+        f.stats.lock().unwrap().hist_pending = f.venues.len();
+        { let mut a = f.agg.lock().unwrap(); for e in &f.venues { a.expect_history(*e, Market::Perp) } }
+        for &e in &f.venues {
+            let (agg, stats, ctx, sub) = (f.agg.clone(), f.stats.clone(), ctx.clone(), sub.clone());
+            rt.spawn(async move {
+                let h = cached_history(e, &sub, 1, &stats).await;
+                let mut a = agg.lock().unwrap();
+                a.load_history(e, Market::Perp, &h);
+                let mut s = stats.lock().unwrap();
+                s.hist_pending -= 1;
+                if s.hist_pending == 0 { a.finish_history() }
+                ctx.request_repaint();
+            });
+        }
+        {
+            let _g = rt.enter();
+            if let Some(s) = ex::venue_sub(Exchange::Binance, &sub) { ex::binance::spawn_trades(&s, tx); }
+        }
+        f.rt = Some(rt);
+        f
     }
 
     /// Place an order (rules fetched once per symbol and cached); the result lands in the account log.

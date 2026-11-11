@@ -363,6 +363,10 @@ pub struct App {
     pub(crate) layout: String,
     cell: usize,
     others: Vec<(usize, chart::Chart)>,
+    /// the feeds of the symbols other cells pin (`chart::Chart::sym`), by base; the cell whose pair the
+    /// picker is choosing (None: the active symbol)
+    feeds: HashMap<String, engine::CellFeed>,
+    pick_cell: Option<usize>,
     /// (symbol, account fills version) the chart's own fills were read from the db for
     fills_key: (String, u64),
     /// time of the newest trade log entry already toasted
@@ -401,6 +405,14 @@ fn layout_cells(layout: &str, r: egui::Rect) -> Vec<egui::Rect> {
         "4" => { let ([a, c], [b, d]) = (split(l), split(rt)); vec![a, b, c, d] }
         _ => vec![r],
     }
+}
+
+/// A press made `cell` the active chart: the two swap. A cell of another symbol makes that symbol the active one
+/// (returned, for the engine), and the chart that was active keeps showing `base` as a pinned cell.
+fn activate(active: &mut chart::Chart, cell: &mut chart::Chart, base: &str) -> Option<String> {
+    let sym = std::mem::take(&mut cell.sym);
+    std::mem::swap(active, cell);
+    (!sym.is_empty() && sym != base).then(|| { cell.sym = base.to_string(); sym })
 }
 
 impl App {
@@ -456,7 +468,7 @@ impl App {
         match env("T1_BOOK_PANE").and_then(|s| s.parse::<u8>().ok()) { Some(1) => book.trades = true, Some(p @ 2..=3) => book.page = p, _ => {} }
         if let Some(tf) = env("T1_TF").and_then(|s| s.parse().ok()) { chart.tf = tf; }
         let layout = env("T1_LAYOUT").or(st.layout).unwrap_or_else(|| "1".into());
-        App {
+        let mut app = App {
             eng, prefs, settings: Default::default(), command: Default::default(), back: None, help: false, kbd: kbd::Kbd::start(), tray: None, pop: None, saved: (saved, Instant::now()), unreadable, prev_kept: false, window: st.window, mode, chart, book, opt: Default::default(), picker, trade, spot: Default::default(),
             rate: (Instant::now(), 0, 0.0),
             shot: env("T1_SHOT").map(|p| (p, env("T1_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(30.0))),
@@ -464,8 +476,18 @@ impl App {
             route: st.route.clone().unwrap_or_default(), pending_base: None, pending_mode: None, pending_restart: false,
             layout, cell: st.cell.unwrap_or(0), others: st.charts.unwrap_or_default(), fills_key: Default::default(), log_seen: now_ms(), fill_seen: 0,
             st: (Default::default(), Instant::now(), true), order: Default::default(), hot_trade: vec![], venue_toggle: None, coins_preloaded: false, order_panel: st.order_panel.unwrap_or(true), top: Default::default(), venue_pages: Default::default(),
-            account: Default::default(), hunter,
+            account: Default::default(), hunter, feeds: HashMap::new(), pick_cell: None,
+        };
+        // T1_CELLS=ETH,SOL,...: the other cells' symbols in slot order (screenshots)
+        if let Some(c) = env("T1_CELLS") {
+            let n = layout_cells(&app.layout, egui::Rect::NOTHING).len();
+            app.fill_cells(n);
+            let slots: Vec<usize> = (0..n).filter(|k| *k != app.cell).collect();
+            for (k, b) in slots.into_iter().zip(c.split(',')) {
+                if let Some(o) = app.others.iter_mut().find(|o| o.0 == k) { o.1.sym = b.trim().to_uppercase(); }
+            }
         }
+        app
     }
 
     fn header(&mut self, ui: &mut Ui, a: &Agg, st: &serde_json::Value, new_base: &mut Option<String>, new_mode: &mut Option<Market>) {
@@ -490,7 +512,17 @@ impl App {
             }
             // the Hunter page is about every coin: no coin picker and no headline price there
             let hunting = self.hunter.open;
-            if !hunting { if let Some(b) = self.picker.show(ui, &self.eng.base, &tickers) { if b != self.eng.base { *new_base = Some(b); } } }
+            if !hunting {
+                // a cell's pair button opened it: the pick goes to that cell
+                let cell = self.pick_cell.and_then(|k| self.others.iter().find(|o| o.0 == k)).map(|o| o.1.sym.clone()).filter(|s| !s.is_empty());
+                if let Some(b) = self.picker.show(ui, cell.as_deref().unwrap_or(&self.eng.base), &tickers) {
+                    match self.pick_cell.and_then(|k| self.others.iter_mut().find(|o| o.0 == k)) {
+                        Some(o) => if o.1.sym != b { o.1.sym = b; o.1.reset_view(); o.1.src = None; },
+                        None => if b != self.eng.base { *new_base = Some(b); },
+                    }
+                }
+                if !self.picker.open { self.pick_cell = None; }
+            }
             // the markets, then the Hunter page (not a market: the chart keeps its market under it)
             let names: Vec<&str> = MODES.iter().map(|(_, k)| t(k)).chain([t("mode.hunter")]).collect();
             let sel = if self.hunter.open { MODES.len() } else { MODES.iter().position(|(m, _)| *m == self.mode).unwrap_or(0) };
@@ -979,7 +1011,9 @@ impl App {
     /// Orders and triggers dragged on a chart, and prices put into the order panel from it.
     fn chart_actions(&mut self, ctx: &egui::Context) {
         let mut acts = std::mem::take(&mut self.chart.actions);
-        for o in self.others.iter_mut() { acts.append(&mut o.1.actions); }
+        // a cell of another symbol has no orders here: its clicks must not reach the active symbol's order panel
+        let base = self.eng.base.clone();
+        for o in self.others.iter_mut() { if o.1.sym.is_empty() || o.1.sym == base { acts.append(&mut o.1.actions) } else { o.1.actions.clear() } }
         for act in acts {
             match act {
                 chart::ChartAct::Fill(px) => self.trade.fill = Some((self.trade.ex, px)),
@@ -1020,10 +1054,36 @@ impl App {
         }
     }
 
+    /// One feed per symbol a visible cell pins (none in a one-chart layout); a feed whose symbol left the layout
+    /// closes.
+    fn cell_feeds(&mut self, n: usize, ctx: &egui::Context) {
+        let base = &self.eng.base;
+        let want: Vec<(String, i64)> = if n < 2 { vec![] } else {
+            self.others.iter().filter(|o| o.0 < n && !o.1.sym.is_empty() && o.1.sym != *base).map(|o| (o.1.sym.clone(), o.1.tf)).collect()
+        };
+        self.feeds.retain(|b, _| want.iter().any(|w| w.0 == *b));
+        for (b, tf) in want {
+            let f = self.feeds.entry(b.clone()).or_insert_with(|| self.eng.cell_feed(&b, ctx));
+            f.ensure_tf(chart::native_tf(tf) as u32, ctx);
+        }
+        // T1_DIAG: each feed's state every 5 s (checks without a screen)
+        static DIAG_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+        if std::env::var_os("T1_DIAG").is_some() && now_ms() - DIAG_AT.load(std::sync::atomic::Ordering::Relaxed) >= 5_000 {
+            DIAG_AT.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+            for (b, f) in &self.feeds {
+                let a = f.agg.lock().unwrap();
+                let bars = a.series.get(&(None, Market::Perp)).map(|s| (s.bars.len(), s.bars.back().map(|x| x.c)));
+                let venues: Vec<_> = a.venues.keys().map(|(e, _)| *e).collect();
+                eprintln!("[cell] {b} {:?} bars {bars:?} venues {venues:?} tfs {:?}", f.caption(), a.tf.keys().collect::<Vec<_>>());
+            }
+        }
+    }
+
     /// Charts for every cell of the layout: new cells copy the active chart with another interval.
     fn fill_cells(&mut self, n: usize) {
         if self.cell >= n {
-            if let Some(o) = self.others.iter_mut().find(|o| o.0 == 0) { std::mem::swap(&mut self.chart, &mut o.1); o.0 = self.cell; }
+            // the first cell becomes the active one, on the active symbol
+            if let Some(o) = self.others.iter_mut().find(|o| o.0 == 0) { std::mem::swap(&mut self.chart, &mut o.1); o.0 = self.cell; self.chart.sym.clear(); }
             self.cell = 0;
         }
         for k in (0..n).filter(|k| *k != self.cell) {
@@ -1031,6 +1091,7 @@ impl App {
             let used: Vec<i64> = std::iter::once(self.chart.tf).chain(self.others.iter().map(|o| o.1.tf)).collect();
             let mut c: chart::Chart = serde_json::to_value(&self.chart).ok().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
             c.tf = [240, 60, 15, 1440, 5, 1].into_iter().find(|tf| !used.contains(tf)).unwrap_or(60);
+            c.sym.clear();
             self.others.push((k, c));
         }
     }
@@ -1054,24 +1115,52 @@ impl App {
         self.fill_cells(cells.len());
         if let Some(p) = ui.input(|i| i.pointer.primary_pressed().then(|| i.pointer.interact_pos()).flatten()) {
             if let Some(k) = cells.iter().position(|r| r.contains(p)).filter(|k| *k != self.cell) {
-                if let Some(o) = self.others.iter_mut().find(|o| o.0 == k) { std::mem::swap(&mut self.chart, &mut o.1); o.0 = self.cell; self.cell = k; }
+                // a press on the cell's pair button picks its symbol without activating it
+                if let Some(o) = self.others.iter_mut().find(|o| o.0 == k).filter(|o| !o.1.pick_rect.contains(p)) {
+                    if let Some(b) = activate(&mut self.chart, &mut o.1, &base) { self.pending_base = Some(b); }
+                    o.0 = self.cell;
+                    self.cell = k;
+                }
             }
         }
+        let usdt = self.eng.stats.lock().unwrap().usdt;
         for (k, r) in cells.iter().enumerate() {
             let mut child = ui.new_child(egui::UiBuilder::new().id_salt(("cell", k)).max_rect(*r));
             child.set_clip_rect(r.intersect(ui.clip_rect()));
             if k == self.cell {
                 self.chart.multi = true;
                 self.chart.show(&mut child, a, self.mode, &base);
+                if std::mem::take(&mut self.chart.pick) { self.picker.open = true; self.pick_cell = None; }
             } else if let Some(o) = self.others.iter_mut().find(|o| o.0 == k) {
                 let c = &mut o.1;
                 c.multi = true;
-                c.lines = self.chart.lines.clone();
-                c.fills = self.chart.fills.clone();
-                (c.confirm, c.trading, c.equity, c.amends) = (self.chart.confirm, self.chart.trading, self.chart.equity, self.chart.amends);
                 c.adopt_drawings(&self.chart);
-                c.show(&mut child, a, self.mode, &base);
+                // a symbol of its own: its feed (perp), no account lines, orders or odds of the active symbol
+                if let Some(f) = self.feeds.get(&c.sym).filter(|_| c.sym != base) {
+                    (c.lines, c.fills, c.odds) = (vec![], vec![], vec![]);
+                    (c.confirm, c.trading, c.equity, c.amends) = (true, false, None, false);
+                    let sym = c.sym.clone();
+                    {
+                        let mut fa = f.agg.lock().unwrap();
+                        if let Some(u) = usdt { fa.set_fx("USDT", u); }
+                        c.show(&mut child, &fa, Market::Perp, &sym);
+                    }
+                    let cap = f.caption().or((self.mode != Market::Perp).then_some("Perp"));
+                    if let Some(cap) = cap {
+                        let p = ui.painter().with_clip_rect(*r);
+                        let g = p.layout_no_wrap(l(cap).to_string(), prop(11.0), mu());
+                        let br = egui::Rect::from_min_size(egui::pos2(r.right() - g.size().x - 14.0, r.bottom() - g.size().y - 8.0), g.size() + egui::vec2(10.0, 4.0));
+                        p.rect(br, 3, panel2(), egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside);
+                        p.galley(br.min + egui::vec2(5.0, 2.0), g, mu());
+                    }
+                } else {
+                    c.lines = self.chart.lines.clone();
+                    c.fills = self.chart.fills.clone();
+                    (c.confirm, c.trading, c.equity, c.amends) = (self.chart.confirm, self.chart.trading, self.chart.equity, self.chart.amends);
+                    c.show(&mut child, a, self.mode, &base);
+                }
                 self.chart.adopt_drawings(c);
+                if std::mem::take(&mut c.pick) { self.picker.open = true; self.pick_cell = Some(k); }
             }
             let col = if k == self.cell { accent().linear_multiply(0.7) } else { line() };
             ui.painter().rect_stroke(*r, 4, egui::Stroke::new(1.0, col), egui::StrokeKind::Outside);
@@ -1308,9 +1397,11 @@ impl App {
             self.eng.start(&b, &ctx);
             if self.mode != Market::Perp && self.mode != Market::Spot { self.eng.ensure(self.mode); }
             let off = self.eng.off.clone();
+            // cells pinned to a symbol of their own keep their view
             for c in std::iter::once(&mut self.chart).chain(self.others.iter_mut().map(|o| &mut o.1)) {
-                if switched { c.reset_view(); }
-                if switched || c.src.is_some_and(|e| off.contains(&e)) { c.src = None; }
+                let follows = switched && c.sym.is_empty();
+                if follows { c.reset_view(); }
+                if follows || c.src.is_some_and(|e| off.contains(&e)) { c.src = None; }
             }
             if switched || self.book.src.is_some_and(|e| self.eng.off.contains(&e)) { self.book.src = None; }
             self.rate = (Instant::now(), 0, 0.0);
@@ -1344,8 +1435,10 @@ impl App {
         }
         self.eng.ensure_tf(chart::native_tf(self.chart.tf) as u32, &ctx);
         let n = layout_cells(&self.layout, egui::Rect::NOTHING).len();
-        let tfs: Vec<i64> = self.others.iter().filter(|o| o.0 < n).map(|o| o.1.tf).collect();
+        let base = self.eng.base.clone();
+        let tfs: Vec<i64> = self.others.iter().filter(|o| o.0 < n && (o.1.sym.is_empty() || o.1.sym == base)).map(|o| o.1.tf).collect();
         for tf in tfs { self.eng.ensure_tf(chart::native_tf(tf) as u32, &ctx); }
+        self.cell_feeds(n, &ctx);
         self.book.show_tape = self.prefs.book_tape;
         script::set_on(self.prefs.scripts);
         if self.eng.l3_flowscan != self.prefs.hl_flowscan {
@@ -1487,6 +1580,26 @@ mod tests {
         assert!(!load_settings("").1);
         // drawings that are not a list lose them: flagged
         assert!(load_settings(r#"{"chart": {"drawings": {"BTC": "oops"}}}"#).1);
+        // a cell's own symbol persists; a layout saved before it follows the active symbol
+        let (s, lossy) = load_settings(r#"{"charts": [[1, {"tf": 60, "sym": "ETH"}], [2, {"tf": 240}]]}"#);
+        let c = s.charts.unwrap();
+        assert!(!lossy && c[0].1.sym == "ETH" && c[1].1.sym.is_empty());
+    }
+
+    #[test]
+    fn activating_a_cell_of_another_symbol() {
+        let (mut active, mut cell) = (chart::Chart::default(), chart::Chart::default());
+        (cell.tf, cell.sym) = (60, "ETH".into());
+        // ETH becomes the active symbol, the chart left keeps BTC
+        assert_eq!(activate(&mut active, &mut cell, "BTC").as_deref(), Some("ETH"));
+        assert!(active.tf == 60 && active.sym.is_empty() && cell.sym == "BTC");
+        // a cell on the active symbol (pinned or following): a plain swap, both follow
+        assert_eq!(activate(&mut active, &mut cell, "BTC"), None);
+        assert!(active.sym.is_empty() && cell.sym.is_empty());
+        let mut pinned = chart::Chart::default();
+        pinned.sym = "BTC".into();
+        assert_eq!(activate(&mut active, &mut pinned, "BTC"), None);
+        assert!(active.sym.is_empty() && pinned.sym.is_empty());
     }
 
     #[test]

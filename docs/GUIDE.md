@@ -58,6 +58,10 @@ reach stays red in the status bar; the others keep working.
   `%` and `log` (corner under the axis) switch the price scale. *Latest* returns to the live edge.
 - **Layout** (rectangle button): 1, 2 side by side, 2 stacked, 3 or 4 charts. Click a cell to make it
   the active one: the toolbar drives the highlighted chart. Drawings are shared per pair.
+  Each cell has a pair button (first in its toolbar): pick another pair there and that cell shows it (perpetual)
+  while the active cell keeps driving the header, book and order panel; clicking such a cell makes its pair the
+  active one. Those cells show Binance's perpetual alone (no aggregate, heatmap or walls), as the cell's caption
+  says.
 
 **Indicators** (the *Indicators* menu; inputs such as MA lengths, Bollinger and RSI / MACD periods are
 edited inline; the legend's third row names each overlay with its current value)

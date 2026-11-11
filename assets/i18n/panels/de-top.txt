@@ -97,3 +97,4 @@ Theme = Design
 System = System
 Dark = Dunkel
 Light = Hell
+Binance perp only (direct mode) = Nur Binance-Perp (Direktmodus)

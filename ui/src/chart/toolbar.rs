@@ -11,6 +11,13 @@ impl Chart {
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(bar.min, pos2(bar.right(), bar.bottom() - 8.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
         let ui = &mut child;
         ui.spacing_mut().item_spacing.x = 2.0;
+        // a layout cell names its pair; clicking it picks the cell's own symbol
+        if self.multi {
+            let b = tb_button(ui, depth::alias::display(base).0, Tb::Outline, 0, true).on_hover_text(super::l("Choose pair"));
+            self.pick_rect = b.rect;
+            if b.clicked() { self.pick = true; }
+            ui.add_space(4.0);
+        }
         for (m, l) in &TFS[..TF_QUICK] {
             if pill(ui, l, self.tf == *m).clicked() { self.tf = *m; }
         }

@@ -61,6 +61,18 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
     }
 }
 
+/// A chart cell's light feed (the app's extra symbols in direct mode): aggregate trades and the mark price of one
+/// perp on one socket, no book (no REST poll either). `sub` in Binance naming (`ex::venue_sub`).
+pub fn spawn_trades(sub: &Sub, tx: Tx) -> JoinHandle<()> {
+    let e = Emit { ex: Exchange::Binance, market: Market::Perp, tx };
+    let sym = format!("{}{}", sub.base, sub.quote).to_uppercase();
+    let s = sym.to_lowercase();
+    let url = format!("wss://fstream.binance.com/market/stream?streams={s}@aggTrade/{s}@markPrice@1s");
+    // no funding interval fetched: the mark carries no funding rate
+    let none = AtomicU32::new(0);
+    tokio::spawn(ws::run(Spec::new("binance perp trades", url), move |f| on_perp(&e, &sym, &none, f)))
+}
+
 /// Full-depth book: diff stream + REST snapshot (1000 levels; weight 20 futures / 50 spot, once
 /// per connection), validated with Binance's sequencing rules. Futures: each event's `pu` must
 /// equal the previous `u`; spot: `U` must be previous `u + 1`. Any gap resyncs from scratch.

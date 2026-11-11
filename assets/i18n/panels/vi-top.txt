@@ -97,3 +97,4 @@ Theme = Chủ đề
 System = Hệ thống
 Dark = Tối
 Light = Sáng
+Binance perp only (direct mode) = Chỉ hợp đồng vĩnh cửu Binance (chế độ trực tiếp)

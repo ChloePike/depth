@@ -129,3 +129,4 @@ markets = 个市场
 24h volume = 24 小时成交额
 Open interest = 持仓量
 Funding /h = 资金费率 /小时
+Binance perp only (direct mode) = 仅 Binance 永续（直连模式）
