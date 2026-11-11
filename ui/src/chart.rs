@@ -6,6 +6,7 @@ use charting::style::*;
 // venue colours and logos stay the app's
 use theme::{ex_color, icon};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Pos2, Rect, RichText, Sense, Stroke, Ui};
+use charting::Z;
 use depth::agg::{Agg, Bar};
 use depth::{Exchange, Market};
 
@@ -15,7 +16,7 @@ mod fmt;
 mod heat;
 // leaf code lives in the `charting` crate; the old module paths stay as aliases
 use charting::ta as ind;
-use charting::coords::{bucket, grid, nice, padded_range, BarAxis as Frame, PriceScale as PScale};
+use charting::coords::{bucket, nice, BarAxis as Frame, PriceScale as PScale};
 use charting::layout::{place, try_place};
 mod levels;
 mod liq;
@@ -30,8 +31,8 @@ use heat::HeatCache;
 use liq::LiqCache;
 use pane::Pane;
 
-const AXIS_W: f32 = 74.0;
-const TIME_H: f32 = 20.0;
+pub(crate) const AXIS_W: f32 = 74.0;
+pub(crate) const TIME_H: f32 = 20.0;
 const SUB_H: f32 = 70.0;
 /// Every chart interval (minutes); the first six sit in the toolbar, the rest in its menu.
 const TFS: [(i64, &str); 12] = [(1, "1m"), (5, "5m"), (15, "15m"), (60, "1H"), (240, "4H"), (1440, "1D"),
@@ -42,9 +43,8 @@ const TF_QUICK: usize = 6;
 /// everything else is resampled from the largest of those that divides it).
 pub fn native_tf(tf: i64) -> i64 { [240, 60, 15, 5, 1].into_iter().find(|n| tf % n == 0).unwrap_or(1) }
 
-
-#[derive(Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
-enum Scale { #[default] Linear, Log, Percent }
+// the widget's scale serializes as the app's own enum did ("Linear", "Log", "Percent"): settings.json loads as before
+use charting::Scale;
 
 
 /// Native-period history up to the first full live bucket, then bars resampled from the live
@@ -111,12 +111,10 @@ fn dashed(painter: &egui::Painter, x0: f32, x1: f32, y: f32, col: Color32) {
 }
 
 /// Grid line, TradingView-style: 1 px dots, faint (dashes, not circles: cheap to tessellate).
-fn grid_line(painter: &egui::Painter, a: Pos2, b: Pos2) {
+pub(super) fn grid_line(painter: &egui::Painter, a: Pos2, b: Pos2) {
     painter.extend(egui::Shape::dashed_line(&[a, b], Stroke::new(1.0, line()), 1.5, 2.5));
 }
 
-/// Axis label color for ordinary levels and times (round price levels use `mu()`).
-fn axis_c() -> Color32 { lerp(dim(), mu(), 0.5) }
 
 /// Persisted in settings.json (see ui::Settings); runtime-only fields are skipped.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -186,12 +184,13 @@ pub struct Chart {
     /// own fills of the current symbol (perp), oldest first, set by the app when they change
     #[serde(skip)] pub fills: Vec<depth::trade::Fill>,
     #[serde(skip)] base_unit: String,
-    /// manual price range (None = fit the visible bars): set by dragging the price axis,
-    /// then vertical drags on the plot pan it; "auto" or a double-click returns to fitting
-    #[serde(skip)] y_range: Option<(f64, f64)>,
+    /// the chart widget: time view (offset from the live edge, zoom, glide), manual price range, eased auto-fit;
+    /// `bar_w` and `scale` above are its persisted part, copied in and out every frame
+    #[serde(skip)] view: charting::Chart,
+    /// the chart menu asked for a view reset, the "A" button for auto-fit (applied after the widget's frame)
+    #[serde(skip)] reset_req: bool,
+    #[serde(skip)] auto_req: bool,
     #[serde(skip)] liq: LiqCache,
-    /// bars scrolled away from the live edge (0 = latest at the right)
-    #[serde(skip)] right: f32,
     #[serde(skip)] cache: HeatCache,
     /// last heatmap column time the walls were computed for, and the (bid, ask) walls shown
     #[serde(skip)] walls_at: (i64, Vec<(f64, f64)>, Vec<(f64, f64)>),
@@ -202,10 +201,6 @@ pub struct Chart {
     /// the one being dragged: a drag that starts on a drawing edits it instead of panning
     #[serde(skip)] hot: Option<(usize, u8)>,
     #[serde(skip)] drag: Option<(usize, u8)>,
-    /// pan velocity after a drag is released (bars per second), decaying
-    #[serde(skip)] fling: f32,
-    /// auto-fit price range as currently shown (base, interval, source, lo, hi), easing toward the target
-    #[serde(skip)] eased: Option<((String, i64, Option<Exchange>), f64, f64)>,
     /// drawing edits: the last committed list (base, drawings), undo and redo stacks of earlier ones
     #[serde(skip)] committed: Option<(String, Vec<Drawing>)>,
     #[serde(skip)] undo: Vec<Vec<Drawing>>,
@@ -234,8 +229,6 @@ pub struct Chart {
     #[serde(skip)] pending_move: Option<(LineAct, String, f64, Option<f64>, Pos2)>,
     /// requests for the app, drained each frame
     #[serde(skip)] pub actions: Vec<ChartAct>,
-    /// (native interval, oldest bar) an `Older` request went out for; cleared when the view leaves the left edge
-    #[serde(skip)] older_req: Option<(i64, i64)>,
     /// set by the app: confirm before moving orders; keys present (order tools shown); account equity
     /// (USD) for the position tool's size; whether the trading venue amends in place
     #[serde(skip)] pub confirm: bool,
@@ -260,8 +253,8 @@ pub struct Chart {
 impl Default for Chart {
     fn default() -> Self {
         Chart {
-            tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), right: 0.0, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
-            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, fling: 0.0, eased: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, sym: String::new(), pick: false, pick_rect: Rect::NOTHING, line_hot: None, line_drag: None, pending_move: None, actions: vec![], older_req: None, confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, scripts: vec![], script_out: vec![], ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: true, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, fills_on: true, algos: true, whale_usd: 100_000.0, cone: false, poly: false, odds: vec![], mark_ex: None, style: 2, lines: vec![], wants_options: false, fills: vec![], base_unit: String::new(), scale: Scale::Linear, y_range: None,
+            tf: 1, src: None, heat: true, liqmap: false, liq: LiqCache::default(), view: charting::Chart::default(), reset_req: false, auto_req: false, bar_w: 7.0, cache: HeatCache::default(), walls_at: Default::default(),
+            drawings: Default::default(), tool: None, pending: vec![], hot: None, drag: None, committed: None, undo: vec![], redo: vec![], menu: None, replay: None, alert_px: Default::default(), fired: vec![], toast: None, multi: false, sym: String::new(), pick: false, pick_rect: Rect::NOTHING, line_hot: None, line_drag: None, pending_move: None, actions: vec![], confirm: true, trading: false, equity: None, amends: false, risk_pct: 1.0, layout: "1".into(), layout_req: None, scripts: vec![], script_out: vec![], ind: Ind::default(), hide: false, alert_sound: "depth:chime".into(), ma: false, mas: default_mas(), magnet: true, sr: true, walls: true, mark: true, breakouts: true, vwap: true, bb: false, fp: false, fp_style: 0, whales: false, fills_on: true, algos: true, whale_usd: 100_000.0, cone: false, poly: false, odds: vec![], mark_ex: None, style: 2, lines: vec![], wants_options: false, fills: vec![], base_unit: String::new(), scale: Scale::Linear,
             panes: vec![(Pane::Vol, true), (Pane::Cvd, true), (Pane::Oi, true), (Pane::Funding, false), (Pane::Basis, false), (Pane::Ls, false), (Pane::Premium, false), (Pane::Ofi, false), (Pane::BookFlow, false), (Pane::Rsi, false), (Pane::Macd, false), (Pane::Delta, false), (Pane::Iv, false), (Pane::Skew, false)],
         }
     }
@@ -324,14 +317,143 @@ fn time_of(bars: &[Bar], x: f32, ms: i64) -> i64 {
 
 
 
-/// One frame of `Chart::show`, shared by its paint phases: data, geometry, price scale and grid.
+/// One paint phase of `Chart::show`: the frame's data and the widget's geometry.
 struct Cx<'a> {
     a: &'a Agg, market: Market, smarket: Market, live: bool, editing: bool, loading_tf: bool,
     raw: &'a [Bar], bars: &'a [Bar], vis: &'a [Bar], i0: usize, i1: usize,
-    rect: Rect, plot_w: f32, main: Rect, main_plot: Rect, fr: &'a Frame, ps: PScale, lo: f64, hi: f64,
-    resp: &'a egui::Response, painter: &'a egui::Painter,
-    /// price grid values, their step and decimals; percent labels are relative to `base_px`
-    gv: &'a [f64], gdp_step: f64, gdp: usize, base_px: f64, pct: bool,
+    /// the whole widget, the price area (legend rows and plot), the plot under the legend, the top of the time axis
+    rect: Rect, main: Rect, main_plot: Rect, time_top: f32,
+    fr: &'a Frame, ps: PScale, lo: f64, hi: f64,
+    resp: &'a egui::Response,
+    /// paints anywhere in the widget (the price axis column included)
+    painter: &'a egui::Painter,
+    /// the price grid's values and the bars of the time labels (the dotted grid)
+    grid: &'a [f64], times: &'a [usize],
+}
+
+/// What a frame charts, besides the widget's geometry.
+struct Data<'a> { a: &'a Agg, market: Market, smarket: Market, live: bool, loading_tf: bool, raw: &'a [Bar], bars: &'a [Bar], base: &'a str }
+
+impl Data<'_> {
+    fn cx<'b>(&'b self, f: &'b charting::Frame, editing: bool) -> Cx<'b> {
+        let time_top = f.panes.last().map_or(f.plot.bottom(), |p| p.1.bottom());
+        Cx { a: self.a, market: self.market, smarket: self.smarket, live: self.live, editing, loading_tf: self.loading_tf,
+            raw: self.raw, bars: self.bars, vis: &self.bars[f.i0..=f.i1], i0: f.i0, i1: f.i1,
+            rect: f.rect, main: f.legend.union(f.plot), main_plot: f.plot, time_top,
+            fr: &f.axis, ps: f.scale, lo: f.scale.lo, hi: f.scale.hi, resp: f.response, painter: &f.full, grid: &f.grid, times: &f.times }
+    }
+}
+
+/// The app's layers as the widget's overlay, with what one depth hands the next.
+struct Ov<'a> {
+    ch: &'a mut Chart, d: Data<'a>, panes: Vec<Pane>,
+    /// auto-fit on (the "A" button lit)
+    auto: bool,
+    /// axis tags and labels placed so far (reserved in the widget's layout once the plot is painted)
+    taken: Vec<Rect>,
+    /// third legend row: each overlay's name, value and colour
+    legend3: Vec<(String, String, Color32)>,
+    ba: Option<(f64, f64)>, ba_rect: Option<Rect>, mark: Option<f64>, mark_ax: Option<Rect>,
+    fp_text: bool, mas: Vec<(Vec<Option<f64>>, MaLine)>, lmax: f64,
+    /// hovered bar (else the newest), the premium pane's lines, each pane's value range (for the crosshair)
+    hi_idx: usize, prem: Vec<pane::Prem>, ranges: Vec<(Rect, Option<(f64, f64)>)>,
+    /// the replay bar is drawn after the widget (it needs `&mut Ui`): plot, bar axis, hovered bar's time
+    replay_at: Option<(Rect, Frame, Option<i64>)>,
+}
+
+impl charting::Overlay for Ov<'_> {
+    fn paint(&mut self, z: Z, f: &mut charting::Frame) {
+        let editing = self.ch.drag.is_some() || self.ch.line_drag.is_some();
+        match z {
+            Z::Back => {
+                // the layers size bars from this frame's zoom; a released drag ends a drawing's move
+                self.ch.bar_w = f.axis.bar_w;
+                if f.response.drag_stopped() { self.ch.drag = None; }
+                let cx = self.d.cx(f, editing);
+                cx.painter.rect_filled(cx.rect, 0, panel());
+                // the liquidation map is opaque (Hyperdash style): it goes first, so the grid and the book heatmap stay on top of it
+                if let Some((c, usd)) = self.ch.liq_layer(f.ui, &cx) {
+                    // the colour scale in words: dark purple $0, pale yellow this much (Hyperdash draws it as a bar)
+                    let scale = usd.map_or(String::new(), |u| format!(" · $0 – ${}", fmt_usd_short(u)));
+                    self.legend3.push((super::l("Liquidation map").into(), format!("{}{scale}", super::l("above: shorts · below: longs")), c));
+                }
+                self.ch.backdrop(f.ui, &cx);
+            }
+            Z::BelowCandles => {
+                let cx = self.d.cx(f, editing);
+                let (a, smarket, main) = (cx.a, cx.smarket, cx.main);
+                // label layout: the last-price axis tag and the bid/ask box are placed first; every other
+                // label moves up or down until it overlaps none of them (place())
+                let last = cx.bars.last().unwrap();
+                let ly = cx.ps.y(last.c);
+                self.ba = if cx.live { bid_ask(a, self.ch.src, smarket, last.c) } else { None };
+                self.ba_rect = self.ba.map(|(bid, ask)| {
+                    let (ka, kb) = (t("tr.ask"), t("tr.bid"));
+                    let p = cx.painter;
+                    let lw = p.layout_no_wrap(ka.to_string(), prop(10.0), fg()).size().x.max(p.layout_no_wrap(kb.to_string(), prop(10.0), fg()).size().x);
+                    let vw = p.layout_no_wrap(fmt_px(ask.max(bid)), mono(10.0), fg()).size().x;
+                    let w = lw + vw + 16.0;
+                    Rect::from_min_size(pos2(main.right() - w - 4.0, ly - 15.0), vec2(w, 30.0))
+                });
+                self.taken = vec![Rect::from_min_size(pos2(main.right() + 2.0, ly - 10.0), vec2(AXIS_W - 4.0, 34.0))];
+                if let Some(r) = self.ba_rect { self.taken.push(r.expand(2.0)); }
+                // the tags that matter most are reserved before any context level: mark price, then the
+                // account's own position / order lines (drawn later, in their reserved slots)
+                self.mark = if self.ch.mark && smarket == Market::Perp && cx.live {
+                    match self.ch.src {
+                        Some(e) => a.venues.get(&(e, Market::Perp)).and_then(|v| v.mark),
+                        // the aggregate chart: the order venue's mark, the one the header shows (user choice 2026-11-03; an
+                        // OI-weighted mean across venues sat a few bp off it, Hyperliquid / Lighter premiums pulling it)
+                        None => self.ch.mark_ex.and_then(|e| a.venues.get(&(e, Market::Perp))).and_then(|v| v.mark),
+                    }
+                } else { None };
+                self.mark_ax = self.mark.filter(|m| *m > cx.lo && *m < cx.hi).map(|mk| place(Rect::from_min_size(pos2(main.right() + 2.0, cx.ps.y(mk) - 9.0), vec2(AXIS_W - 4.0, 18.0)), &mut self.taken));
+                self.ch.levels(&cx, &mut self.taken, &mut self.legend3);
+                self.fp_text = self.ch.candles(&cx);
+            }
+            Z::AboveCandles => {
+                let cx = self.d.cx(f, editing);
+                (self.mas, self.lmax) = self.ch.studies(&cx, &mut self.legend3);
+                self.ch.markers(f.ui, &cx, self.fp_text, self.ba_rect);
+                self.ch.account_lines(f.ui, &cx, &mut self.taken);
+                let last = cx.bars.last().unwrap();
+                self.ch.last_price(&cx, last, cx.ps.y(last.c), self.ba, self.ba_rect, self.mark, self.mark_ax, &mut self.legend3);
+                self.ch.drawings_ui(f.ui, f.response, &f.full, cx.bars, &f.axis, cx.main, f.scale, self.d.base);
+                self.hi_idx = f.hover_i.unwrap_or(cx.bars.len() - 1);
+                self.prem = if self.panes.contains(&Pane::Premium) { pane::premium_lines(cx.a, cx.smarket, cx.vis, self.ch.tf * 60_000, self.hi_idx.checked_sub(cx.i0)) } else { vec![] };
+                // the widget's price labels skip what the app placed on the axis
+                for r in self.taken.drain(..) { f.reserve(r); }
+            }
+            Z::Top => {
+                let cx = self.d.cx(f, editing);
+                // the crosshair follows the pointer over the plot, the legend and the panes
+                let hover = f.hover_i.and(f.response.hover_pos());
+                self.ch.axis_chrome(f.ui, &cx, self.auto);
+                self.ch.crosshair(f.ui, &cx, f, hover, self.hi_idx, &self.ranges);
+                self.ch.legend(&cx, self.hi_idx, std::mem::take(&mut self.mas), self.lmax, std::mem::take(&mut self.legend3));
+                self.ch.paint_toast(f.ui, &cx);
+                self.replay_at = Some((cx.main_plot, *cx.fr, hover.map(|_| cx.bars[self.hi_idx].t)));
+            }
+        }
+    }
+
+    fn pane(&mut self, id: u32, p: &mut charting::PaneFrame) {
+        let Some(&pn) = self.panes.get(id as usize) else { return };
+        p.range = self.ch.draw_pane(&p.painter, pn, p.rect, self.d.bars, p.i0, p.i1, &p.axis, self.hi_idx, &self.prem, &self.d.a.opt_min);
+        self.ranges.push((p.rect, p.range));
+    }
+
+    /// A drag that starts on an account line (hit-tested last frame) moves it, else one on a drawing edits it; not
+    /// on the price axis, and no account line while a drawing tool is armed (panning stays on: placing is click-only).
+    fn claims_drag(&mut self, _: Pos2, on_axis: bool) -> bool {
+        let ch = &mut *self.ch;
+        ch.line_drag = if on_axis || ch.tool.is_some() { None } else { ch.line_hot };
+        ch.drag = if on_axis || ch.line_drag.is_some() { None } else { ch.hot.filter(|h| h.1 != LOCKED) };
+        ch.line_drag.is_some() || ch.drag.is_some()
+    }
+
+    /// A double-click on a drawing does not reset the view.
+    fn allows_reset(&mut self, _: Pos2) -> bool { self.ch.hot.is_none() }
 }
 
 impl Chart {
@@ -346,101 +468,42 @@ impl Chart {
         self.base_unit = base.to_string();
         let Some((raw, bars, loading_tf, now, next_t, live)) = self.load_bars(ui, a, smarket) else { return };
 
-        let rect = ui.available_rect_before_wrap();
-        let resp = ui.allocate_rect(rect, Sense::click_and_drag());
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0, panel());
-
         let mut panes: Vec<Pane> = self.panes.iter().filter(|(p, on)| *on && (!p.perp_only() || smarket == Market::Perp)).map(|(p, _)| *p).collect();
         // custom indicators under the built-in panes; a deleted file just drops out
         let key = format!("{}|{}|{:?}|{:?}", self.base_unit, self.tf, self.src, smarket);
         self.script_out = self.scripts.iter().filter_map(|s| crate::script::run(s, &key, &bars)).collect();
         panes.extend((0..self.script_out.len()).map(|i| Pane::Script(i as u16)));
-        let subs_h = panes.len() as f32 * SUB_H;
-        let main_h = (rect.height() - TIME_H - subs_h).max(120.0);
-        let plot_w = rect.width() - AXIS_W;
-        let main = Rect::from_min_size(rect.min, vec2(plot_w, main_h));
-
-        let (on_axis, editing, dt, y_wheel) = self.pan_zoom(ui, &resp, &bars, main);
-        let n_vis = plot_w / self.bar_w;
-        self.right = self.right.clamp(-n_vis * 0.5, bars.len() as f32);
-        let right_edge = bars.len() as f32 - 1.0 + 4.0 - self.right;
-        let fr = Frame { first: right_edge - n_vis, right_edge, bar_w: self.bar_w, plot: main };
-        // the view reached the oldest loaded bar: ask for the page before it, once per oldest bar (and not
-        // while the interval's history is still loading)
-        if fr.first >= 1.0 { self.older_req = None; } else if !loading_tf {
-            let req = (native_tf(self.tf), bars[0].t);
-            if self.older_req != Some(req) { self.older_req = Some(req); self.actions.push(ChartAct::Older(req.0)); }
-        }
-        let i0 = fr.first.floor().max(0.0) as usize;
-        let i1 = (right_edge.ceil() as usize).min(bars.len() - 1);
-        if i0 > i1 { return; }
-        let vis = &bars[i0..=i1];
-
-        let (lo, hi) = self.price_range(ui, &resp, vis, main, base, on_axis, editing, dt, y_wheel);
         // legend rows sit above the plot: OHLC, MAs, then the overlays' key values when any is on
         let overlays = self.sr || self.vwap || self.cone || self.poly || self.bb || ((self.mark || self.liqmap) && smarket == Market::Perp);
-        let main_plot = Rect::from_min_max(pos2(main.left(), main.top() + if overlays && self.ma && self.mas.iter().any(|m| m.on) { 70.0 } else if overlays { 52.0 } else { 48.0 }), pos2(main.right(), main.bottom() - 6.0));
-        let ps = PScale { lo, hi, log: self.scale == Scale::Log && lo > 0.0, r: main_plot };
-        let y = |v: f64| ps.y(v);
-        // percent scale: labels relative to the first visible close
-        let base_px = vis.first().map_or(1.0, |b| b.c);
-        let pct = self.scale == Scale::Percent;
-        // as many decimals as the grid step needs (83,000 not 83,000.0; 0.4512 when the step is 0.0005)
-        let gv: Vec<f64> = grid(lo, hi, (main_plot.height() as f64 / 60.0).max(2.0));
-        let gdp_step = gv.windows(2).map(|w| (w[1] - w[0]).abs()).fold(f64::MAX, f64::min);
-        let gdp = if gdp_step.is_finite() && gdp_step > 0.0 { super::step_dp(gdp_step) } else { 2 };
-        let cx = Cx { a, market, smarket, live, editing, loading_tf, raw: &raw, bars: &bars, vis, i0, i1, rect, plot_w, main, main_plot, fr: &fr, ps, lo, hi, resp: &resp, painter: &painter, gv: &gv, gdp_step, gdp, base_px, pct };
+        let inset = if overlays && self.ma && self.mas.iter().any(|m| m.on) { 70.0 } else if overlays { 52.0 } else { 48.0 };
+        // the price plot keeps at least 120 points: panes that do not fit stay off (a small layout cell)
+        panes.truncate(((ui.available_height() - TIME_H - inset - 120.0) / SUB_H).max(0.0) as usize);
+        // the footprint paints its own bars (`candles`)
+        let fp_on = self.fp && a.fp.get(&(self.src, smarket)).is_some_and(|f| f.bin > 0.0);
 
-        // the liquidation map is opaque (Hyperdash style): it goes first, so the grid and the book heatmap stay on top of it
-        let liq_legend = self.liq_layer(ui, &cx);
-        self.backdrop(ui, &cx);
-
-        // label layout: the last-price axis tag and the bid/ask box are placed first; every other
-        // label moves up or down until it overlaps none of them (place())
-        let last_bar = bars.last().unwrap();
-        let last_ly = y(last_bar.c);
-        let ba = if live { bid_ask(a, self.src, smarket, last_bar.c) } else { None };
-        let ba_rect = ba.map(|(bid, ask)| {
-            let (ka, kb) = (t("tr.ask"), t("tr.bid"));
-            let lw = painter.layout_no_wrap(ka.to_string(), prop(10.0), fg()).size().x.max(painter.layout_no_wrap(kb.to_string(), prop(10.0), fg()).size().x);
-            let vw = painter.layout_no_wrap(fmt_px(ask.max(bid)), mono(10.0), fg()).size().x;
-            let w = lw + vw + 16.0;
-            Rect::from_min_size(pos2(main.right() - w - 4.0, last_ly - 15.0), vec2(w, 30.0))
-        });
-        let mut taken: Vec<Rect> = vec![Rect::from_min_size(pos2(main.right() + 2.0, last_ly - 10.0), vec2(AXIS_W - 4.0, 34.0))];
-        // third legend row: each overlay's name, colour and current value, so no line needs guessing
-        let mut legend3: Vec<(String, String, Color32)> = vec![];
-        if let Some((c, usd)) = liq_legend {
-            // the colour scale in words: dark purple $0, pale yellow this much (Hyperdash draws it as a bar)
-            let scale = usd.map_or(String::new(), |u| format!(" · $0 – ${}", fmt_usd_short(u)));
-            legend3.push((super::l("Liquidation map").into(), format!("{}{scale}", super::l("above: shorts · below: longs")), c));
-        }
-        if let Some(r) = ba_rect { taken.push(r.expand(2.0)); }
-        // the tags that matter most are reserved before any context level: mark price, then the
-        // account's own position / order lines (drawn later, in their reserved slots)
-        let mark = if self.mark && smarket == Market::Perp && live {
-            match self.src {
-                Some(e) => a.venues.get(&(e, Market::Perp)).and_then(|v| v.mark),
-                // the aggregate chart: the order venue's mark, the one the header shows (user choice 2026-11-03; an
-                // OI-weighted mean across venues sat a few bp off it, Hyperliquid / Lighter premiums pulling it)
-                None => self.mark_ex.and_then(|e| a.venues.get(&(e, Market::Perp))).and_then(|v| v.mark),
-            }
-        } else { None };
-        let mark_ax = mark.filter(|m| *m > lo && *m < hi).map(|mk| place(Rect::from_min_size(pos2(main.right() + 2.0, y(mk) - 9.0), vec2(AXIS_W - 4.0, 18.0)), &mut taken));
-
-        self.levels(&cx, &mut taken, &mut legend3);
-        let (fp_text, mas, lmax) = self.candles(&cx, &mut legend3);
-        self.markers(ui, &cx, fp_text, ba_rect);
-        self.account_lines(ui, &cx, &mut taken);
-        self.last_price(&cx, last_bar, last_ly, ba, ba_rect, mark, mark_ax, &mut legend3);
-
-        self.drawings_ui(ui, &resp, &painter, &bars, &fr, main, ps, base);
-
-        let (hover, hi_idx) = self.axes(ui, &cx, panes, taken);
-        self.legend(&cx, hi_idx, mas, lmax, legend3);
-        self.replay_ui(ui, &resp, &painter, main_plot, &fr, hover.map(|_| bars[hi_idx].t), next_t, now);
-        self.paint_toast(ui, &cx);
+        let mut w = std::mem::take(&mut self.view);
+        (w.view.bar_w, w.scale, w.inset_top, w.axis_w, w.time_h) = (self.bar_w, self.scale, inset, AXIS_W, TIME_H);
+        w.panes = (0..panes.len() as u32).map(|i| (i, SUB_H)).collect();
+        w.max_bar_w = if self.fp { 160.0 } else { 60.0 };
+        // the app's own last price (countdown, bid / ask, mark), crosshair (magnet, "+"), footprint and dotted grid
+        (w.last_price, w.crosshair, w.candles, w.grid) = (false, false, !fp_on, false);
+        (w.fmt_price, w.fmt_time) = (Some(fmt_dp as fn(f64, usize) -> String), Some(fmt::axis_time as fn(i64, charting::TimeLabel) -> String));
+        let candles: Vec<charting::Candle> = bars.iter().map(|b| charting::Candle { t: b.t, o: b.o, h: b.h, l: b.l, c: b.c, v: b.vol }).collect();
+        // another symbol / interval / source snaps the auto-fit; the interval's history arriving asks for the older page again
+        let key = format!("{base}|{}|{:?}|{loading_tf}", self.tf, self.src);
+        let auto = w.y_range.is_none();
+        let bar_ms = self.tf * 60_000;
+        let mut ov = Ov { ch: self, d: Data { a, market, smarket, live, loading_tf, raw: &raw, bars: &bars, base }, panes, auto, taken: vec![], legend3: vec![],
+            ba: None, ba_rect: None, mark: None, mark_ax: None, fp_text: false, mas: vec![], lmax: 0.0, hi_idx: bars.len() - 1, prem: vec![], ranges: vec![], replay_at: None };
+        let r = w.show(ui, &charting::ChartData { candles: &candles, bar_ms, key: &key }, &mut ov);
+        let replay_at = ov.replay_at.take();
+        if std::mem::take(&mut self.reset_req) { w.reset(); }
+        if std::mem::take(&mut self.auto_req) { w.y_range = None; }
+        self.bar_w = w.view.bar_w;
+        self.view = w;
+        // the view reached the oldest loaded bar: ask for the page before it (not while the interval's history is still loading)
+        if r.reached_start && !loading_tf { self.actions.push(ChartAct::Older(native_tf(self.tf))); }
+        if let Some((plot, fr, hover_t)) = replay_at { self.replay_ui(ui, &r.response, plot, &fr, hover_t, next_t, now); }
     }
 
     /// The bars to chart: the live 1m series resampled to the interval, stitched to native-interval
@@ -489,50 +552,18 @@ impl Chart {
         Some((raw, bars, loading_tf, now, next_t, live))
     }
 
-    /// Pan / zoom / fling and who gets a drag; returns (drag on the price axis, editing a line or
-    /// drawing, frame time, wheel delta over the price axis).
-    fn pan_zoom(&mut self, ui: &Ui, resp: &egui::Response, bars: &[Bar], main: Rect) -> (bool, bool, f32, f32) {
-        // interaction (panning stays on while a drawing tool is armed: placing is click-only)
-        // a drag that starts on the price axis scales prices instead of panning time
-        let on_axis = resp.interact_pointer_pos().is_some_and(|p| p.x > main.right() && p.y < main.bottom());
-        // a drag that starts on a drawing (hit-tested last frame) moves it instead of the chart
-        if resp.drag_started() {
-            // an account line (hit-tested last frame) wins over drawings
-            self.line_drag = if on_axis || self.tool.is_some() { None } else { self.line_hot };
-            self.drag = if on_axis || self.line_drag.is_some() { None } else { self.hot.filter(|h| h.1 != LOCKED) };
-            self.fling = 0.0;
-        }
-        let editing = self.drag.is_some() || self.line_drag.is_some();
-        // pan, glide, wheel zoom around the pointer, horizontal scroll, double-click reset (not on a drawing)
-        let mut tv = charting::interact::TimeView { right: self.right, bar_w: self.bar_w, fling: self.fling };
-        let (dt, y_wheel, reset) = charting::interact::pan_zoom(ui, resp, main, bars.len(), &mut tv, if self.fp { 160.0 } else { 60.0 }, editing, on_axis, self.hot.is_none());
-        (self.right, self.bar_w, self.fling) = (tv.right, tv.bar_w, tv.fling);
-        if reset { self.y_range = None; }
-        // a released drag ends a drawing's move
-        if resp.drag_stopped() { self.drag = None; }
-        (on_axis, editing, dt, y_wheel)
-    }
-
-    /// The price range shown: the eased auto-fit, or the manual range the wheel and drags set.
-    #[allow(clippy::too_many_arguments)]
-    fn price_range(&mut self, ui: &Ui, resp: &egui::Response, vis: &[Bar], main: Rect, base: &str, on_axis: bool, editing: bool, dt: f32, y_wheel: f32) -> (f64, f64) {
-        // auto-fit toward the visible range (eased; another symbol / interval / source snaps), or the manual range
-        let target = padded_range(vis.iter().flat_map(|b| [b.l, b.h]), 0.06, false);
-        let key = (base.to_string(), self.tf, self.src);
-        charting::interact::price_range(ui, resp, main, target, key, &mut self.eased, &mut self.y_range, on_axis, editing, dt, y_wheel)
-    }
-
     /// Replay: picking the start bar (vertical line under the pointer, click to start), then the
     /// play / step / speed / exit bar at the bottom of the plot; Right arrow steps one bar.
     #[allow(clippy::too_many_arguments)]
-    fn replay_ui(&mut self, ui: &mut Ui, resp: &egui::Response, painter: &egui::Painter, plot: Rect, fr: &Frame, hover_t: Option<i64>, next_t: Option<i64>, now: f64) {
+    fn replay_ui(&mut self, ui: &mut Ui, resp: &egui::Response, plot: Rect, fr: &Frame, hover_t: Option<i64>, next_t: Option<i64>, now: f64) {
+        let painter = &ui.painter_at(resp.rect);
         let Some(r) = self.replay.as_mut() else { return };
         if r.at.is_none() {
             if let (Some(p), Some(ht)) = (resp.hover_pos().filter(|p| plot.contains(*p)), hover_t) {
                 let x = fr.x(fr.idx(p.x).round());
                 painter.vline(x, plot.top()..=plot.bottom(), Stroke::new(1.5, accent()));
                 painter.rect_filled(Rect::from_min_max(pos2(x, plot.top()), plot.right_bottom()), 0, panel().gamma_multiply(0.6));
-                if resp.clicked() { r.at = Some(ht); r.last = now; self.right = 0.0; }
+                if resp.clicked() { r.at = Some(ht); r.last = now; self.view.view.right = 0.0; }
             }
         } else if resp.hovered() && ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
             if let Some(n) = next_t { r.at = Some(n); }
@@ -583,7 +614,7 @@ impl Chart {
 
     /// Back to auto-fit at the live edge: a manual price range from one symbol is meaningless for
     /// another (BTC at 80k vs a coin at 0.3 would leave the chart empty).
-    pub fn reset_view(&mut self) { self.y_range = None; self.right = 0.0; self.pending.clear(); self.liq = LiqCache::default(); self.cache = HeatCache::default(); }
+    pub fn reset_view(&mut self) { self.view.y_range = None; self.view.view.right = 0.0; self.pending.clear(); self.liq = LiqCache::default(); self.cache = HeatCache::default(); }
 
     /// How a coin opens from the Hunter page: 5 minute bars with the open interest and funding panes
     /// (liquidations are always drawn on the candles). Other panes stay as the user set them.
@@ -641,19 +672,81 @@ fn sound_menu(ui: &mut Ui, cur: &mut String) {
 mod tests {
     use super::*;
 
+    /// Runs `show` on 300 one-minute bars, one 1200 x 800 frame per event batch.
+    fn frames(ctx: &egui::Context, ch: &mut Chart, a: &Agg, batches: Vec<Vec<egui::Event>>) {
+        for ev in batches {
+            let input = egui::RawInput { events: ev, screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| ch.show(ui, a, Market::Spot, "BTC"));
+            // no renderer: the texture uploads are dropped on purpose
+            out.textures_delta.clear();
+        }
+    }
+    fn agg() -> Agg {
+        let mut a = Agg::default();
+        let t0 = 1_794_182_400_000;
+        let bars = (0..300).map(|i| { let c = 80_000.0 + (i as f64 * 0.1).sin() * 400.0; Bar { t: t0 + i * 60_000, o: c - 50.0, h: c + 100.0, l: c - 100.0, c, vol: 1.0, ..Default::default() } }).collect();
+        a.series.insert((None, Market::Spot), depth::agg::Series { bars });
+        a
+    }
+    fn mv(x: f32, y: f32) -> egui::Event { egui::Event::PointerMoved(pos2(x, y)) }
+    fn btn(x: f32, y: f32, down: bool) -> egui::Event { egui::Event::PointerButton { pos: pos2(x, y), button: egui::PointerButton::Primary, pressed: down, modifiers: Default::default() } }
+
     #[test]
-    fn grid_is_bounded_for_float_noise_ranges() {
-        // first aggregated bar: high and low differ only by float noise
-        let (lo, hi) = padded_range([86000.0, 86000.0 + 1e-11].into_iter(), 0.06, false);
-        assert!(hi - lo > 100.0, "range widened to ±0.1%: {lo}..{hi}");
-        let g = grid(lo, hi, 8.0);
-        assert!(!g.is_empty() && g.len() <= 50);
-        // even a degenerate tiny range cannot loop forever
-        assert!(grid(86000.0, 86000.0 + 1e-11, 8.0).len() <= 50);
-        assert!(grid(0.0, 1.0, 1e9).len() <= 50);
-        // non-finite inputs are ignored
-        let (lo, hi) = padded_range([f64::NAN, 5.0, f64::INFINITY].into_iter(), 0.0, false);
-        assert!(lo.is_finite() && hi.is_finite() && lo < 5.0 && hi > 5.0);
+    fn the_widget_pans_asks_for_older_bars_and_resets() {
+        let (a, ctx) = (agg(), egui::Context::default());
+        let mut ch = Chart { heat: false, ..Default::default() };
+        frames(&ctx, &mut ch, &a, vec![vec![], vec![]]);
+        assert!(ch.actions.is_empty() && ch.view.view.right == 0.0);
+        // a long drag right pans back to the oldest bar: one request for the page before it
+        let (x0, y) = (300.0, 300.0);
+        frames(&ctx, &mut ch, &a, vec![vec![mv(x0, y)], vec![btn(x0, y, true)], vec![mv(x0 + 400.0, y)], vec![mv(x0 + 800.0, y)], vec![btn(x0 + 800.0, y, false)], vec![], vec![]]);
+        assert!(ch.view.view.right > 100.0, "{:?}", ch.view.view);
+        assert_eq!(ch.actions.iter().filter(|x| matches!(x, ChartAct::Older(1))).count(), 1, "{:?}", ch.actions);
+        // a double-click on the empty plot goes back to the live edge
+        frames(&ctx, &mut ch, &a, vec![vec![mv(x0, y)], vec![btn(x0, y, true)], vec![btn(x0, y, false)], vec![btn(x0, y, true)], vec![btn(x0, y, false)], vec![]]);
+        assert_eq!(ch.view.view.right, 0.0);
+    }
+
+    #[test]
+    fn an_account_line_drag_moves_the_line_not_the_chart() {
+        let (a, ctx) = (agg(), egui::Context::default());
+        let price = 80_000.0;
+        let line = ChartLine { price, ex: None, tag: "Limit".into(), sub: "1".into(), col: Color32::RED, act: Some(LineAct::Preview("px")) };
+        let mut ch = Chart { heat: false, confirm: false, lines: vec![line], ..Default::default() };
+        frames(&ctx, &mut ch, &a, vec![vec![]]);
+        // find the line: the pointer over it makes it hot
+        let x = 600.0;
+        let y = (60..700).step_by(3).map(|y| y as f32).find(|y| { frames(&ctx, &mut ch, &a, vec![vec![mv(x, *y)]]); ch.line_hot.is_some() }).expect("line found");
+        frames(&ctx, &mut ch, &a, vec![vec![btn(x, y, true)], vec![mv(x + 30.0, y + 20.0)], vec![mv(x + 60.0, y + 40.0)], vec![btn(x + 60.0, y + 40.0, false)], vec![]]);
+        assert_eq!(ch.view.view.right, 0.0, "the chart did not pan");
+        let moved: Vec<f64> = ch.actions.iter().filter_map(|x| match x { ChartAct::Move(LineAct::Preview("px"), p) => Some(*p), _ => None }).collect();
+        assert!(moved.len() == 1 && moved[0] < price, "{:?}", ch.actions);
+    }
+
+    #[test]
+    fn a_drawing_drag_edits_it_and_every_layer_paints() {
+        let (a, ctx) = (agg(), egui::Context::default());
+        // the replay bar writes in the app's fonts
+        theme::install(&ctx);
+        let mut ch = Chart { heat: false, ..Default::default() };
+        let t = a.series[&(None, Market::Spot)].bars[200].t;
+        ch.drawings.insert("BTC".into(), vec![Drawing::new(Tool::HLine, (t, 80_000.0), (t, 80_000.0))]);
+        frames(&ctx, &mut ch, &a, vec![vec![]]);
+        let x = 500.0;
+        let y = (60..700).step_by(3).map(|y| y as f32).find(|y| { frames(&ctx, &mut ch, &a, vec![vec![mv(x, *y)]]); ch.hot.is_some() }).expect("drawing found");
+        frames(&ctx, &mut ch, &a, vec![vec![btn(x, y, true)], vec![mv(x + 30.0, y - 20.0)], vec![mv(x + 60.0, y - 40.0)], vec![btn(x + 60.0, y - 40.0, false)], vec![]]);
+        assert_eq!(ch.view.view.right, 0.0, "the chart did not pan");
+        assert!(ch.drawings["BTC"][0].a.1 > 80_000.0, "{:?}", ch.drawings["BTC"][0].a);
+        // every pane, overlay and scale, the footprint switch and replay's start picker, under the pointer
+        for (p, on) in ch.panes.iter_mut() { *on = !matches!(p, Pane::Iv | Pane::Skew); }
+        (ch.ma, ch.bb, ch.cone, ch.fp, ch.whales) = (true, true, true, true, true);
+        for sc in [Scale::Log, Scale::Percent] {
+            ch.scale = sc;
+            frames(&ctx, &mut ch, &a, vec![vec![mv(x, 300.0)], vec![mv(x, 700.0)]]);
+        }
+        ch.replay = Some(Replay::new(None, 0.0));
+        frames(&ctx, &mut ch, &a, vec![vec![mv(x, 130.0)], vec![btn(x, 130.0, true)], vec![btn(x, 130.0, false)], vec![]]);
+        assert!(ch.replay.is_some_and(|r| r.at.is_some()), "the click picked the replay bar");
     }
 
     #[test]

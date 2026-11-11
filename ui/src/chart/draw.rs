@@ -197,7 +197,7 @@ impl Chart {
                         if ui.button(format!("{}  {}", t("draw.hline_at"), fmt_px(px))).clicked() { list.push(Drawing::new(Tool::HLine, (ts, px), (ts, px))); ui.close(); }
                         if ui.button(t("replay.from_here")).clicked() { self.replay = Some(Replay::new(Some(ts), ui.input(|i| i.time))); ui.close(); }
                         menu_sep(ui);
-                        if ui.button(t("chart.reset")).clicked() { self.right = 0.0; self.bar_w = 7.0; self.y_range = None; ui.close(); }
+                        if ui.button(t("chart.reset")).clicked() { self.reset_req = true; ui.close(); }
                     }
                 }
             });

@@ -1149,8 +1149,9 @@ impl App {
                     if let Some(cap) = cap {
                         let p = ui.painter().with_clip_rect(*r);
                         let g = p.layout_no_wrap(l(cap).to_string(), prop(11.0), mu());
-                        let br = egui::Rect::from_min_size(egui::pos2(r.right() - g.size().x - 14.0, r.bottom() - g.size().y - 8.0), g.size() + egui::vec2(10.0, 4.0));
-                        p.rect(br, 3, panel2(), egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside);
+                        // inside the plot corner, clear of the price and time axes
+                        let br = egui::Rect::from_min_size(egui::pos2(r.right() - chart::AXIS_W - g.size().x - 14.0, r.bottom() - chart::TIME_H - g.size().y - 8.0), g.size() + egui::vec2(10.0, 4.0));
+                        p.rect(br, 3, panel(), egui::Stroke::new(1.0, line()), egui::StrokeKind::Inside);
                         p.galley(br.min + egui::vec2(5.0, 2.0), g, mu());
                     }
                 } else {

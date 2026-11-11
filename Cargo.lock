@@ -812,7 +812,7 @@ dependencies = [
 [[package]]
 name = "charting"
 version = "0.1.0"
-source = "git+https://github.com/ChloePike/charting?rev=582707ad3bb1413e0c338eff841391b9ad4ac542#582707ad3bb1413e0c338eff841391b9ad4ac542"
+source = "git+https://github.com/ChloePike/charting?rev=8a89cb2b757457f6c9f771e63ff23d633d196c82#8a89cb2b757457f6c9f771e63ff23d633d196c82"
 dependencies = [
  "egui",
  "serde",

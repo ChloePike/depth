@@ -9,7 +9,7 @@ repository = "https://github.com/ChloePike/depth"
 [dependencies]
 depth = { path = ".." }
 # the chart crate (ChloePike/charting, GPL-3.0-only), pinned to a commit
-charting = { git = "https://github.com/ChloePike/charting", rev = "582707ad3bb1413e0c338eff841391b9ad4ac542" }
+charting = { git = "https://github.com/ChloePike/charting", rev = "8a89cb2b757457f6c9f771e63ff23d633d196c82" }
 anyhow = "1.0.104"
 eframe = "0.36.2"
 memmap2 = "0.9.11"

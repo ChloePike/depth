@@ -6,10 +6,11 @@ use super::ind::{bollinger, ema, sma};
 use charting::candle::{paint_candle, tv_body_px};
 
 impl Chart {
-    /// Footprint, candles, moving averages and Bollinger bands, high / low labels, liquidation
-    /// bubbles; returns (footprint numbers shown, MA lines, largest liquidation) for later layers.
-    pub(super) fn candles(&self, cx: &Cx, legend3: &mut Vec<(String, String, Color32)>) -> (bool, Vec<(Vec<Option<f64>>, MaLine)>, f64) {
-        let Cx { a, smarket, bars, vis, i0, i1, main, main_plot, fr, ps, lo, hi, painter, .. } = *cx;
+    /// The footprint and, while it is on, the bars beside it (the widget paints plain candles otherwise); returns
+    /// whether the footprint shows numbers.
+    pub(super) fn candles(&self, cx: &Cx) -> bool {
+        let Cx { a, smarket, vis, i0, main_plot, fr, ps, lo, hi, painter, .. } = *cx;
+        if !(self.fp && a.fp.get(&(self.src, smarket)).is_some_and(|f| f.bin > 0.0)) { return false; }
         let y = |v: f64| ps.y(v);
         // footprint (live trades only), cluster bars: each bar is a column of cells, one per price
         // row, filled by that row's taker delta (green buys / red sells, stronger = more one-sided)
@@ -80,6 +81,14 @@ impl Chart {
             paint_candle(&painter, x, bw, self.bar_w, ppp, [y(b.o), y(b.h), y(b.l), y(b.c)], col);
         }
 
+        fp_text
+    }
+
+    /// Moving averages and Bollinger bands, high / low labels, liquidation bubbles; returns (MA lines, largest
+    /// liquidation) for the legend.
+    pub(super) fn studies(&self, cx: &Cx, legend3: &mut Vec<(String, String, Color32)>) -> (Vec<(Vec<Option<f64>>, MaLine)>, f64) {
+        let Cx { bars, vis, i0, i1, main, main_plot, fr, ps, painter, .. } = *cx;
+        let y = |v: f64| ps.y(v);
         // moving averages of the close, computed over every loaded bar so the left edge is right
         let closes: Vec<f64> = bars.iter().map(|b| b.c).collect();
         let lines: Vec<MaLine> = if self.ma { self.mas.iter().filter(|m| m.on && m.n >= 1).copied().collect() } else { vec![] };
@@ -131,7 +140,7 @@ impl Chart {
                 }
             }
         }
-        (fp_text, mas, lmax)
+        (mas, lmax)
     }
 
     /// Whale trades, likely algos and own fills.

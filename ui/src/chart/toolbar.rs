@@ -81,8 +81,9 @@ impl Chart {
                     }
                 }
             });
-            if (self.right.abs() > 0.5 || self.bar_w != 7.0 || self.y_range.is_some()) && tb_button(ui, t("chart.reset"), Tb::Ghost, 0, false).on_hover_text(super::l("Back to the live edge and default zoom")).clicked() {
-                self.right = 0.0; self.bar_w = 7.0; self.y_range = None;
+            if (self.view.view.right.abs() > 0.5 || self.bar_w != 7.0 || self.view.y_range.is_some()) && tb_button(ui, t("chart.reset"), Tb::Ghost, 0, false).on_hover_text(super::l("Back to the live edge and default zoom")).clicked() {
+                self.view.reset();
+                self.bar_w = self.view.view.bar_w;
             }
         });
     }

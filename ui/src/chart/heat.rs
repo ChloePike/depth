@@ -6,13 +6,15 @@ pub(super) use charting::orderflow::heat::{BookHeat as HeatCache, TexGeom};
 impl Chart {
     /// Everything behind the candles: grid lines, the watermark and the cross-venue book heatmap.
     pub(super) fn backdrop(&mut self, ui: &Ui, cx: &Cx) {
-        let Cx { a, smarket, live, bars, main, main_plot, fr, ps, painter, gv, lo, hi, .. } = *cx;
+        let Cx { a, smarket, live, bars, main, main_plot, time_top, fr, ps, painter, grid, times, lo, hi, .. } = *cx;
         let y = |v: f64| ps.y(v);
         // grid + price axis (TradingView: faint dotted grid; round levels a shade brighter)
-        for v in gv.iter().copied() {
+        for v in grid.iter().copied() {
             let yy = y(v);
             grid_line(&painter, pos2(main.left(), yy), pos2(main.right(), yy));
         }
+        // and one per time label, down through the panes
+        for &i in times { let x = fr.x(i as f32); grid_line(painter, pos2(x, main.top()), pos2(x, time_top)); }
         // watermark: the Depth mark and wordmark, faint, bottom-left of the plot (as TradingView does)
         {
             let logo = super::theme::app_logo(ui.ctx());

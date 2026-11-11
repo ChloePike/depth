@@ -21,6 +21,11 @@ pub(super) fn fmt_time(ms: i64, date: bool) -> String {
     if date || (h == 0 && m == 0) { d } else { format!("{h:02}:{m:02}") }
 }
 
+/// The widget's time labels in local time: a time (the date at midnight), the date, or date and time.
+pub(super) fn axis_time(ms: i64, l: charting::TimeLabel) -> String {
+    match l { charting::TimeLabel::Time => fmt_time(ms, false), charting::TimeLabel::Day => fmt_time(ms, true), charting::TimeLabel::Full => fmt_time_full(ms) }
+}
+
 pub fn local_date(ms: i64) -> String { local_parts(ms).0 }
 
 pub(super) fn fmt_time_full(ms: i64) -> String {

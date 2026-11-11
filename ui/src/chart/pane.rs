@@ -1,7 +1,7 @@
 //! Sub-panes under the price plot (volume, CVD, OI, funding, oscillators, premium, options),
-//! the time axis, price labels and the crosshair.
+//! the scale toggles and the crosshair (the widget lays the panes out and labels the axes).
 use super::*;
-use super::fmt::{fmt_big, fmt_time, fmt_time_full};
+use super::fmt::{fmt_big, fmt_time_full};
 use super::ind::{macd, rsi, sma};
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -41,7 +41,7 @@ impl Prem { fn dev(&self) -> f64 { self.hover.map_or(0.0, |v| v - self.usual) } 
 
 /// Per-venue premium over the composite for the visible bars (mean of the 1m premiums inside
 /// each bar), its usual level and whether the hovered bar is abnormal.
-fn premium_lines(a: &Agg, market: Market, vis: &[Bar], ms: i64, hk: Option<usize>) -> Vec<Prem> {
+pub(super) fn premium_lines(a: &Agg, market: Market, vis: &[Bar], ms: i64, hk: Option<usize>) -> Vec<Prem> {
     let mut out: Vec<Prem> = a.venues.keys().filter(|(_, m)| *m == market).filter_map(|&(e, m)| {
         let p = a.premium_bps(e, m);
         let (usual, sd) = depth::quant::robust(&p.iter().map(|x| x.1).collect::<Vec<_>>())?;
@@ -59,48 +59,18 @@ fn premium_lines(a: &Agg, market: Market, vis: &[Bar], ms: i64, hk: Option<usize
 }
 
 impl Chart {
-    /// Sub-panes, time axis, scale toggles, price labels and the crosshair; returns (pointer over
-    /// the charts, hovered bar index).
-    pub(super) fn axes(&mut self, ui: &Ui, cx: &Cx, panes: Vec<Pane>, taken: Vec<Rect>) -> (Option<Pos2>, usize) {
-        let Cx { a, smarket, live, editing, bars, vis, i0, i1, rect, plot_w, main, main_plot, fr, ps, resp, painter, gv, gdp_step, gdp, base_px, pct, .. } = *cx;
-        let y = |v: f64| ps.y(v);
-        let axis_label = |v: f64| if pct { format!("{:+.2}%", (v / base_px - 1.0) * 100.0) } else { super::fmt_dp(v, gdp) };
-        let round = |v: f64| { let k = v / (gdp_step * 5.0); (k - k.round()).abs() < 1e-6 };
-        // sub panes
-        let mut top = main.bottom();
-        let mut pane_rects = vec![];
-        for p in &panes {
-            let r = Rect::from_min_size(pos2(rect.left(), top), vec2(plot_w, SUB_H));
-            painter.hline(rect.left()..=rect.right(), r.top(), Stroke::new(1.0, line()));
-            pane_rects.push((*p, r));
-            top += SUB_H;
-        }
-
-        // hover index
-        let hover = resp.hover_pos().filter(|p| p.x < main.right());
-        let hi_idx = hover.map(|p| fr.idx(p.x).round().clamp(i0 as f32, i1 as f32) as usize).unwrap_or(bars.len() - 1);
-        let prem = if panes.contains(&Pane::Premium) { premium_lines(a, smarket, vis, self.tf * 60_000, hi_idx.checked_sub(i0)) } else { vec![] };
-        let pane_scales: Vec<(Pane, Rect, Option<(f64, f64)>)> = pane_rects.iter().map(|(p, r)| (*p, *r, self.draw_pane(&painter, *p, *r, &bars, i0, i1, &fr, hi_idx, &prem, &a.opt_min))).collect();
-
-        // time axis
-        let ty = top + TIME_H / 2.0;
+    /// The axis separators and, in the corner under the price axis, the scale toggles: % and log (click again for
+    /// linear) and "A" (auto-fit, lit while on).
+    pub(super) fn axis_chrome(&mut self, ui: &Ui, cx: &Cx, auto: bool) {
+        let Cx { rect, main, time_top: top, painter, .. } = *cx;
         painter.hline(rect.left()..=rect.right(), top, Stroke::new(1.0, line()));
-        let every = [1usize, 2, 3, 5, 10, 15, 30, 60, 120, 240, 480].into_iter().find(|k| *k as f32 * self.bar_w >= 90.0).unwrap_or(960);
-        for (k, b) in vis.iter().enumerate() {
-            if ((b.t / (self.tf * 60_000)) as usize) % every != 0 { continue; }
-            let x = fr.x((i0 + k) as f32);
-            grid_line(&painter, pos2(x, main.top()), pos2(x, top));
-            painter.text(pos2(x, ty), Align2::CENTER_CENTER, fmt_time(b.t, every as i64 * self.tf >= 1440), mono(11.5), axis_c());
-        }
         painter.vline(main.right(), rect.top()..=rect.bottom(), Stroke::new(1.0, line()));
-        // scale toggles in the corner under the price axis: % and log (click again for linear)
         let corner = Rect::from_min_max(pos2(main.right() + 1.0, top + 1.0), pos2(rect.right(), rect.bottom()));
         let ar = Rect::from_min_size(pos2(corner.left() + 50.0, corner.top() + 1.0), vec2(18.0, corner.height() - 2.0));
         let auto_resp = ui.interact(ar, ui.id().with("auto"), Sense::click());
-        let auto = self.y_range.is_none();
         if auto || auto_resp.hovered() { painter.rect_filled(ar, 3, hl()); }
         painter.text(ar.center(), Align2::CENTER_CENTER, "A", prop_m(11.0), if auto { accent() } else { mu() });
-        if auto_resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t("chart.auto_tip")).clicked() { self.y_range = None; }
+        if auto_resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t("chart.auto_tip")).clicked() { self.auto_req = true; }
         for (i, (sc, lab)) in [(Scale::Percent, "%"), (Scale::Log, "log")].into_iter().enumerate() {
             let r = Rect::from_min_size(pos2(corner.left() + 2.0 + i as f32 * 22.0, corner.top() + 1.0), vec2(20.0 + i as f32 * 6.0, corner.height() - 2.0));
             let rs = ui.interact(r, ui.id().with(("scale", i)), Sense::click());
@@ -109,62 +79,59 @@ impl Chart {
             painter.text(r.center(), Align2::CENTER_CENTER, lab, prop_m(11.0), if on { accent() } else { mu() });
             if rs.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.scale = if on { Scale::Linear } else { sc }; }
         }
+    }
 
-        // price labels last: a level hidden by an axis tag is skipped, not half covered
-        for v in gv.iter().copied() {
-            let yy = y(v);
-            if taken.iter().any(|t| t.y_range().intersects(egui::Rangef::new(yy - 6.0, yy + 6.0)) && t.left() > main.right()) { continue; }
-            painter.text(pos2(main.right() + 8.0, yy), Align2::LEFT_CENTER, axis_label(v), mono(11.5), if round(v) { mu() } else { axis_c() });
-        }
-
-        // crosshair
-        if let Some(p) = hover {
-            let x = fr.x(hi_idx as f32);
-            // dashed and faint: the crosshair must not hide the candles and lines under it
-            let cross = Stroke::new(1.0, mu().linear_multiply(0.55));
-            painter.extend(egui::Shape::dashed_line(&[pos2(x, rect.top()), pos2(x, top)], cross, 4.0, 4.0));
-            if main_plot.contains(p) {
-                // magnet: within 12px of the hovered bar's open / high / low / close the line sits on it
-                let hb = &bars[hi_idx];
-                let py = if self.magnet {
-                    [hb.o, hb.h, hb.l, hb.c].into_iter().map(|v| y(v)).filter(|yy| (yy - p.y).abs() < 12.0)
-                        .min_by(|a, b| (a - p.y).abs().total_cmp(&(b - p.y).abs())).unwrap_or(p.y)
-                } else { p.y };
-                painter.extend(egui::Shape::dashed_line(&[pos2(main.left(), py), pos2(main.right(), py)], cross, 4.0, 4.0));
-                let lab = Rect::from_min_size(pos2(main.right() + 1.0, py - 9.0), vec2(AXIS_W - 2.0, 18.0));
-                painter.rect_filled(lab, 2, cross_bg());
-                painter.text(lab.left_center() + vec2(7.0, 0.0), Align2::LEFT_CENTER, axis_label(ps.v(py)), mono_m(11.5), Color32::WHITE);
-                // TradingView's "+": puts the crosshair price into the order panel
-                if self.trading && live && !editing {
-                    let pb = Rect::from_min_size(pos2(main.right() - 22.0, py - 9.0), vec2(20.0, 18.0));
-                    let pr = ui.interact(pb, ui.id().with("fill_px"), Sense::click());
-                    painter.rect_filled(pb, 3, if pr.hovered() { accent() } else { cross_bg() });
-                    painter.text(pb.center(), Align2::CENTER_CENTER, "+", prop(14.0), Color32::WHITE);
-                    if pr.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t("tr.fill_px")).clicked() { self.actions.push(ChartAct::Fill(ps.v(py))); }
-                }
+    /// The crosshair at `hover` (bar `hi_idx`): dashed lines, the price (magnet: snapped to the bar's OHLC) or a
+    /// pane's value on the axis, the "+" that puts the price into the order panel, the time on the time axis.
+    pub(super) fn crosshair(&mut self, ui: &Ui, cx: &Cx, f: &charting::Frame, hover: Option<Pos2>, hi_idx: usize, ranges: &[(Rect, Option<(f64, f64)>)]) {
+        let Cx { live, editing, bars, rect, main, main_plot, time_top: top, fr, ps, painter, .. } = *cx;
+        let Some(p) = hover else { return };
+        let y = |v: f64| ps.y(v);
+        let ty = top + TIME_H / 2.0;
+        let x = fr.x(hi_idx as f32);
+        // dashed and faint: the crosshair must not hide the candles and lines under it
+        let cross = Stroke::new(1.0, mu().linear_multiply(0.55));
+        painter.extend(egui::Shape::dashed_line(&[pos2(x, rect.top()), pos2(x, top)], cross, 4.0, 4.0));
+        if main_plot.contains(p) {
+            // magnet: within 12px of the hovered bar's open / high / low / close the line sits on it
+            let hb = &bars[hi_idx];
+            let py = if self.magnet {
+                [hb.o, hb.h, hb.l, hb.c].into_iter().map(|v| y(v)).filter(|yy| (yy - p.y).abs() < 12.0)
+                    .min_by(|a, b| (a - p.y).abs().total_cmp(&(b - p.y).abs())).unwrap_or(p.y)
+            } else { p.y };
+            painter.extend(egui::Shape::dashed_line(&[pos2(main.left(), py), pos2(main.right(), py)], cross, 4.0, 4.0));
+            let lab = Rect::from_min_size(pos2(main.right() + 1.0, py - 9.0), vec2(AXIS_W - 2.0, 18.0));
+            painter.rect_filled(lab, 2, cross_bg());
+            painter.text(lab.left_center() + vec2(7.0, 0.0), Align2::LEFT_CENTER, f.label(ps.v(py)), mono_m(11.5), Color32::WHITE);
+            // TradingView's "+": puts the crosshair price into the order panel
+            if self.trading && live && !editing {
+                let pb = Rect::from_min_size(pos2(main.right() - 22.0, py - 9.0), vec2(20.0, 18.0));
+                let pr = ui.interact(pb, ui.id().with("fill_px"), Sense::click());
+                painter.rect_filled(pb, 3, if pr.hovered() { accent() } else { cross_bg() });
+                painter.text(pb.center(), Align2::CENTER_CENTER, "+", prop(14.0), Color32::WHITE);
+                if pr.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t("tr.fill_px")).clicked() { self.actions.push(ChartAct::Fill(ps.v(py))); }
             }
-            // over a sub-pane: its own horizontal line and value on the axis
-            for (_, r, sc) in &pane_scales {
-                let (Some((plo, phi)), true) = (sc, r.contains(p)) else { continue };
-                let inner = Rect::from_min_max(pos2(r.left(), r.top() + 18.0), pos2(r.right(), r.bottom() - 4.0));
-                if !(p.y >= inner.top() && p.y <= inner.bottom()) { continue; }
-                painter.extend(egui::Shape::dashed_line(&[pos2(r.left(), p.y), pos2(r.right(), p.y)], cross, 4.0, 4.0));
-                let v = plo + (inner.bottom() - p.y) as f64 / inner.height() as f64 * (phi - plo);
-                let lab = Rect::from_min_size(pos2(main.right() + 1.0, p.y - 8.0), vec2(AXIS_W - 2.0, 16.0));
-                painter.rect_filled(lab, 2, cross_bg());
-                painter.text(lab.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_big(v), mono_m(11.0), Color32::WHITE);
-            }
-            let g = painter.layout_no_wrap(fmt_time_full(bars[hi_idx].t), mono_m(11.5), Color32::WHITE);
-            let tl = Rect::from_center_size(pos2(x, ty), vec2(g.size().x + 16.0, TIME_H - 2.0));
-            painter.rect_filled(tl, 2, cross_bg());
-            painter.galley(tl.center() - g.size() / 2.0, g, Color32::WHITE);
         }
-        (hover, hi_idx)
+        // over a sub-pane: its own horizontal line and value on the axis
+        for (r, sc) in ranges {
+            let (Some((plo, phi)), true) = (sc, r.contains(p)) else { continue };
+            let inner = cpane::inner(*r);
+            if !(p.y >= inner.top() && p.y <= inner.bottom()) { continue; }
+            painter.extend(egui::Shape::dashed_line(&[pos2(r.left(), p.y), pos2(r.right(), p.y)], cross, 4.0, 4.0));
+            let v = plo + (inner.bottom() - p.y) as f64 / inner.height() as f64 * (phi - plo);
+            let lab = Rect::from_min_size(pos2(main.right() + 1.0, p.y - 8.0), vec2(AXIS_W - 2.0, 16.0));
+            painter.rect_filled(lab, 2, cross_bg());
+            painter.text(lab.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, fmt_big(v), mono_m(11.0), Color32::WHITE);
+        }
+        let g = painter.layout_no_wrap(fmt_time_full(bars[hi_idx].t), mono_m(11.5), Color32::WHITE);
+        let tl = Rect::from_center_size(pos2(x, ty), vec2(g.size().x + 16.0, TIME_H - 2.0));
+        painter.rect_filled(tl, 2, cross_bg());
+        painter.galley(tl.center() - g.size() / 2.0, g, Color32::WHITE);
     }
 
     #[allow(clippy::too_many_arguments)]
     /// Returns the value range the pane was drawn with (for the crosshair), None when it drew nothing.
-    fn draw_pane(&self, painter: &egui::Painter, p: Pane, r: Rect, bars: &[Bar], i0: usize, i1: usize, fr: &Frame, hi: usize, prem: &[Prem], opt: &std::collections::BTreeMap<i64, depth::agg::OptStat>) -> Option<(f64, f64)> {
+    pub(super) fn draw_pane(&self, painter: &egui::Painter, p: Pane, r: Rect, bars: &[Bar], i0: usize, i1: usize, fr: &Frame, hi: usize, prem: &[Prem], opt: &std::collections::BTreeMap<i64, depth::agg::OptStat>) -> Option<(f64, f64)> {
         let (vis, hb) = (&bars[i0..=i1], &bars[hi]);
         // the top 18px hold the legend, so lines never run through it
         let inner = cpane::inner(r);
