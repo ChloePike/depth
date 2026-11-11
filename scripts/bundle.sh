@@ -40,7 +40,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>Depth</string>
   <key>CFBundleIconFile</key><string>Depth</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.4.6</string>
+  <key>CFBundleShortVersionString</key><string>0.5.0</string>
   <key>CFBundleVersion</key><string>$BUILD</string>
   <key>NSHumanReadableCopyright</key><string>© 2026 Chloe Pike. GPL-3.0-or-later.</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
