@@ -89,12 +89,12 @@ impl Chart {
         egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             menu_rows(ui, 240.0);
             menu_head(ui, super::l("Scripts"));
-            if !crate::script::on() { ui.label(RichText::new(super::l("Scripts are off in Settings")).font(prop(12.0)).color(WARN)); }
+            if !crate::script::on() { ui.label(RichText::new(super::l("Scripts are off in Settings")).font(prop(12.0)).color(warn())); }
             if all.is_empty() { ui.label(RichText::new(super::l("No scripts yet")).font(prop(12.0)).color(mu())); }
             for (stem, name, err) in &all {
                 let mut on = self.scripts.contains(stem);
                 let r = ui.checkbox(&mut on, name.as_str());
-                let r = match err { Some(e) => { ui.label(RichText::new("!").color(WARN)); r.on_hover_text(e.as_str()) } None => r.on_hover_text(format!("{stem}.ts")) };
+                let r = match err { Some(e) => { ui.label(RichText::new("!").color(warn())); r.on_hover_text(e.as_str()) } None => r.on_hover_text(format!("{stem}.ts")) };
                 if r.changed() { if on { self.scripts.push(stem.clone()) } else { self.scripts.retain(|s| s != stem) } }
             }
             menu_sep(ui);
@@ -197,7 +197,7 @@ impl Chart {
     /// Armed alerts on every symbol (sound, remove) and the sound of new ones.
     fn alerts_menu(&mut self, ui: &mut Ui, base: &str) {
         let mut rows: Vec<(String, usize, f64, String)> = self.drawings.iter().flat_map(|(b, l)| l.iter().enumerate().filter_map(move |(i, d)| {
-            Some((b.clone(), i, d.level_at(depth::now_ms())?, d.alert.clone()?))
+            Some((b.clone(), i, d.level_at(depth::now_ms())?, d.meta.clone()?))
         })).collect();
         rows.sort_by(|x, y| (x.0 != base, &x.0).cmp(&(y.0 != base, &y.0)));
         let resp = tb_button(ui, super::l("Alerts"), if rows.is_empty() { Tb::Ghost } else { Tb::Tint }, rows.len(), false).on_hover_text(super::l("Price alerts"));
@@ -211,11 +211,11 @@ impl Chart {
                 ui.menu_button(format!("{b}  {}  ·  {}", fmt_px(px), sound_name(&snd)), |ui| {
                     menu_rows(ui, 160.0);
                     if let Some(d) = self.drawings.get_mut(&b).and_then(|l| l.get_mut(i)) {
-                        if let Some(s) = d.alert.as_mut() {
+                        if let Some(s) = d.meta.as_mut() {
                             for (id, name) in sounds() { if menu_row(ui, *s == id, &name, None).clicked() { play_sound(&id); *s = id; } }
                         }
                         menu_sep(ui);
-                        if ui.button(RichText::new(super::l("Remove alert")).color(dn())).clicked() { d.alert = None; ui.close(); }
+                        if ui.button(RichText::new(super::l("Remove alert")).color(dn())).clicked() { d.meta = None; ui.close(); }
                     }
                 });
             }

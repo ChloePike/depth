@@ -1080,6 +1080,7 @@ impl App {
 
     fn frame(&mut self, ui: &mut Ui) {
         set_light(ui.ctx().theme() == egui::Theme::Light);
+        charting::style::set(theme::chart_style());
         // Frame cap: macOS stops vsync-throttling occluded / off-space windows, and then every
         // repaint request renders immediately, piling up GPU command buffers (GBs within
         // seconds). The cap bounds that regardless of vsync.

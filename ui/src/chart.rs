@@ -1,6 +1,10 @@
 //! Candle chart painted with egui: heatmap background, candles, liquidation bubbles, and
 //! stacked sub-panes (volume, CVD, OI, funding predicted + settled, basis, long/short).
-use super::{fmt_dp, fmt_px, kit, l, local_offset_ms, t, theme, theme::*};
+use super::{fmt_dp, fmt_px, kit, l, local_offset_ms, t, theme};
+// colours, fonts and radius from the style the app sets each frame (`charting::style::set`)
+use charting::style::*;
+// venue colours and logos stay the app's
+use theme::{ex_color, icon};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Pos2, Rect, RichText, Sense, Stroke, Ui};
 use depth::agg::{Agg, Bar};
 use depth::{Exchange, Market};
@@ -9,7 +13,10 @@ mod chrome;
 mod draw;
 mod fmt;
 mod heat;
-mod ind;
+// leaf code lives in the `charting` crate; the old module paths stay as aliases
+use charting::ta as ind;
+use charting::coords::{bucket, grid, nice, padded_range, BarAxis as Frame, PriceScale as PScale};
+use charting::layout::{place, try_place};
 mod levels;
 mod liq;
 mod pane;
@@ -35,29 +42,10 @@ const TF_QUICK: usize = 6;
 /// everything else is resampled from the largest of those that divides it).
 pub fn native_tf(tf: i64) -> i64 { [240, 60, 15, 5, 1].into_iter().find(|n| tf % n == 0).unwrap_or(1) }
 
-/// Bucket start for an interval: weeks start on Monday (the epoch was a Thursday), the rest on
-/// UTC multiples of the interval.
-fn bucket(t: i64, tf: i64) -> i64 {
-    let ms = tf * 60_000;
-    let off = if tf == 10080 { 4 * 86_400_000 } else { 0 };
-    (t - off).div_euclid(ms) * ms + off
-}
 
 #[derive(Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 enum Scale { #[default] Linear, Log, Percent }
 
-/// Price <-> y on the main plot; log scale maps ln(price).
-#[derive(Clone, Copy)]
-struct PScale { lo: f64, hi: f64, log: bool, r: Rect }
-impl PScale {
-    fn f(&self, v: f64) -> f64 { if self.log { v.max(1e-12).ln() } else { v } }
-    fn y(&self, v: f64) -> f32 { let (a, b) = (self.f(self.lo), self.f(self.hi)); self.r.bottom() - ((self.f(v) - a) / (b - a)) as f32 * self.r.height() }
-    fn v(&self, y: f32) -> f64 {
-        let (a, b) = (self.f(self.lo), self.f(self.hi));
-        let x = a + (self.r.bottom() - y) as f64 / self.r.height() as f64 * (b - a);
-        if self.log { x.exp() } else { x }
-    }
-}
 
 /// Native-period history up to the first full live bucket, then bars resampled from the live
 /// 1m series; history CVD is shifted to meet the live curve.
@@ -299,27 +287,8 @@ pub fn resample(bars: &[Bar], tf: i64) -> Vec<Bar> {
     out
 }
 
-fn nice(x: f64) -> f64 { depth::agg::nice(x.max(1e-12)) }
 
-/// Finite min/max of `vals`, widened to at least ±0.1% of its magnitude (a single bar's high and
-/// low can differ only by float noise), then padded by `pad` of the span.
-fn padded_range(vals: impl Iterator<Item = f64>, pad: f64, zero: bool) -> (f64, f64) {
-    let (mut lo, mut hi) = vals.filter(|v| v.is_finite()).fold((f64::MAX, f64::MIN), |(l, h), v| (l.min(v), h.max(v)));
-    if lo > hi { lo = 0.0; hi = 1.0; }
-    if zero { lo = lo.min(0.0); hi = hi.max(0.0); }
-    let min_span = (lo.abs().max(hi.abs()) * 2e-3).max(1e-9);
-    if hi - lo < min_span { let m = (hi + lo) / 2.0; lo = m - min_span / 2.0; hi = m + min_span / 2.0; }
-    let p = (hi - lo) * pad;
-    (lo - p, hi + p)
-}
 
-/// Grid values between lo and hi at a "nice" step, about `target` lines, never more than 50.
-/// (A `while v < hi { v += step }` loop never ends once step is below v's float resolution.)
-fn grid(lo: f64, hi: f64, target: f64) -> Vec<f64> {
-    let step = nice((hi - lo) / target);
-    let first = (lo / step).ceil();
-    (0..50).map(|i| (first + i as f64) * step).take_while(|v| *v < hi).collect()
-}
 
 /// Best bid/ask for the price line: the venue's own book when one venue is charted; for the
 /// aggregated (index) chart, the tightest venue half-spread around the index (the same top the
@@ -348,28 +317,7 @@ fn time_of(bars: &[Bar], x: f32, ms: i64) -> i64 {
     bars[i].t + ((x - i as f32) * ms as f32) as i64
 }
 
-struct Frame { first: f32, right_edge: f32, bar_w: f32, plot: Rect }
-impl Frame {
-    fn x(&self, i: f32) -> f32 { self.plot.right() - (self.right_edge - i) * self.bar_w - self.bar_w / 2.0 }
-    fn idx(&self, x: f32) -> f32 { self.right_edge - (self.plot.right() - x - self.bar_w / 2.0) / self.bar_w }
-}
 
-/// Label layout (see `show`): `r`, moved up or down until it overlaps none of `taken`, joins them.
-fn place(r: Rect, taken: &mut Vec<Rect>) -> Rect {
-    let h = r.height() + 2.0;
-    let cand = (0..12).map(|k| { let d = ((k + 1) / 2) as f32 * h * if k % 2 == 1 { 1.0 } else { -1.0 }; r.translate(vec2(0.0, d)) })
-        .find(|c| taken.iter().all(|t| !t.intersects(*c))).unwrap_or(r);
-    taken.push(cand);
-    cand
-}
-// context levels (POC / VA / S/R / VWAP / breakouts) may slide one tag height at most; further
-// away the tag would name the wrong price, so it is dropped (the line and the legend stay)
-fn try_place(r: Rect, taken: &mut Vec<Rect>) -> Option<Rect> {
-    let h = r.height() + 2.0;
-    let cand = [0.0, -h * 0.5, h * 0.5, -h, h].iter().map(|d| r.translate(vec2(0.0, *d))).find(|c| taken.iter().all(|t| !t.intersects(*c)))?;
-    taken.push(cand);
-    Some(cand)
-}
 
 /// One frame of `Chart::show`, shared by its paint phases: data, geometry, price scale and grid.
 struct Cx<'a> {
@@ -550,79 +498,23 @@ impl Chart {
             self.fling = 0.0;
         }
         let editing = self.drag.is_some() || self.line_drag.is_some();
-        let dt = ui.input(|i| i.stable_dt).clamp(0.001, 0.05);
-        if resp.dragged() && !on_axis && !editing { self.right += resp.drag_delta().x / self.bar_w; }
-        if resp.drag_stopped() {
-            // released while moving: keep gliding (TradingView-style inertia)
-            let vx = ui.input(|i| i.pointer.velocity().x);
-            self.fling = if !editing && !on_axis && vx.abs() > 150.0 { vx / self.bar_w } else { 0.0 };
-            self.drag = None;
-        } else if !resp.dragged() && self.fling != 0.0 {
-            self.right += self.fling * dt;
-            self.fling *= (-dt * 4.0).exp();
-            // repaints only while gliding: under half a bar per second it stops
-            if self.fling.abs() < 0.5 { self.fling = 0.0 } else { ui.ctx().request_repaint(); }
-        }
-        if resp.hover_pos().is_some_and(|p| p.x > main.right() && p.y < main.bottom()) { ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical); }
-        // wheel over the price axis scales prices; over the plot vertical scroll / pinch zooms time
-        // around the pointer (the bar under it stays put) and horizontal scroll pans
-        let mut y_wheel = 0.0f32;
-        if let (true, Some(hp)) = (resp.hovered(), resp.hover_pos()) {
-            let (d, pinch) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
-            if hp.x > main.right() && hp.y < main.bottom() { y_wheel = d.y; } else {
-                let bw = (self.bar_w * (d.y * 0.003).exp() * pinch).clamp(1.5, if self.fp { 160.0 } else { 60.0 });
-                if bw != self.bar_w {
-                    let edge = bars.len() as f32 + 3.0 - self.right;
-                    let idx = edge - (main.right() - hp.x - self.bar_w / 2.0) / self.bar_w;
-                    let edge2 = idx + (main.right() - hp.x - bw / 2.0) / bw;
-                    self.right = bars.len() as f32 + 3.0 - edge2;
-                    self.bar_w = bw;
-                }
-                if d.x != 0.0 { self.right += d.x / self.bar_w; self.fling = 0.0; }
-            }
-        }
-        if resp.double_clicked() && self.hot.is_none() { self.right = 0.0; self.bar_w = 7.0; self.y_range = None; }
+        // pan, glide, wheel zoom around the pointer, horizontal scroll, double-click reset (not on a drawing)
+        let mut tv = charting::interact::TimeView { right: self.right, bar_w: self.bar_w, fling: self.fling };
+        let (dt, y_wheel, reset) = charting::interact::pan_zoom(ui, resp, main, bars.len(), &mut tv, if self.fp { 160.0 } else { 60.0 }, editing, on_axis, self.hot.is_none());
+        (self.right, self.bar_w, self.fling) = (tv.right, tv.bar_w, tv.fling);
+        if reset { self.y_range = None; }
+        // a released drag ends a drawing's move
+        if resp.drag_stopped() { self.drag = None; }
         (on_axis, editing, dt, y_wheel)
     }
 
     /// The price range shown: the eased auto-fit, or the manual range the wheel and drags set.
     #[allow(clippy::too_many_arguments)]
     fn price_range(&mut self, ui: &Ui, resp: &egui::Response, vis: &[Bar], main: Rect, base: &str, on_axis: bool, editing: bool, dt: f32, y_wheel: f32) -> (f64, f64) {
-        // price scale: auto-fit eases toward the visible range (a new high slides the scale instead
-        // of snapping it); another symbol / interval / source, or a jump of more than the range, snaps
-        let (tlo, thi) = padded_range(vis.iter().flat_map(|b| [b.l, b.h]), 0.06, false);
-        let ease_key = (base.to_string(), self.tf, self.src);
-        let (alo, ahi) = match &self.eased {
-            Some((k, lo0, hi0)) if *k == ease_key && (tlo - lo0).abs().max((thi - hi0).abs()) < (thi - tlo) => {
-                let f = 1.0 - (-dt as f64 * 14.0).exp();
-                let (l2, h2) = (lo0 + (tlo - lo0) * f, hi0 + (thi - hi0) * f);
-                // repaint only while still moving visibly (under a hundredth of a pixel: done)
-                if ((l2 - tlo).abs() + (h2 - thi).abs()) / (thi - tlo).max(1e-12) > 1e-4 { ui.ctx().request_repaint(); (l2, h2) } else { (tlo, thi) }
-            }
-            _ => (tlo, thi),
-        };
-        self.eased = Some((ease_key, alo, ahi));
-        let (mut lo, mut hi) = self.y_range.unwrap_or((alo, ahi));
-        if y_wheel != 0.0 {
-            let (mid, half) = ((lo + hi) / 2.0, (hi - lo) / 2.0 * (-y_wheel as f64 * 0.003).exp());
-            (lo, hi) = (mid - half, mid + half);
-            self.y_range = Some((lo, hi));
-        }
-        if resp.dragged() {
-            let (dy, ph) = (resp.drag_delta().y as f64, (main.height() - 54.0).max(50.0) as f64);
-            if on_axis {
-                // drag down stretches the range (candles shrink), up compresses it, around the middle
-                let (mid, half) = ((lo + hi) / 2.0, (hi - lo) / 2.0 * (dy * 0.006).exp());
-                (lo, hi) = (mid - half, mid + half);
-                self.y_range = Some((lo, hi));
-            } else if self.y_range.is_some() && !editing {
-                let shift = dy / ph * (hi - lo);
-                (lo, hi) = (lo + shift, hi + shift);
-                self.y_range = Some((lo, hi));
-            }
-        }
-        if !(hi > lo && lo.is_finite() && hi.is_finite()) { (lo, hi) = (alo, ahi); self.y_range = None; }
-        (lo, hi)
+        // auto-fit toward the visible range (eased; another symbol / interval / source snaps), or the manual range
+        let target = padded_range(vis.iter().flat_map(|b| [b.l, b.h]), 0.06, false);
+        let key = (base.to_string(), self.tf, self.src);
+        charting::interact::price_range(ui, resp, main, target, key, &mut self.eased, &mut self.y_range, on_axis, editing, dt, y_wheel)
     }
 
     /// Replay: picking the start bar (vertical line under the pointer, click to start), then the

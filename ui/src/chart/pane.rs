@@ -22,7 +22,7 @@ impl Pane {
     pub(super) fn perp_only(self) -> bool { matches!(self, Pane::Oi | Pane::Funding | Pane::Basis | Pane::Ls) }
 }
 
-fn y_of(v: f64, lo: f64, hi: f64, r: Rect) -> f32 { r.bottom() - ((v - lo) / (hi - lo)) as f32 * r.height() }
+use charting::pane::{self as cpane, y_of};
 
 /// One venue's line in the premium pane.
 pub(crate) struct Prem {
@@ -167,28 +167,19 @@ impl Chart {
     fn draw_pane(&self, painter: &egui::Painter, p: Pane, r: Rect, bars: &[Bar], i0: usize, i1: usize, fr: &Frame, hi: usize, prem: &[Prem], opt: &std::collections::BTreeMap<i64, depth::agg::OptStat>) -> Option<(f64, f64)> {
         let (vis, hb) = (&bars[i0..=i1], &bars[hi]);
         // the top 18px hold the legend, so lines never run through it
-        let inner = Rect::from_min_max(pos2(r.left(), r.top() + 18.0), pos2(r.right(), r.bottom() - 4.0));
-        let label = |s: String, col: Color32, x: f32| painter.text(pos2(x, r.top() + 10.0), Align2::LEFT_CENTER, s, mono_m(11.5), col).right() + 12.0;
+        let inner = cpane::inner(r);
+        let label = |s: String, col: Color32, x: f32| cpane::label(painter, r, s, col, x);
         // design: pane name 12 medium grey, values tabular
         let title = match p { Pane::Script(i) => self.script_out[i as usize].name.as_str(), _ => t(p.key()) };
-        let mut lx = painter.text(pos2(r.left() + 6.0, r.top() + 10.0), Align2::LEFT_CENTER, title, prop_m(12.0), mu()).right() + 8.0;
+        let mut lx = cpane::title(painter, r, title);
         let scale = std::cell::Cell::new(None);
         let axis = |lo: f64, hi: f64, fmt: &dyn Fn(f64) -> String| {
             scale.set(Some((lo, hi)));
-            painter.text(pos2(r.right() + 8.0, inner.top() + 4.0), Align2::LEFT_CENTER, fmt(hi), mono(11.0), axis_c());
-            painter.text(pos2(r.right() + 8.0, inner.bottom() - 4.0), Align2::LEFT_CENTER, fmt(lo), mono(11.0), axis_c());
+            cpane::axis(painter, r, lo, hi, fmt);
         };
-        let line = |vals: Vec<(usize, f64)>, lo: f64, hi: f64, col: Color32, step: bool| {
-            let mut pts: Vec<Pos2> = vec![];
-            for (k, v) in vals {
-                let pt = pos2(fr.x((i0 + k) as f32), y_of(v, lo, hi, inner));
-                if step { if let Some(prev) = pts.last().copied() { pts.push(pos2(pt.x, prev.y)); } }
-                pts.push(pt);
-            }
-            if pts.len() > 1 { painter.add(egui::Shape::line(pts, Stroke::new(1.3, col))); }
-        };
-        let range = |vals: &[f64], zero: bool| padded_range(vals.iter().copied(), 0.08, zero);
-        let zero_line = |lo: f64, hi: f64| { if lo < 0.0 && hi > 0.0 { painter.hline(r.left()..=r.right(), y_of(0.0, lo, hi, inner), Stroke::new(1.0, super::theme::line())); } };
+        let line = |vals: Vec<(usize, f64)>, lo: f64, hi: f64, col: Color32, step: bool| cpane::line(painter, fr, i0, inner, vals, lo, hi, col, step);
+        let range = cpane::range;
+        let zero_line = |lo: f64, hi: f64| cpane::zero_line(painter, r, lo, hi);
         match p {
             Pane::Vol => {
                 let max = vis.iter().map(|b| b.vol).fold(0.0, f64::max).max(1e-12);
@@ -224,7 +215,7 @@ impl Chart {
                 if vals.is_empty() { return None; }
                 let (lo, hi) = range(&vals.iter().map(|x| x.1).collect::<Vec<_>>(), p == Pane::Basis);
                 zero_line(lo, hi);
-                let col = match p { Pane::Cvd => accent(), Pane::Oi => WARN, Pane::Ls => PURPLE, _ => fg() };
+                let col = match p { Pane::Cvd => accent(), Pane::Oi => warn(), Pane::Ls => purple(), _ => fg() };
                 line(vals, lo, hi, col, false);
                 let fmt: &dyn Fn(f64) -> String = match p { Pane::Ls => &|v| format!("{v:.3}"), Pane::Basis => &|v| format!("{v:+.2}bp"), _ => &fmt_big };
                 if let Some(v) = get(hb) { label(fmt(v), col, lx); }
@@ -273,7 +264,7 @@ impl Chart {
                 let max = vals.iter().fold(0.0f64, |m, v| m.max(v.abs())).max(1e-12);
                 let (lo, hi) = (-max * 1.08, max * 1.08);
                 let zy = y_of(0.0, lo, hi, inner);
-                painter.hline(r.left()..=r.right(), zy, Stroke::new(1.0, super::theme::line()));
+                painter.hline(r.left()..=r.right(), zy, Stroke::new(1.0, super::line()));
                 let bw = (self.bar_w * 0.7).max(1.0);
                 for (k, v) in vals.iter().enumerate().filter(|(_, v)| **v != 0.0) {
                     let x = fr.x((i0 + k) as f32);
@@ -294,10 +285,10 @@ impl Chart {
                 let v = rsi(&closes, self.ind.rsi.max(1));
                 let (lo, hi_) = (0.0, 100.0);
                 let (y70, y30) = (y_of(70.0, lo, hi_, inner), y_of(30.0, lo, hi_, inner));
-                painter.rect_filled(Rect::from_x_y_ranges(r.left()..=r.right(), y70..=y30), 0, PURPLE.gamma_multiply(0.07));
-                for yy in [y70, y30, y_of(50.0, lo, hi_, inner)] { painter.hline(r.left()..=r.right(), yy, Stroke::new(1.0, super::theme::line())); }
-                line((i0..=i1).filter_map(|i| Some((i - i0, v[i]?))).collect(), lo, hi_, PURPLE, false);
-                if let Some(x) = v[hi] { label(format!("{}  {x:.2}", self.ind.rsi), PURPLE, lx); }
+                painter.rect_filled(Rect::from_x_y_ranges(r.left()..=r.right(), y70..=y30), 0, purple().gamma_multiply(0.07));
+                for yy in [y70, y30, y_of(50.0, lo, hi_, inner)] { painter.hline(r.left()..=r.right(), yy, Stroke::new(1.0, super::line())); }
+                line((i0..=i1).filter_map(|i| Some((i - i0, v[i]?))).collect(), lo, hi_, purple(), false);
+                if let Some(x) = v[hi] { label(format!("{}  {x:.2}", self.ind.rsi), purple(), lx); }
                 axis(lo, hi_, &|x| format!("{x:.0}"));
             }
             Pane::Macd => {
@@ -309,7 +300,7 @@ impl Chart {
                 let max = seen.iter().fold(0.0f64, |a, (l, s, h)| a.max(l.abs()).max(s.abs()).max(h.abs())).max(1e-12);
                 let (lo, hi_) = (-max * 1.08, max * 1.08);
                 let zy = y_of(0.0, lo, hi_, inner);
-                painter.hline(r.left()..=r.right(), zy, Stroke::new(1.0, super::theme::line()));
+                painter.hline(r.left()..=r.right(), zy, Stroke::new(1.0, super::line()));
                 let bw = (self.bar_w * 0.7).max(1.0);
                 // histogram: bright while growing away from zero, faded while shrinking (TradingView)
                 for i in i0..=i1 {
@@ -337,15 +328,15 @@ impl Chart {
                 if all.is_empty() { return None; }
                 let (lo, hi) = range(&all, true);
                 zero_line(lo, hi);
-                line(sett, lo, hi, WARN, true);
+                line(sett, lo, hi, warn(), true);
                 line(pred, lo, hi, accent(), false);
                 if let Some(v) = hb.funding_h { lx = label(format!("{} {:+.4}", t("chart.funding_pred"), v * 1e4), accent(), lx); }
-                if let Some(v) = hb.funding_settled { label(format!("{} {:+.4} bp/h", t("chart.funding_settled"), v * 1e4), WARN, lx); }
+                if let Some(v) = hb.funding_settled { label(format!("{} {:+.4} bp/h", t("chart.funding_settled"), v * 1e4), warn(), lx); }
                 axis(lo, hi, &|v| format!("{v:+.3}"));
             }
             Pane::Script(i) => {
                 let (o, hov) = (&self.script_out[i as usize], hi);
-                if let Some(e) = &o.err { label(e.clone(), WARN, lx); return None; }
+                if let Some(e) = &o.err { label(e.clone(), warn(), lx); return None; }
                 let seen: Vec<f64> = o.plots.iter().flat_map(|p| p.vals[i0..=i1].iter().copied().filter(|v| v.is_finite())).collect();
                 if seen.is_empty() { return None; }
                 let (lo, hi) = range(&seen, o.plots.iter().any(|p| p.hist));
@@ -353,7 +344,7 @@ impl Chart {
                 let zy = y_of(0.0, lo, hi, inner);
                 let bw = (self.bar_w * 0.7).max(1.0);
                 for (k, pl) in o.plots.iter().enumerate() {
-                    let col = pl.color.as_deref().and_then(script_color).unwrap_or_else(|| [accent(), WARN, PURPLE, up(), dn()][k % 5]);
+                    let col = pl.color.as_deref().and_then(script_color).unwrap_or_else(|| [accent(), warn(), purple(), up(), dn()][k % 5]);
                     if pl.hist {
                         for (j, v) in pl.vals[i0..=i1].iter().enumerate().filter(|(_, v)| v.is_finite() && **v != 0.0) {
                             let (x, yv) = (fr.x((i0 + j) as f32), y_of(*v, lo, hi, inner));
@@ -384,7 +375,7 @@ impl Chart {
                 if vals.is_empty() { label(t("chart.opt_loading").to_string(), dim(), lx); return None; }
                 let (lo, hi) = range(&vals.iter().map(|x| x.1).collect::<Vec<_>>(), p == Pane::Skew);
                 zero_line(lo, hi);
-                let col = if p == Pane::Iv { WARN } else if get(hb).unwrap_or(0.0) >= 0.0 { up() } else { dn() };
+                let col = if p == Pane::Iv { warn() } else if get(hb).unwrap_or(0.0) >= 0.0 { up() } else { dn() };
                 line(vals, lo, hi, col, false);
                 if let Some(v) = get(hb) { label(if p == Pane::Iv { format!("{v:.2}%") } else { format!("{v:+.2}") }, col, lx); }
                 axis(lo, hi, &|v| format!("{v:.1}"));
@@ -397,7 +388,7 @@ impl Chart {
 /// A script's color: "#rrggbb" or a theme name (follows light / dark).
 fn script_color(s: &str) -> Option<Color32> {
     Some(match s {
-        "up" => up(), "down" => dn(), "accent" => accent(), "warn" => WARN, "purple" => PURPLE, "fg" => fg(), "muted" => mu(),
+        "up" => up(), "down" => dn(), "accent" => accent(), "warn" => warn(), "purple" => purple(), "fg" => fg(), "muted" => mu(),
         _ => {
             let h = u32::from_str_radix(s.strip_prefix('#')?, 16).ok().filter(|_| s.len() == 7)?;
             Color32::from_rgb((h >> 16) as u8, (h >> 8) as u8, h as u8)

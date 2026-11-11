@@ -810,6 +810,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "charting"
+version = "0.1.0"
+source = "git+https://github.com/ChloePike/charting?rev=582707ad3bb1413e0c338eff841391b9ad4ac542#582707ad3bb1413e0c338eff841391b9ad4ac542"
+dependencies = [
+ "egui",
+ "serde",
+]
+
+[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5561,6 +5570,7 @@ name = "t1-ui"
 version = "0.4.6"
 dependencies = [
  "anyhow",
+ "charting",
  "depth",
  "dioxus-devtools",
  "eframe",
