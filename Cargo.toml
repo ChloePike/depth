@@ -12,6 +12,7 @@ repository = "https://github.com/ChloePike/depth"
 [dependencies]
 anyhow = "1.0.104"
 base64 = "0.23.1"
+crypto-orderbook = { version = "0.5.2", default-features = false }
 flate2 = "1.1.10"
 futures-util = { version = "0.3.34", features = ["sink"] }
 hex = "0.4.3"

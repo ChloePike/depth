@@ -14,6 +14,7 @@
 use crate::ws::{self, Frame, Spec};
 use crate::*;
 use crate::ws::run_resync;
+use crypto_orderbook::{venue::{KrakenSync, VenueSync}, OrderBook};
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -33,16 +34,24 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
         Market::Margin => vec![],
         Market::Spot => vec![tokio::spawn(async move {
             // ponytail: a failed lookup (network) also falls back to USD
-            let listed = ws::get_json(&format!("https://api.kraken.com/0/public/AssetPairs?pair={xbt}{quote}")).await
-                .is_ok_and(|v| v["result"].as_object().is_some_and(|r| !r.is_empty()));
+            let pair = |v: Value| v["result"].as_object().and_then(|r| r.values().next().cloned());
+            let mut info = ws::get_json(&format!("https://api.kraken.com/0/public/AssetPairs?pair={xbt}{quote}")).await.ok().and_then(pair);
+            let listed = info.is_some();
+            if !listed { info = ws::get_json(&format!("https://api.kraken.com/0/public/AssetPairs?pair={xbt}USD")).await.ok().and_then(pair); }
             let sym = format!("{base}/{}", if listed { &quote } else { "USD" });
-            let spec = Spec::new("kraken spot", "wss://ws.kraken.com/v2")
-                .sub(json!({"method": "subscribe", "params": {"channel": "trade", "symbol": [&sym]}}).to_string())
-                .sub(json!({"method": "subscribe", "params": {"channel": "book", "symbol": [&sym], "depth": DEPTH}}).to_string())
-                .sub(json!({"method": "subscribe", "params": {"channel": "ticker", "symbol": [&sym], "event_trigger": "bbo"}}).to_string())
+            // the checksum is written with the pair's price and lot decimals; without them it is not checked
+            let prec = info.and_then(|p| Some((p["pair_decimals"].as_u64()? as u32, p["lot_decimals"].as_u64()? as u32)));
+            let s = sym.clone();
+            let spec = move || Spec::new("kraken spot", "wss://ws.kraken.com/v2")
+                .sub(json!({"method": "subscribe", "params": {"channel": "trade", "symbol": [&s]}}).to_string())
+                .sub(json!({"method": "subscribe", "params": {"channel": "book", "symbol": [&s], "depth": DEPTH}}).to_string())
+                .sub(json!({"method": "subscribe", "params": {"channel": "ticker", "symbol": [&s], "event_trigger": "bbo"}}).to_string())
                 .ping(Duration::from_secs(30), r#"{"method":"ping"}"#);
-            let mut book = Book::default();
-            ws::run(spec, move |f| on_spot(&e, &sym, &mut book, f)).await
+            run_resync(spec, move || {
+                let (e, sym, mut book) = (e.clone(), sym.clone(), Book::default());
+                let mut check = prec.map(|(p, q)| (KrakenSync::new(sym.as_str(), DEPTH, p, q), OrderBook::new()));
+                move |f| on_spot(&e, &sym, &mut book, &mut check, f)
+            }).await
         })],
         Market::Perp => {
             let sym = format!("PF_{xbt}USD");
@@ -68,10 +77,12 @@ fn obj_levels(v: &Value) -> Vec<(f64, f64)> {
 
 fn rfc_ms(v: &Value) -> i64 { v.as_str().map(iso_ms).unwrap_or(0) }
 
-// ponytail: book checksum (CRC32 of top 10) is not verified; add it if books drift in practice
-fn on_spot(e: &Emit, sym: &str, book: &mut Book, f: Frame) {
-    let Frame::Text(t) = f else { return };
-    let Ok(v) = serde_json::from_str::<Value>(t) else { return };
+/// returns false when Kraken's book checksum (CRC32 of the top 10) does not match, so the session
+/// restarts with a fresh snapshot instead of drawing a drifted book
+fn on_spot(e: &Emit, sym: &str, book: &mut Book, check: &mut Option<(KrakenSync, OrderBook)>, f: Frame) -> bool {
+    let Frame::Text(t) = f else { return true };
+    if let Some((sync, ob)) = check && sync.on_frame(ob, t).is_ok_and(|o| o.is_resync()) { return false; }
+    let Ok(v) = serde_json::from_str::<Value>(t) else { return true };
     for d in v["data"].as_array().into_iter().flatten() {
         match v["channel"].as_str().unwrap_or("") {
             "trade" => {
@@ -94,6 +105,7 @@ fn on_spot(e: &Emit, sym: &str, book: &mut Book, f: Frame) {
             _ => {}
         }
     }
+    true
 }
 
 /// returns false on a book sequence gap so the session restarts with a fresh snapshot
@@ -277,3 +289,28 @@ async fn perp_history(sym: &str, tf: u32, res: &str, start: i64, end: i64, bars:
     Ok(History { klines: continuous_tf(klines, end, bars, tf), oi, funding, long_short: ls, taker })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    /// BTC/USD frames recorded from ws.kraken.com/v2 at depth 10 (price 1, lot 8 decimals)
+    const SNAP: &str = r#"{"channel":"book","type":"snapshot","data":[{"symbol":"BTC/USD","bids":[{"price":64259.9,"qty":0.45647182},{"price":64259.8,"qty":0.16056880},{"price":64259.7,"qty":0.88401733},{"price":64259.6,"qty":1.40135277},{"price":64259.0,"qty":0.00006120},{"price":64258.7,"qty":0.01405414},{"price":64258.4,"qty":0.38905381},{"price":64257.1,"qty":0.38906167},{"price":64255.3,"qty":0.11613834},{"price":64255.2,"qty":0.50448797}],"asks":[{"price":64260.0,"qty":0.45775163},{"price":64261.1,"qty":0.00030000},{"price":64262.1,"qty":0.00006120},{"price":64262.8,"qty":0.00013000},{"price":64265.3,"qty":0.00006120},{"price":64267.5,"qty":0.23339958},{"price":64270.0,"qty":0.00549027},{"price":64270.1,"qty":0.38898364},{"price":64271.1,"qty":0.00040000},{"price":64272.4,"qty":0.03111755}],"checksum":3545495236,"timestamp":"2026-11-15T06:13:48.184329Z"}]}"#;
+    const UPD: &str = r#"{"channel":"book","type":"update","data":[{"symbol":"BTC/USD","bids":[{"price":64259.9,"qty":0.45763895}],"asks":[],"checksum":3229962208,"timestamp":"2026-11-15T06:13:48.399101Z"}]}"#;
+
+    fn books(frames: &[&str]) -> (Vec<bool>, usize) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let e = Emit { ex: Exchange::Kraken, market: Market::Spot, tx };
+        let (mut book, mut check) = (Book::default(), Some((KrakenSync::new("BTC/USD", DEPTH, 1, 8), OrderBook::new())));
+        let ok = frames.iter().map(|t| on_spot(&e, "BTC/USD", &mut book, &mut check, Frame::Text(t))).collect();
+        (ok, std::iter::from_fn(|| rx.try_recv().ok()).filter(|m| matches!(m.ev, Event::Book { .. })).count())
+    }
+
+    #[test]
+    fn checksum_passes_live_frames_and_drops_a_drifted_book() {
+        assert_eq!(books(&[SNAP, UPD]), (vec![true, true], 2));
+        // the same update with a different size at the top bid: the book no longer matches Kraken's
+        let drifted = UPD.replace("0.45763895", "0.45763894");
+        assert_eq!(books(&[SNAP, &drifted]), (vec![true, false], 1));
+    }
+}
