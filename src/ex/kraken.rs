@@ -33,16 +33,23 @@ pub fn spawn(sub: &Sub, tx: Tx) -> Vec<JoinHandle<()>> {
         Market::Margin => vec![],
         Market::Spot => vec![tokio::spawn(async move {
             // ponytail: a failed lookup (network) also falls back to USD
-            let listed = ws::get_json(&format!("https://api.kraken.com/0/public/AssetPairs?pair={xbt}{quote}")).await
-                .is_ok_and(|v| v["result"].as_object().is_some_and(|r| !r.is_empty()));
+            let pair = |v: Value| v["result"].as_object().and_then(|r| r.values().next().cloned());
+            let mut info = ws::get_json(&format!("https://api.kraken.com/0/public/AssetPairs?pair={xbt}{quote}")).await.ok().and_then(pair);
+            let listed = info.is_some();
+            if !listed { info = ws::get_json(&format!("https://api.kraken.com/0/public/AssetPairs?pair={xbt}USD")).await.ok().and_then(pair); }
             let sym = format!("{base}/{}", if listed { &quote } else { "USD" });
-            let spec = Spec::new("kraken spot", "wss://ws.kraken.com/v2")
-                .sub(json!({"method": "subscribe", "params": {"channel": "trade", "symbol": [&sym]}}).to_string())
-                .sub(json!({"method": "subscribe", "params": {"channel": "book", "symbol": [&sym], "depth": DEPTH}}).to_string())
-                .sub(json!({"method": "subscribe", "params": {"channel": "ticker", "symbol": [&sym], "event_trigger": "bbo"}}).to_string())
+            // the checksum is written with the pair's price and lot decimals; without them it is not checked
+            let prec = info.and_then(|p| Some((p["pair_decimals"].as_u64()? as usize, p["lot_decimals"].as_u64()? as usize)));
+            let s = sym.clone();
+            let spec = move || Spec::new("kraken spot", "wss://ws.kraken.com/v2")
+                .sub(json!({"method": "subscribe", "params": {"channel": "trade", "symbol": [&s]}}).to_string())
+                .sub(json!({"method": "subscribe", "params": {"channel": "book", "symbol": [&s], "depth": DEPTH}}).to_string())
+                .sub(json!({"method": "subscribe", "params": {"channel": "ticker", "symbol": [&s], "event_trigger": "bbo"}}).to_string())
                 .ping(Duration::from_secs(30), r#"{"method":"ping"}"#);
-            let mut book = Book::default();
-            ws::run(spec, move |f| on_spot(&e, &sym, &mut book, f)).await
+            run_resync(spec, move || {
+                let (e, sym, mut book, mut prec) = (e.clone(), sym.clone(), Book::default(), prec);
+                move |f| on_spot(&e, &sym, &mut book, &mut prec, f)
+            }).await
         })],
         Market::Perp => {
             let sym = format!("PF_{xbt}USD");
@@ -68,10 +75,27 @@ fn obj_levels(v: &Value) -> Vec<(f64, f64)> {
 
 fn rfc_ms(v: &Value) -> i64 { v.as_str().map(iso_ms).unwrap_or(0) }
 
-// ponytail: book checksum (CRC32 of top 10) is not verified; add it if books drift in practice
-fn on_spot(e: &Emit, sym: &str, book: &mut Book, f: Frame) {
-    let Frame::Text(t) = f else { return };
-    let Ok(v) = serde_json::from_str::<Value>(t) else { return };
+/// Kraken's v2 book checksum: CRC32 of the top 10 asks (low to high) then the top 10 bids (high to low),
+/// each price then qty written with the pair's decimals, the point and leading zeros removed.
+// ponytail: f64 formatting is exact up to ~15 significant digits; a pair past that fails on the snapshot,
+// which turns the check off for the session (see on_spot)
+fn checksum(book: &Book, (pd, qd): (usize, usize)) -> u32 {
+    let mut crc = flate2::Crc::new();
+    for (p, q) in book.asks().take(10).chain(book.bids().take(10)) {
+        for (v, dp) in [(p, pd), (q, qd)] {
+            let s = format!("{v:.dp$}").replace('.', "");
+            crc.update(s.trim_start_matches('0').as_bytes());
+        }
+    }
+    crc.sum()
+}
+
+/// returns false when the book no longer matches Kraken's checksum, so the session restarts with a fresh
+/// snapshot instead of drawing a drifted book. A snapshot that fails means our digits are wrong, not the
+/// book: the check is turned off for this session rather than reconnecting in a loop.
+fn on_spot(e: &Emit, sym: &str, book: &mut Book, prec: &mut Option<(usize, usize)>, f: Frame) -> bool {
+    let Frame::Text(t) = f else { return true };
+    let Ok(v) = serde_json::from_str::<Value>(t) else { return true };
     for d in v["data"].as_array().into_iter().flatten() {
         match v["channel"].as_str().unwrap_or("") {
             "trade" => {
@@ -86,6 +110,11 @@ fn on_spot(e: &Emit, sym: &str, book: &mut Book, f: Frame) {
                 let out_b: Vec<_> = book.bids().skip(DEPTH).map(|(p, _)| (p, 0.0)).collect();
                 let out_a: Vec<_> = book.asks().skip(DEPTH).map(|(p, _)| (p, 0.0)).collect();
                 book.apply(false, &out_b, &out_a);
+                if let (Some(pr), Some(want)) = (*prec, d["checksum"].as_u64()) && checksum(book, pr) as u64 != want {
+                    if !snapshot { return false }
+                    eprintln!("[kraken spot] {sym} snapshot checksum mismatch, not checking this session");
+                    *prec = None;
+                }
                 if snapshot { bids = book.bids().collect(); asks = book.asks().collect(); } else { bids.extend(out_b); asks.extend(out_a); }
                 e.send(sym, rfc_ms(&d["timestamp"]), Event::Book { snapshot, bids, asks });
             }
@@ -94,6 +123,7 @@ fn on_spot(e: &Emit, sym: &str, book: &mut Book, f: Frame) {
             _ => {}
         }
     }
+    true
 }
 
 /// returns false on a book sequence gap so the session restarts with a fresh snapshot
@@ -277,3 +307,31 @@ async fn perp_history(sym: &str, tf: u32, res: &str, start: i64, end: i64, bars:
     Ok(History { klines: continuous_tf(klines, end, bars, tf), oi, funding, long_short: ls, taker })
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// BTC/USD frames recorded from ws.kraken.com/v2 at depth 10 (price 1, lot 8 decimals)
+    const SNAP: &str = r#"{"channel":"book","type":"snapshot","data":[{"symbol":"BTC/USD","bids":[{"price":64259.9,"qty":0.45647182},{"price":64259.8,"qty":0.16056880},{"price":64259.7,"qty":0.88401733},{"price":64259.6,"qty":1.40135277},{"price":64259.0,"qty":0.00006120},{"price":64258.7,"qty":0.01405414},{"price":64258.4,"qty":0.38905381},{"price":64257.1,"qty":0.38906167},{"price":64255.3,"qty":0.11613834},{"price":64255.2,"qty":0.50448797}],"asks":[{"price":64260.0,"qty":0.45775163},{"price":64261.1,"qty":0.00030000},{"price":64262.1,"qty":0.00006120},{"price":64262.8,"qty":0.00013000},{"price":64265.3,"qty":0.00006120},{"price":64267.5,"qty":0.23339958},{"price":64270.0,"qty":0.00549027},{"price":64270.1,"qty":0.38898364},{"price":64271.1,"qty":0.00040000},{"price":64272.4,"qty":0.03111755}],"checksum":3545495236,"timestamp":"2026-11-15T06:13:48.184329Z"}]}"#;
+    const UPD: &str = r#"{"channel":"book","type":"update","data":[{"symbol":"BTC/USD","bids":[{"price":64259.9,"qty":0.45763895}],"asks":[],"checksum":3229962208,"timestamp":"2026-11-15T06:13:48.399101Z"}]}"#;
+
+    /// what on_spot returns per frame, and how many books it sent
+    fn feed(frames: &[&str], prec: (usize, usize)) -> (Vec<bool>, usize) {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let e = Emit { ex: Exchange::Kraken, market: Market::Spot, tx };
+        let (mut book, mut prec) = (Book::default(), Some(prec));
+        let ok = frames.iter().map(|t| on_spot(&e, "BTC/USD", &mut book, &mut prec, Frame::Text(t))).collect();
+        (ok, std::iter::from_fn(|| rx.try_recv().ok()).filter(|m| matches!(m.ev, Event::Book { .. })).count())
+    }
+
+    #[test]
+    fn checksum_passes_live_frames_and_drops_a_drifted_book() {
+        assert_eq!(feed(&[SNAP, UPD], (1, 8)), (vec![true, true], 2));
+        // one satoshi off at the top bid: restart before that book is sent
+        let drifted = UPD.replace("0.45763895", "0.45763894");
+        assert_eq!(feed(&[SNAP, &drifted], (1, 8)), (vec![true, false], 1));
+        // wrong decimals fail on the snapshot: the check is dropped instead of reconnecting forever
+        assert_eq!(feed(&[SNAP, &drifted], (2, 8)), (vec![true, true], 2));
+    }
+}
